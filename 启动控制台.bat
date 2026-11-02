@@ -1,28 +1,28 @@
 @echo off
 chcp 65001 >nul
-setlocal
+title 鲸鱼娘 · 控制台
 cd /d "%~dp0"
 
-rem 如果还没有卡，先造一张假数据的示例卡
-if not exist "card.db" if not exist "demo\demo_card.db" (
-  echo [1/3] 没有找到卡，正在生成示例卡...
-  python tools\make_demo_card.py
-  set WHALE_DB=demo\demo_card.db
-)
+rem 优先用随卡走的便携 Python（runtime\python），没有才用系统 python。
+set "PY=python"
+if exist "%~dp0runtime\python\python.exe" set "PY=%~dp0runtime\python\python.exe"
 
-rem 服务没起就拉起来（独立进程，关掉这个窗口也不影响）
-echo [2/3] 检查心智服务...
-python bridge.py health
-if errorlevel 1 (
-  echo 服务启动失败，看看上面的报错。
-  pause
-  exit /b 1
-)
+echo.
+echo   [1/3] 检查心智服务（8848）…
+"%PY%" bridge.py health >nul 2>&1
+if errorlevel 1 goto :nopython
 
-rem 开浏览器；用 start 让窗口不占着脚本
-echo [3/3] 打开控制台...
-start "" msedge --new-window "http://127.0.0.1:8848/console"
-if errorlevel 1 start "" "http://127.0.0.1:8848/console"
-
+echo   [2/3] 服务就绪，正在打开控制台…
+start "" msedge --new-window --start-fullscreen "http://127.0.0.1:8848/console"
+echo   [3/3] 好了。这个窗口可以关掉，服务是独立进程，不会跟着退。
+echo.
 ping -n 3 127.0.0.1 >nul
 exit /b 0
+
+:nopython
+echo.
+echo   [!] 启动失败：要么没有可用的 python，要么 mind_server 起不来。
+echo       手动看一眼： "%PY%" bridge.py health
+echo.
+pause
+exit /b 1

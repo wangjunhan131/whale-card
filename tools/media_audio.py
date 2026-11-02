@@ -34,7 +34,16 @@ if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
 DEFAULT_DB = os.environ.get("WHALE_DB") or os.path.join(ROOT, "card.db")
-FFMPEG = os.environ.get("WHALE_FFMPEG") or shutil.which("ffmpeg") or "ffmpeg"
+
+
+def _bundled(name):
+    """随卡走的 ffmpeg 优先：<卡目录>/runtime/ffmpeg/<name>.exe。"""
+    cand = os.path.join(ROOT, "runtime", "ffmpeg", name + ".exe")
+    return cand if os.path.exists(cand) else None
+
+
+FFMPEG = (os.environ.get("WHALE_FFMPEG") or _bundled("ffmpeg")
+          or shutil.which("ffmpeg") or "ffmpeg")
 
 
 def extract_wav(src, dst):

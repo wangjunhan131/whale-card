@@ -1,0 +1,20 @@
+feat(portable): 运行环境跟着卡走（便携 Python + ffmpeg）
+
+文件全了不等于能跑：新电脑未必有 Python，视频/语音要 ffmpeg。这两样原来都在机器上，不在卡里。
+
+新增 `tools/install_runtime.py`：
+- 下 Windows embeddable Python（默认华为镜像，缓存在 ~/.cache/whale-runtime）
+- 解压到 `<包>/runtime/python`，改写 `python3xx._pth` 打开 `Lib\site-packages`
+- 从本机 site-packages 拷 numpy / numpy.libs / psutil 过去（要求同平台同小版本）
+- 拷 ffmpeg.exe / ffprobe.exe 到 `<包>/runtime/ffmpeg`
+- 自检 `import numpy, psutil, sqlite3`，写 `runtime/README.txt`
+
+`启动控制台.bat` 改成优先用 `%~dp0runtime\python\python.exe`，没有才回落到系统 python。
+
+`tools/media_video.py` / `tools/media_audio.py` 解析 ffmpeg 的顺序改成：
+`WHALE_FFMPEG` → `<卡目录>/runtime/ffmpeg/ffmpeg.exe` → PATH。卡在哪，工具就在哪，不认盘符。
+
+实测（把运行环境塞进真 U 盘后，用 U 盘自带 python 起服务，端口 8856）：
+`bridge.py health` → 563 条 / 盖章 / 链完好 / 出生证完好 / 锚 ok；
+`/context` 问「你记得我最爱吃什么吗」→ 14.4 秒返回答复，开头是【我是谁】和她自己的自述；
+`/health` → semantic 768 维、usable 1.0。`portable verify` 126 文件全对。
