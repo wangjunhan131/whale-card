@@ -1709,8 +1709,12 @@ class MemoryCard:
 
         c = self.db.cursor()
         # a) 锚点整体前移：让 weight_now 的 age 少算 shift
+        #    但**不许推到未来**。原来直接 t_anchor+shift：如果一条记忆是在睡前
+        #    刚写下的，锚会跑到 now 之后好几十小时（实测 94 条被推到 +63.9h），
+        #    于是 age 变成负数、这些记忆这几天一点都不衰减 —— 冻结变成了"长生"。
+        #    夹到 now 为止：冻结的是"那段睡眠"，不是"这条记忆的寿命"。
         if shift > 0.5:
-            c.execute("UPDATE mem SET t_anchor = t_anchor + ?", (shift,))
+            c.execute("UPDATE mem SET t_anchor = MIN(t_anchor + ?, ?)", (shift, now))
         # b) 细节补衰减（跟 tick 里第 3 段同一套 k 和 scale）
         if eff > 0.5:
             rows = c.execute(
@@ -2341,6 +2345,16 @@ class MemoryCard:
         n_settled = self._settle_recall_events()
         if n_settled:
             events.append((0, "settle_recall", n_settled))
+        # 0.1) 清掉早就结算完的召回事件（只 settled 不删，表会一直涨：
+        #      实测两天就 2226 行、其中 1763 行来自同一天）
+        try:
+            n_gone = c.execute(
+                "DELETE FROM recall_event WHERE settled=1 AND ts < ?",
+                (now - 30 * DAY,)).rowcount
+            if n_gone:
+                events.append((0, "recall_event_pruned", n_gone))
+        except Exception:
+            pass
 
         # 0.5) 心境回归（V5.0 T2-3）：时间一过，不管发生什么，都往中性漂
         if dt_raw > 0:

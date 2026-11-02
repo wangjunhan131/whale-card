@@ -1,14 +1,19 @@
-feat(console): 搬家与备份面板 + 两处测试判据修正
+fix: 全身检查抓到的四个真问题（冻结变长生 / 事件表只涨不清 / 测试污染真卡 / 体检缺口）
 
-控制台（状态总览底部新增「PORTABLE / 搬家与备份」卡）：
-- console.card_integrity()：只读读两份锚（卡内 anchor.json / 卡外 ~/.dsh/anchors）
-  与卡里链头，现场算 ok / rollback / replaced / first —— 刻意不复用 anchor.check()，
-  因为那条路会顺手写锚，控制台每 15 秒刷一次不能动锚
-- 同时显示可移植包清单（文件数、体积、wal 快照）与落地信息（WHEREAMI）
-- 前端：4 个 tile + 一行 ledger，副标题点明「还没上写入闸」
+1) wake_up 的时间补偿会把 t_anchor 推到未来
+   实测 95 条记忆的锚比现在晚 63.9 小时（同一次长睡眠造成），age 变负数
+   于是这几天一点都不衰减 —— 「冻结睡眠」变成了「这条记忆长生」。
+   改成 MIN(t_anchor + shift, now)，并对真卡做了一次性修复（95 → 0）。
 
-测试判据修正（不是功能退步，是量错了东西）：
-- test_t61.py A4「两天后权重下降」：原来比较两次 recall 出来的权重，但 tick 会结算
-  前面 A1~A3 留在 recall_event 里的"被想起就加强"，于是出现"两天后反而变大"。
-  改成拿同一条记忆、同一个 t_anchor，比 now 与 now+2d 的纯衰减值 → 48/48 过
-- tests/test_t67.py：加 ROOT 到 sys.path，从仓库根直接跑也能找到 card2
+2) recall_event 只 mark settled、从不删除
+   两天就涨到 2226 行。tick 里加清理：settled=1 且超过 30 天的删掉，
+   清了多少写进 tick 事件（recall_event_pruned）。
+
+3) test_t43 直接对真卡 remember()，每跑一次往她的卡里塞一条
+   「验收临时记忆：xxx」且不删 —— 体检时抓到真卡里积了 15 条。
+   改成先 sqlite backup 一份临时副本再跑；这 15 条已走 _forget_row 清掉
+   （台账留原因），跑完真卡仍是 560 条、无残留。
+
+4) 新增 tools/health_audit.py：一次跑完编译 / 库内异常 / 链 / 出生证 / 媒体 /
+   锚 / selfcheck / 接口 / 硬编码盘符，输出「问题 + 提醒」两栏。
+   顺带把 whale_mcp.py 文档里的绝对路径示例改成占位符。
