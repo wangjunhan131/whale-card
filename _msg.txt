@@ -1,0 +1,8 @@
+feat(portable): 一键搬家 —— plan/build/verify/land + 锚的两条新判定
+
+- tools/portable.py：体检式造包（停服务前置检查、WAL checkpoint、sha256 清单、
+  卡内/卡外锚一起带走）、验包、全新机器落地（按新路径写回卡外锚、改写卡槽状态）
+- anchor.py check()：补两条判定 —— head_seq 倒退报 rollback、
+  条数变多但 head_seq 没前进报 replaced（原来卡一长大就不比对链头）
+- tests/test_t72.py：12 项验收，含「故意把锚改成未来 / 链头改坏」的破坏性用例
+- docs/PORTABLE.md：搬家四步、三样绑机器的东西、还差的诚实清单

@@ -192,6 +192,19 @@ def check(db_path=None, verbose=True):
     a_count = int(best.get("count") or 0)
     a_hash = best.get("head_hash") or ""
     a_ts = float(best.get("last_ts") or 0)
+    a_seq = int(best.get("head_seq") or 0)
+    c_seq = int(state.get("head_seq") or 0)
+
+    # ① 链头序号倒退 —— 比"条数变少"更早一步的警报。
+    #    有人把卡的 timeline 换成一串更短但同样多的记录时，条数可能骗得过去，
+    #    seq 却接不上：新的头一定比旧的头小。
+    if a_seq and c_seq and c_seq < a_seq:
+        return {
+            "verdict": "rollback", "ok": False, "state": state, "anchor": best,
+            "reason": "这张卡被回滚过：卡里的链头到 seq=%d 就断了，锚记的是 seq=%d"
+                      % (c_seq, a_seq),
+            "lost_since": a_ts,
+        }
 
     if state["count"] < a_count:
         return {
@@ -205,6 +218,16 @@ def check(db_path=None, verbose=True):
             "verdict": "replaced", "ok": False, "state": state, "anchor": best,
             "reason": "条数一样但链头不一样：卡被换成了另一张（锚 %s… vs 卡 %s…）"
                       % (a_hash[:12], (state["head_hash"] or "")[:12]),
+        }
+    # ② 条数变多了，但链头序号没跟着前进 —— 多出来的那些不是接在原来的链后面的。
+    #    正常长大时 seq 一定比锚大（每加一条事件 seq 就 +1），所以这里卡住的是"换了张卡"。
+    if (state["count"] > a_count and a_seq and c_seq
+            and c_seq <= a_seq and state["head_hash"] != a_hash):
+        return {
+            "verdict": "replaced", "ok": False, "state": state, "anchor": best,
+            "reason": "条数从 %d 涨到 %d，但链头序号没前进（锚 seq=%d，卡 seq=%d）："
+                      "多出来的不是原来那条链上的"
+                      % (a_count, state["count"], a_seq, c_seq),
         }
     return {"verdict": "ok", "ok": True, "state": state, "anchor": best,
             "reason": "锚一致（锚 %d 条，卡 %d 条）" % (a_count, state["count"])}
