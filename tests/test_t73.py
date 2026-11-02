@@ -95,7 +95,14 @@ ok("注册表文件在卡目录里", os.path.exists(os.path.join(E, "DISKS.json"
 print("\n[6] 状态：能列出主盘、备份、在线与否")
 st = disks.status(os.path.join(tmp, "A"))
 roles = [d["role"] for d in st["disks"]]
-ok("有主盘行", "main" in roles)
+# A 在这一步之前被换过主备，它现在可能是"备份（这台机器）"——
+# 真正要保证的是：本机那张卡一定在列表里，且角色和它自己的身份证一致。
+me = st["disks"][0]
+ok("有本机行", me.get("card_dir") == os.path.abspath(os.path.join(tmp, "A")),
+   me.get("card_dir"))
+ok("本机角色跟着身份证",
+   me.get("role") == (disks.read_role(os.path.join(tmp, "A")) or {}).get("role", "main"),
+   me.get("role"))
 ok("有备份行", "backup" in roles, roles)
 ok("每行都有 serial", all(d.get("serial") is not None for d in st["disks"]), 
    [d.get("serial") for d in st["disks"]])

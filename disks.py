@@ -13,6 +13,8 @@
    热拷会静默丢掉 WAL 里还没合并的写入 —— 这事 11-02 实测过（14.1 MB）。
 """
 import ctypes
+import hashlib
+import io
 import json
 import os
 import shutil
@@ -263,18 +265,25 @@ def status(card_dir=HERE):
     # 主盘
     drv = os.path.splitdrive(os.path.abspath(card_dir))[0] + "\\"
     mserial = _disk_key(card_dir)
-    rows.append({"serial": mserial, "role": ROLE_MAIN, "number": None,
+    # 这台机器手上这张卡是主是备，得看它自己的身份证 —— 换过主备之后就未必是主盘了
+    _myrole = read_role(card_dir) or {}
+    _ismain = (_myrole.get("role") or ROLE_MAIN) == ROLE_MAIN
+    rows.append({"serial": mserial, "role": ROLE_MAIN if _ismain else ROLE_BACKUP,
+                 "number": None if _ismain else _myrole.get("number"),
                  "online": True, "card_dir": os.path.abspath(card_dir),
                  "volume_label": (_volinfo(drv) or {}).get("label"),
                  "instance": main.get("instance"), "mem": main.get("mem"),
                  "head_seq": main.get("head_seq"), "head_hash": main.get("head_hash"),
-                 "same_chain": True, "label": "主盘（这台机器）"})
+                 "same_chain": True, "behind": 0,
+                 "label": "主盘（这台机器）" if _ismain
+                          else "备份 #%s（这台机器）" % _myrole.get("number")})
     # 注册表里认识的备份盘
     for serial, v in reg["disks"].items():
         if v.get("role") == ROLE_MAIN:
             continue
         vol = by_serial.get(serial) or by_serial.get((serial or "").split("::")[0])
-        online = bool(vol and vol.get("card_dir"))
+        online = bool(v.get("card_dir") and os.path.exists(
+            os.path.join(v["card_dir"], "card.db")))
         fp = card_fp(os.path.join(v["card_dir"], "card.db")) if v.get("card_dir") else {}
         same = bool(fp.get("head_hash") and main.get("head_hash")
                     and _prefix_match(fp, main))
@@ -352,6 +361,52 @@ def _guard(card_dir, what):
             "service_running": service_running()}
 
 
+def _sha256(path):
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _refresh_manifest_hash(bundle, names):
+    """把清单里某些文件的 sha256 改成现在的实际值（只改这几个，别整份重算）。"""
+    mf = os.path.join(bundle, "PORTABLE-MANIFEST.json")
+    if not os.path.exists(mf):
+        return False
+    try:
+        with io.open(mf, encoding="utf-8") as f:
+            man = json.load(f)
+    except Exception:
+        return False
+    files = man.get("files")
+    want = set(names)
+    changed = False
+    if isinstance(files, dict):          # {"card.db": {"sha256":..,"bytes":..}}
+        for rel in list(files):
+            if os.path.basename(rel) in want:
+                full = os.path.join(bundle, rel.replace("/", os.sep))
+                if os.path.exists(full):
+                    files[rel] = {"sha256": _sha256(full),
+                                  "bytes": os.path.getsize(full)}
+                    changed = True
+    elif isinstance(files, list):        # [{"rel":..,"sha256":..}]
+        for it in files:
+            rel = it.get("rel") or it.get("path")
+            if rel and os.path.basename(rel) in want:
+                full = os.path.join(bundle, rel.replace("/", os.sep))
+                if os.path.exists(full):
+                    it["sha256"] = _sha256(full)
+                    it["bytes"] = os.path.getsize(full)
+                    changed = True
+    else:
+        return False
+    if changed:
+        with io.open(mf, "w", encoding="utf-8") as f:
+            json.dump(man, f, ensure_ascii=False, indent=1)
+    return changed
+
+
 def backup_to(card_dir, target, confirm=False):
     """把活卡整包拷到目标盘（走 portable.build），并给它发"备份 #n"的身份证。"""
     target = os.path.abspath(target)
@@ -378,6 +433,9 @@ def backup_to(card_dir, target, confirm=False):
         return {"ok": False, "why": "portable.build 返回 %s" % rc}
     # build 拷的是文件字节，可能落后于 WAL —— 用一致性快照覆盖它
     _snapshot_db(os.path.join(card_dir, "card.db"), os.path.join(bundle, "card.db"))
+    # 覆盖之后 manifest 里 card.db 那一行的哈希就过期了 —— 不补，
+    # portable verify 会报「包有问题，别拿去跑」（2026-11-03 实测踩到）。
+    _refresh_manifest_hash(bundle, ["card.db"])
     info = register(card_dir, bundle, ROLE_BACKUP,
                     note="一键备份 @ %s" % time.strftime("%Y-%m-%d %H:%M"))
     return {"ok": True, "wal": info.get("wal_before_mb") if isinstance(info, dict) else None,
@@ -417,6 +475,8 @@ def sync_to(card_dir, target, confirm=False):
     if not g.get("ok"):
         return g
     _snapshot_db(os.path.join(card_dir, "card.db"), os.path.join(target, "card.db"))
+    # 覆盖之后清单里那一行就过期了 —— 顺手刷新，否则 verify 会误报「包有问题」
+    _refresh_manifest_hash(target, ["card.db", "DISK-ROLE.json"])
     # 媒体目录增量拷（备份盘上多出来的文件不删，只补缺）
     msrc = os.path.join(card_dir, "media")
     mdst = os.path.join(target, "media")
