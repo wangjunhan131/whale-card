@@ -501,6 +501,11 @@ class Handler(BaseHTTPRequestHandler):
                 # 不碰数据库、不碰记忆 —— 纯粹是"这台机器此刻的呼吸"。
                 import console as _console
                 return self._send(200, _console.sys_live())
+            if method == "GET" and path == "/disks":
+                # 盘子：插着哪些盘、谁是主盘、谁是备份 #n、在线没有、落后几节
+                import disks as _disks
+                here = os.path.dirname(os.path.abspath(m.card.db_path))
+                return self._send(200, _disks.status(here))
             if method == "GET" and path == "/injection":
                 # 防污层：最近被灌进来的可疑念头（只读，不改任何权重）
                 with m.lock:
@@ -640,6 +645,25 @@ class Handler(BaseHTTPRequestHandler):
                              "w_now": round(float(w), 4),
                              "text": m.card.render(r, w)}
                             for s, w, r in hits]})
+                if path in ("/disks/backup", "/disks/sync", "/disks/switch"):
+                    # 盘子：备份到某块盘 / 同步某块备份盘 / 主备互换。
+                    # db 一律走 sqlite 快照（服务跑着也一致），所以这里不用停服务。
+                    import disks as _disks
+                    target = (body.get("path") or "").strip()
+                    if not target:
+                        return self._fail(400, "no_path", "要给出目标目录")
+                    if not body.get("confirm"):
+                        return self._fail(400, "need_confirm",
+                                          "这是写盘动作，body 里要带 confirm=true")
+                    here = os.path.dirname(os.path.abspath(m.card.db_path))
+                    with m.lock:
+                        if path == "/disks/backup":
+                            out = _disks.backup_to(here, target, confirm=True)
+                        elif path == "/disks/sync":
+                            out = _disks.sync_to(here, target, confirm=True)
+                        else:
+                            out = _disks.switch_role(here, target)
+                    return self._send(200 if out.get("ok") else 409, out)
                 if path == "/dream/commit":
                     # 梦境压缩（写回）：外面提炼好的高阶记忆从这里进卡。
                     # items: [{text, region?, salience?, w0?}]

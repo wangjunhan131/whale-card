@@ -979,6 +979,21 @@ body{font-family:"Inter","Segoe UI","Microsoft YaHei",system-ui,sans-serif;
 .inj em{grid-column:1/-1;font:9.5px/1.4 Consolas,monospace;font-style:normal;
   color:#54677c;padding-left:2px}
 .muted{color:#54677c;font-size:11.5px}
+.lamps{display:flex;flex-wrap:wrap;gap:10px;padding:2px 0 8px}
+.lamp{display:flex;align-items:center;gap:8px;padding:6px 12px;border-radius:8px;
+  background:#0e151d;border:1px solid #1a2431;font:11.5px/1.4 Consolas,monospace}
+.lamp i{width:9px;height:9px;border-radius:50%;background:#3a4a5c;box-shadow:0 0 0 0 #000}
+.lamp.lm i{background:#2fd07d;box-shadow:0 0 8px #2fd07d}
+.lamp.lb i{background:#57c8f0;box-shadow:0 0 8px #57c8f0}
+.lamp.loff i{background:#44505f}
+.lamp b{color:#d3e4f2;font-weight:600}
+.lamp span{color:#6c7f94}
+.diskrow{display:flex;align-items:center;gap:10px;padding:4px 0;flex-wrap:wrap}
+.diskrow select{background:#0e151d;color:#cfe6f5;border:1px solid #1f2b3a;
+  border-radius:6px;padding:7px 10px;font:11.5px/1 Consolas,monospace;min-width:320px}
+.diskrow button{background:#16222f;color:#cfe6f5;border:1px solid #24384c;
+  border-radius:6px;padding:7px 14px;font:11.5px/1 Consolas,monospace;cursor:pointer}
+.diskrow button:hover{background:#1d2e3f;border-color:#2f4b66}
 .logs{font-size:11.5px}
 .logs .l{grid-template-columns:12px 44px 1fr;gap:8px}
 .logs .l .sq{font-size:10px;color:#4f6074}
@@ -2115,7 +2130,66 @@ function viewDash(){
       {k:"NOTE",v:pk?"包已就绪，可插盘校验":"插上盘 → 控制台跑 build",u:""}
     ]),
     "锚只在动之前比对；两台机器同时写会分叉 —— 这一点还没上写入闸");
+
+  /* ── ⑲ 盘子：一排灯 + 备份/同步/换主备 ── */
+  var dkd = (S.data && S.data.disks) || {};
+  var dk = dkd.disks || [];
+  var lamps = dk.map(function(x){
+    var on = !!x.online, isMain = x.role === "main";
+    var txt = isMain ? "主盘" : (x.number ? ("备份 #"+x.number) : "未登记");
+    var sub = on ? ((x.head_seq!=null?("seq "+x.head_seq):"—") +
+                    (x.behind>0 ? (" · 落后 "+x.behind+" 节") : " · 一致"))
+                 : "离线";
+    return '<div class="lamp '+(on?(isMain?"lm":"lb"):"loff")+'">'+
+             '<i></i><b>'+txt+'</b><span>'+esc(sub)+'</span></div>';
+  }).join("");
+  var sel = '<select id="diskSel">'+
+    (dkd.volumes || []).map(function(v){
+       var p = v.card_dir || v.root;
+       var txt = (v.label||"?") + " · " + v.root + " · " +
+                 (v.free_gb!=null ? (v.free_gb+" GB 空") : "空间未知");
+       return '<option value="'+esc(p)+'">'+esc(txt)+'</option>';
+     }).join("")+'</select>';
+  out += cardHTML("c12","DISKS / 盘子与备份 · 灯、备份、同步、换主备",
+    '<div class="lamps">'+(lamps||'<span class="muted">一块都没认出来</span>')+'</div>'+
+    '<div class="diskrow">'+sel+
+      '<button id="btnBk">备份到这块盘</button>'+
+      '<button id="btnSy">一键同步</button>'+
+      '<button id="btnSw">主备互换</button>'+
+      '<span id="diskMsg" class="muted"></span></div>',
+    "备份盘不设上限；同步只补落后、分叉一律拒绝；换主备要求条数·链头序号·链头哈希三条全中");
   return out;
+}
+
+/* 盘子卡上的三个按钮：都要写盘，所以都带 confirm */
+function diskPost(act, path){
+  var msg = $("#diskMsg");
+  if(!path){ if(msg) msg.textContent = "先选一块盘"; return; }
+  msg.textContent = "正在做…";
+  fetch("/disks/"+act, {method:"POST", headers:{"Content-Type":"application/json"},
+        body: JSON.stringify({path:path, confirm:true})})
+    .then(function(r){ return r.json().then(function(j){ return {code:r.status, j:j}; }); })
+    .then(function(o){
+      var j = o.j || {};
+      var t = j.ok ? ("好了：" + (j.action || (j.switched?"已换主备":"完成")))
+                   : ("没做成：" + (j.why || o.code));
+      if(j.old_main_now) t += " · 原来那块现在是" + j.old_main_now;
+      msg.textContent = t;
+      setTimeout(refresh, 1200);
+    })
+    .catch(function(e){ msg.textContent = "请求失败：" + e; });
+}
+function bindDiskButtons(){
+  var b1 = $("#btnBk"), b2 = $("#btnSy"), b3 = $("#btnSw"), s = $("#diskSel");
+  if(!b1 || b1._bd) return;
+  b1._bd = b2._bd = b3._bd = true;
+  function pick(){ return s ? s.value : ""; }
+  b1.onclick = function(){ diskPost("backup", pick()); };
+  b2.onclick = function(){ diskPost("sync", pick()); };
+  b3.onclick = function(){
+    if(!confirm("真要把主备换过来吗？换完下次要从新主盘打开。")) return;
+    diskPost("switch", pick());
+  };
 }
 function fmtBps(v){
   v=v||0;
@@ -2535,6 +2609,7 @@ function render(){
   else if(S.tab==="time") g.innerHTML=viewTime();
   else g.innerHTML=viewSet();
   if(S.tab==="set") bindSet();
+  if(S.tab==="dash") bindDiskButtons();
   draw();
   /* autoFill 关掉：现在状态总览是可滚动长页，再自动缩放会把卡片压扁 */
   if(S.tab==="dash"){ _afTries=0; CHSCALE=Math.max(0.9,Math.min(1.15,CHSCALE)); }
@@ -2715,12 +2790,15 @@ function refresh(){
     API("/status"),
     API("/console_data"),
     API("/cardslot"),
-    API("/timeline")
+    API("/timeline"),
+    API("/disks")
   ]).then(function(a){
-    var h=a[0], st=a[1], cd=a[2], cs=a[3], tl=a[4];
+    var h=a[0], st=a[1], cd=a[2], cs=a[3], tl=a[4], dk=a[5];
     S.alive = !!(h && h.ok);
     S.slot = (cs && cs.cardslot && cs.cardslot.state) || "unknown";
     S.data = cd && cd.ok ? cd : (S.data||{});
+    /* 盘子/备份：单独一条接口，别塞进 /console_data（那是纯 DB 读数） */
+    S.data.disks = (dk && dk.ok) ? dk : (S.data.disks || {});
     S.data.timeline = (st && st.status && st.status.timeline) || {};
     S.up = (st && st.status && st.status.uptime_s) || 0;
     S.mood = (st && st.status && st.status.mood) || "";
