@@ -617,6 +617,77 @@ def sys_live():
     return {"ok": True, "now": s["now"], "hist": s["hist"][-150:]}
 
 
+def card_integrity(db_path=DEFAULT_DB):
+    """链与锚的体检读数（只读，绝不写锚）。
+
+    为什么单独做一份、不复用 anchor.check()：那个函数在某些分支里会顺手
+    把锚写一遍（boot 时才该做的事）。控制台每 15 秒刷一次，绝不能因为
+    "看了一眼"就动了锚 —— 那就等于自己给自己盖章。
+    """
+    import anchor as _anchor
+
+    out = {"ok": False, "verdict": "?", "reason": "", "card_seq": 0, "card_head": "",
+           "card_count": 0, "local_seq": 0, "local_head": "", "ext_seq": 0,
+           "ext_head": "", "pack": None, "where": None}
+    try:
+        local_p, ext_p = _anchor._paths(db_path)
+        local = _anchor._read_json(local_p) or {}
+        ext = _anchor._read_json(ext_p) or {}
+        state = _anchor.read_card_state(db_path)
+        out["card_seq"] = int(state.get("head_seq") or 0)
+        out["card_head"] = (state.get("head_hash") or "")[:12]
+        out["card_count"] = int(state.get("count") or 0)
+        out["local_seq"] = int(local.get("head_seq") or 0)
+        out["local_head"] = (local.get("head_hash") or "")[:12]
+        out["ext_seq"] = int(ext.get("head_seq") or 0)
+        out["ext_head"] = (ext.get("head_hash") or "")[:12]
+
+        best = local if out["local_seq"] >= out["ext_seq"] else ext
+        b_seq = int(best.get("head_seq") or 0)
+        b_head = best.get("head_hash") or ""
+        b_count = int(best.get("count") or 0)
+        c_seq, c_head, c_count = out["card_seq"], state.get("head_hash") or "", out["card_count"]
+
+        if not b_seq:
+            verdict, reason = "first", "还没有锚（第一次）"
+        elif c_seq < b_seq:
+            verdict, reason = "rollback", "卡里的链头只到 seq=%d，锚记的是 seq=%d" % (c_seq, b_seq)
+        elif c_count > b_count and b_seq and c_seq <= b_seq and c_head != b_head:
+            verdict, reason = "replaced", "条数 %d→%d 但链头序号没前进（锚 seq=%d）" % (b_count, c_count, b_seq)
+        elif c_head != b_head and c_seq == b_seq:
+            verdict, reason = "replaced", "同一条 seq 上链头对不上"
+        else:
+            verdict, reason = "ok", "跟锚一致（seq=%d）" % c_seq
+        out["verdict"], out["reason"] = verdict, reason
+        out["ok"] = verdict in ("ok", "first")
+    except Exception as e:
+        out["reason"] = "读锚失败：%s" % e
+
+    # 搬家包：build 出来的清单，或者落地之后留下的 WHEREAMI
+    try:
+        card_dir = os.path.dirname(os.path.abspath(db_path))
+        for p in (os.path.join(card_dir, "_portable", "PORTABLE-MANIFEST.json"),
+                  os.path.join(card_dir, "PORTABLE-MANIFEST.json")):
+            if os.path.exists(p):
+                man = json.load(open(p, encoding="utf-8"))
+                files = man.get("files") or []
+                out["pack"] = {
+                    "n": len(files),
+                    "mb": round(sum(int(f.get("size") or 0) for f in files) / 1048576.0, 1),
+                    "built_at": man.get("built_at"),
+                    "wal_before": (man.get("wal") or {}).get("wal_before_mb"),
+                }
+                break
+        for p in (os.path.join(card_dir, "WHEREAMI.json"),):
+            if os.path.exists(p):
+                w = json.load(open(p, encoding="utf-8"))
+                out["where"] = {"landed_at": w.get("landed_at"),
+                                "landed_from": w.get("landed_from")}
+    except Exception:
+        pass
+    return out
+
+
 def overview(db_path=DEFAULT_DB):
     """一整页要的数据，一次给齐 —— 前端只发一个请求。"""
     try:
@@ -644,6 +715,7 @@ def overview(db_path=DEFAULT_DB):
         "health": health_flag(db_path),
         "pools": pools,
         "metrics": card_metrics(db_path),
+        "integrity": card_integrity(db_path),
         "hormones": live_hormones(db_path),
         "forget": forget_curve(db_path),
         "sys": sys_sample(),
@@ -2019,6 +2091,30 @@ function viewDash(){
   out += cardHTML("c4","IO / 读写与网络",
     '<canvas id="cvIO"></canvas>',
     "进程 "+(sy.procs||0)+" 个 · 内存 "+(sy.mem_used||0)+" / "+(sy.mem_total||0)+" MB · SWAP "+(sy.swap||0)+"%");
+  /* ── ⑱ 搬家与备份（锚 + 可移植包） ── */
+  var ig = d.integrity || {};
+  var iok = !!ig.ok;
+  var pk = ig.pack || null, wh = ig.where || null;
+  out += cardHTML("c12","PORTABLE / 搬家与备份 · 锚、包、落地",
+    '<div class="tiles">'+
+    tileN("CHAIN SEQ","链头序号", String(ig.card_seq||0), iok?"ok":"bad",
+          "时间线 "+((ig.card_count||0))+" 条事件")+
+    tileN("ANCHOR VERDICT","锚的判定", (ig.verdict||"—").toUpperCase(),
+          iok?"ok":"bad", ig.reason||"")+
+    tileN("LOCAL ANCHOR","卡内锚", String(ig.local_seq||0),
+          ig.local_seq===ig.card_seq?"ok":"warn", (ig.local_head||"—")+" · 卡目录 anchor.json")+
+    tileN("EXT ANCHOR","卡外锚", String(ig.ext_seq||0),
+          ig.ext_seq===ig.card_seq?"ok":"warn", (ig.ext_head||"—")+" · ~/.dsh/anchors")+
+    '</div>'+
+    ledger([
+      {k:"PACK",v:pk?(pk.n+" 文件"):"未打包",u:pk?(" / "+pk.mb+" MB"):""},
+      {k:"BUILT",v:pk&&pk.built_at?(new Date(pk.built_at*1000).toLocaleString("zh-CN")):"—",u:""},
+      {k:"WAL(BUILD)",v:pk&&pk.wal_before!=null?(pk.wal_before+" MB"):"—",u:""},
+      {k:"LANDED",v:wh&&wh.landed_at?(new Date(wh.landed_at*1000).toLocaleDateString("zh-CN")):"这台机器",u:""},
+      {k:"SLOT",v:String((d.identity&&d.identity.slot)||"—"),u:""},
+      {k:"NOTE",v:pk?"包已就绪，可插盘校验":"插上盘 → 控制台跑 build",u:""}
+    ]),
+    "锚只在动之前比对；两台机器同时写会分叉 —— 这一点还没上写入闸");
   return out;
 }
 function fmtBps(v){

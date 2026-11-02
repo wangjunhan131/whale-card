@@ -6,6 +6,10 @@ import shutil
 import tempfile
 import time
 
+import sys, os
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if ROOT not in sys.path:
+    sys.path.insert(0, ROOT)
 import card2
 
 DAY = card2.DAY

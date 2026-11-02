@@ -1,8 +1,14 @@
-feat(portable): 一键搬家 —— plan/build/verify/land + 锚的两条新判定
+feat(console): 搬家与备份面板 + 两处测试判据修正
 
-- tools/portable.py：体检式造包（停服务前置检查、WAL checkpoint、sha256 清单、
-  卡内/卡外锚一起带走）、验包、全新机器落地（按新路径写回卡外锚、改写卡槽状态）
-- anchor.py check()：补两条判定 —— head_seq 倒退报 rollback、
-  条数变多但 head_seq 没前进报 replaced（原来卡一长大就不比对链头）
-- tests/test_t72.py：12 项验收，含「故意把锚改成未来 / 链头改坏」的破坏性用例
-- docs/PORTABLE.md：搬家四步、三样绑机器的东西、还差的诚实清单
+控制台（状态总览底部新增「PORTABLE / 搬家与备份」卡）：
+- console.card_integrity()：只读读两份锚（卡内 anchor.json / 卡外 ~/.dsh/anchors）
+  与卡里链头，现场算 ok / rollback / replaced / first —— 刻意不复用 anchor.check()，
+  因为那条路会顺手写锚，控制台每 15 秒刷一次不能动锚
+- 同时显示可移植包清单（文件数、体积、wal 快照）与落地信息（WHEREAMI）
+- 前端：4 个 tile + 一行 ledger，副标题点明「还没上写入闸」
+
+测试判据修正（不是功能退步，是量错了东西）：
+- test_t61.py A4「两天后权重下降」：原来比较两次 recall 出来的权重，但 tick 会结算
+  前面 A1~A3 留在 recall_event 里的"被想起就加强"，于是出现"两天后反而变大"。
+  改成拿同一条记忆、同一个 t_anchor，比 now 与 now+2d 的纯衰减值 → 48/48 过
+- tests/test_t67.py：加 ROOT 到 sys.path，从仓库根直接跑也能找到 card2
