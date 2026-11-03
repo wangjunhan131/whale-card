@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-鲸鱼娘数字生命卡 · 第二期
+小鲸鱼数字生命卡 · 第二期
 =====================================
 
 第一期（card.py）做了：存 / 忘 / 翻 / 说。
@@ -602,10 +602,18 @@ def update_mood(mood, e_event, k=K_MOOD):
 
 
 def mood_drift_home(mood, days, k_home=K_MOOD_HOME):
-    """时间回归：多久没说话，心境都慢慢回到不悲不喜"""
+    """时间回归：多久没说话，心境都慢慢回到不悲不喜
+
+    🔧 2026-11-03：原来写的是 `r = min(1, k*days)` —— 线性逼近，
+    20 天后 r=1，心境**精确地**变成 0.5 然后永远停在那儿。这等于
+    "到点归零"，跟我们在记忆曲线上拒绝过的指数衰减是同一个毛病：
+    真实的心境是"越靠近中性越慢"，不会某天突然就毫无残留。
+    改成指数回归：r = 1 - exp(-k*days)，长尾，永远差一点点没回满。
+    k=0.05 时半衰期 ≈ 13.9 天，10 天后残留 0.607，30 天残留 0.223。
+    """
     if days <= 0:
         return mood
-    r = min(1.0, k_home * days)
+    r = 1.0 - math.exp(-k_home * days)
     return max(MOOD_MIN, min(MOOD_MAX, mood + (MOOD_NEUTRAL - mood) * r))
 
 
@@ -1111,7 +1119,7 @@ _RE_FACT_DENY = re.compile(
     r"我是(怎么|如何|因为|为了)")
 
 _RE_SELF_HINT = re.compile(
-    r"我就是我|我是鲸鱼娘|我的性格|我不喜欢别人|我的底线|我不会|我永远|"
+    r"我就是我|我是小鲸鱼|我的性格|我不喜欢别人|我的底线|我不会|我永远|"
     r"我就是这样的人|我讨厌被|我害怕")
 
 _RE_HABIT_HINT = re.compile(
@@ -1361,6 +1369,17 @@ def weight_now(w0, pool, t_anchor, now, region=None, tier=None):
     if tier in CORE_TIERS:
         return w0
     age = max(0.0, now - t_anchor)
+    # 🔧 2026-11-03：长期池的保护期必须按**真实时间**算，再乘分区倍率。
+    #    之前是「先把 age 乘上 region_scale，再扣 90 天」—— 于是 flash 区
+    #    （0.30 倍）的保护期变成 90/0.3 = 300 天真·现实天数，self 区 150 天。
+    #    也就是说「刚被想起来过的记忆受 90 天保护」这条规矩，被分区倍率
+    #    偷偷改成了「受 90 天 × 1/倍率 保护」。保护期说的是"多久之内不掉"，
+    #    是现实里的时间，跟这条记忆自己衰减得多慢是两件事。
+    if pool == POOL_LONG:
+        if age > LONG_PROTECT_DAYS * DAY:
+            age -= LONG_PROTECT_DAYS * DAY
+        else:
+            age = 0.0
     if region:
         age *= region_decay_scale(region)
     if pool == POOL_SHORT:
@@ -1376,10 +1395,6 @@ def weight_now(w0, pool, t_anchor, now, region=None, tier=None):
         return w0 * math.exp(-K_DEEP * age)
     # 长期池：刚被想起来过的 90 天里不掉，之后照常慢衰。
     # 「重要 ≠ 永久活跃」：它不会被砍，但也不会永远占着最亮的位置。
-    if age > LONG_PROTECT_DAYS * DAY:
-        age -= LONG_PROTECT_DAYS * DAY
-    else:
-        age = 0.0
     return w0 * math.exp(-LAM_L * age)
 
 
@@ -2254,8 +2269,9 @@ class MemoryCard:
                     new_oxy = max(new_oxy, self.oxy * 0.7)
                     c0.execute(
                         "UPDATE mem SET w=?, t_anchor=?, access_count=access_count+1,"
+                        " recall_n=COALESCE(recall_n,0)+1, t_last_recall=?,"
                         " last_active_ts=?, oxy=? WHERE id=?",
-                        (min(1.0, wn + 0.10), now, now, new_oxy, dup_id))
+                        (min(1.0, wn + 0.10), now, now, now, new_oxy, dup_id))
                     c0.execute("UPDATE detail SET weight=MIN(1.0, weight+0.08)"
                                " WHERE parent_id=?", (dup_id,))
                     self.db.commit()
@@ -2373,6 +2389,11 @@ class MemoryCard:
                 events.append((0, "hormone_drift", hormone.describe(self.h)))
 
         # 1) 短期池超期 → 强制结算（巩固 or 淘汰）
+        #    ⚠️ 这里的 7 天是**现实时间**，故意不乘分区倍率。
+        #    短期池是「最近被注意到的 32 个位置」，是注意力预算、不是寿命：
+        #    分区倍率决定"忘得多慢"，位置腾退决定"能给多少张桌子"。
+        #    flash 区的记忆权重掉得慢，但它照样占着一张桌子 —— 让它赖 23 天，
+        #    别的记忆就没地方坐了。两件事分开算，才是对的。
         for r in c.execute(
                 "SELECT * FROM mem WHERE pool='short'").fetchall():
             age = now - r["t_anchor"]
@@ -2559,6 +2580,8 @@ class MemoryCard:
         scored = []
         for r in rows:
             wn = wn_row(r, now)
+            # 这里的 age 也是现实时间，理由同 tick 里的到期判定：
+            # 匀位置看的是"它占着桌子多久了"，不是"它忘得多慢"。
             age = max(0.0, now - r["t_anchor"])
             evict_score = wn * max(0.0, 1.0 - age / SHORT_MAX_TTL)
             scored.append((evict_score, r["id"], r))
