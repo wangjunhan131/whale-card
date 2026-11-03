@@ -125,12 +125,30 @@ def main():
         ck("按 role 归类", len(mine) == 4 and len(theirs) == 1, (len(mine), len(theirs)))
         chat = [r for r in mine if not r.get("report_like")]
         ck("汇报味被排除", len(chat) == 3, len(chat))
-        cands = M.phrase_candidates(mine, theirs)
+        cands, tot = M.phrase_candidates(mine, theirs)
         top = {c["key"] for c in cands[:5]}
         ck("挖出「行吧」", "行吧" in top, sorted(top))
         ck("记录用户也说过", any(c["key"] == "行吧" and c["user_hits"] >= 1 for c in cands))
+        ck("候选带背景/lift/建议字段",
+           all(("bg_hits" in c and "lift" in c and "suggest" in c) for c in cands))
+        ck("totals 有段数", tot["chat_segments"] >= 1 and "bg_segments" in tot, tot)
         ro.close()
         ck("只读打开不会写文件", os.path.getsize(db2) > 0)
+
+        # ---- 背景对比与建议分档（v1 完善）----
+        ck("lift：背景为零给大数", H.lift_of(6, 100, 0, 1000) == 99.0,
+           H.lift_of(6, 100, 0, 1000))
+        ck("lift：同频率约等于 1", abs(H.lift_of(1, 100, 10, 1000) - 1.0) < 0.01,
+           H.lift_of(1, 100, 10, 1000))
+        ck("lift：聊天 2 倍于背景", abs(H.lift_of(2, 100, 10, 1000) - 2.0) < 0.01,
+           H.lift_of(2, 100, 10, 1000))
+        ck("rate_per_1k 除零安全", H.rate_per_1k(3, 0) == 0.0)
+        ck("建议：高频+高 lift -> keep", H.suggest_of(0.9, 3.0, 5, 3) == "keep")
+        ck("建议：用户也说 -> drop", H.suggest_of(0.2, 9.0, 5, 3) == "drop")
+        ck("建议：lift 不够 -> drop", H.suggest_of(0.9, 1.0, 5, 3) == "drop")
+        ck("建议：只一天 -> review", H.suggest_of(0.9, 3.0, 5, 1) == "review")
+        ck("虚词碎片被剔", M.is_gram_junk("的你") and M.is_gram_junk("了我"))
+        ck("实词不被剔", not M.is_gram_junk("晚安") and not M.is_gram_junk("行吧"))
     finally:
         import shutil
         shutil.rmtree(tmp2, ignore_errors=True)

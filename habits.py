@@ -197,6 +197,53 @@ def status_of(hits, days, conflict=False, pinned=False, last_seen=None, now=None
     return ST_CANDIDATE
 
 
+# ---------------------------------------------------------------- 背景对比（完善 v1）
+#
+# 为什么要这一层：
+#   只看"她说过几次"，会把工作汇报里的词也抬上来（建文件夹/D新建文/环境变量）。
+#   正确做法是拿"不像聊天的那批回复"当背景，比一比同一个词在聊天里的频率
+#   是不是显著更高 —— 这是很粗的 PMI 思想，但足够把开发词汇压下去。
+HAB_LIFT_KEEP = 2.0        # 聊天里出现频率 ≥ 背景 2 倍 → 建议保留
+HAB_LIFT_DROP = 1.2        # < 1.2 倍 → 建议丢弃（背景里也常见，不是口音）
+HAB_DISTINCT_DROP = 0.35   # 用户也常说（区分度 < 0.35）→ 建议丢弃
+
+
+def rate_per_1k(hits, total_segments):
+    """每千段的出现率，避免两边段数不同导致不可比。"""
+    t = float(total_segments or 0)
+    if t <= 0:
+        return 0.0
+    return 1000.0 * float(hits or 0) / t
+
+
+def lift_of(chat_hits, chat_segments, bg_hits, bg_segments):
+    """聊天里的出现率 ÷ 背景里的出现率。背景为 0 时给一个有限的大数。"""
+    a = rate_per_1k(chat_hits, chat_segments)
+    b = rate_per_1k(bg_hits, bg_segments)
+    if b <= 0:
+        return 99.0 if a > 0 else 0.0
+    return round(a / b, 2)
+
+
+def suggest_of(distinct, lift, hits, days):
+    """给人工筛的初判：keep / review / drop。
+
+    三条规则（都在文档里写死，免得以后拍脑袋）：
+      1. 用户也常说（区分度低）→ drop，那不是她的口音
+      2. 只是这一场聊嗨了（天数不够）→ review，等更多证据
+      3. 聊天里比背景显著高频 → keep
+    """
+    if (distinct or 0) < HAB_DISTINCT_DROP:
+        return "drop"
+    if (days or 0) < HAB_CAND_MIN_DAYS:
+        return "review"
+    if (lift or 0) < HAB_LIFT_DROP:
+        return "drop"
+    if (hits or 0) >= HAB_CAND_MIN_HITS and (lift or 0) >= HAB_LIFT_KEEP:
+        return "keep"
+    return "review"
+
+
 # ---------------------------------------------------------------- 写入（v2 用）
 def upsert(con, category, key, hits, days, first_seen, last_seen,
            evidence=None, trigger="", behavior="", scope="character",
