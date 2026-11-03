@@ -24,6 +24,18 @@
 
 ---
 
+## 从哪里开始
+
+- **人**（不想看代码，就想做一张自己的卡）→ [`docs/GETTING-STARTED.md`](docs/GETTING-STARTED.md)
+  从装依赖到"她开始记事"，六步，含八个必踩的坑和一页速查表。
+- **AI / agent**（要接手这个仓库改代码）→ [`docs/FOR-AGENT.md`](docs/FOR-AGENT.md)
+  角色边界、五条铁律、接手顺序、改代码要跑哪些测试、排查表、还没做完的清单。
+- **想知道为什么这么设计** → [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)（表结构与流程）、
+  [`docs/DESIGN-SYNAPSE-1024.txt`](docs/DESIGN-SYNAPSE-1024.txt)（完整设计说明）、
+  [`docs/technical-report.pdf`](docs/technical-report.pdf)（技术报告）
+
+---
+
 ## 为什么需要它
 
 大模型本身没有记忆。常见的替代方案有两种，都不太行：
