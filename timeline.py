@@ -24,7 +24,9 @@
 import os
 import json
 import time
+import uuid
 import hashlib
+import io
 
 DAY = 86400.0
 ALIVE_INTERVAL = 600.0      # 心跳间隔：10 分钟
@@ -48,11 +50,48 @@ def _birth_hash(mid, raw, speaker, create_ts):
     return _sha(payload)
 
 
+class ForeignWriter(Exception):
+    """这张卡上最后一条不是我写的 —— 另一台机器/另一个进程在写。
+
+    不是错误处理，是「别再写了」：两条链一旦分叉，哈希对不上就再也合不回去。
+    """
+
+
+def writer_id():
+    """这台机器的稳定 ID（不是卡的、也不从盘符推）。
+
+    存在 ~/.dsh/writer-id.txt：换台电脑自然换一个 ID，正是我们要的
+    ——「同一个我、不同的手」。环境变量 WHALE_WRITER 可覆盖（测试用）。
+    """
+    env = os.environ.get("WHALE_WRITER")
+    if env:
+        return env
+    d = os.path.join(os.path.expanduser("~"), ".dsh")
+    p = os.path.join(d, "writer-id.txt")
+    try:
+        if os.path.exists(p):
+            with io.open(p, "r", encoding="utf-8") as f:
+                w = f.read().strip()
+            if w:
+                return w
+    except Exception:
+        pass
+    w = "w-" + uuid.uuid4().hex[:12]
+    try:
+        os.makedirs(d, exist_ok=True)
+        with io.open(p, "w", encoding="utf-8") as f:
+            f.write(w)
+    except Exception:
+        pass
+    return w
+
+
 class Timeline(object):
     """一根只往前走的时间轴。"""
 
-    def __init__(self, db):
+    def __init__(self, db, writer=None):
         self.db = db
+        self.writer = writer or ""
         self._init_schema()
         self._last = None           # (seq, self_hash) 缓存
 
@@ -90,6 +129,13 @@ class Timeline(object):
             key TEXT PRIMARY KEY,
             val TEXT NOT NULL
         )""")
+        # 写入者标记（2026-11-03 深夜）：
+        # 两台机器同时往一张卡上写，会各自长出一条链，事后**合不回去**。
+        # 这一列只记录「这条是谁写的」，不进 self_hash（老记录的哈希不能动）。
+        # 它是保险丝，不是防伪章：能发现事故，但挡不住恶意改库。
+        cols = {r["name"] for r in c.execute("PRAGMA table_info(timeline)")}
+        if "writer" not in cols:
+            c.execute("ALTER TABLE timeline ADD COLUMN writer TEXT NOT NULL DEFAULT ''")
         self.db.commit()
 
     # ---------- 写 ----------
@@ -101,11 +147,18 @@ class Timeline(object):
             self._last = (r["seq"], r["self_hash"]) if r else (0, "")
         return self._last
 
-    def append(self, kind, note="", ts=None):
+    def append(self, kind, note="", ts=None, allow_foreign=False):
         """加一条。返回 seq。
 
         prev_hash 链到上一条的哈希 —— 这是「不可回拨」的机器证明。
+        若链头是别的 writer 写的，默认**拒写**（抛 ForeignWriter）：
+        宁可停下报错，也不要长出第二条链。
         """
+        head_w = self.head_writer()
+        if (not allow_foreign) and self.writer and head_w and head_w != self.writer:
+            raise ForeignWriter(
+                "链头是 %s 写的，我是 %s：这张卡可能正被另一台机器用，先别写"
+                % (head_w, self.writer))
         t = float(ts if ts is not None else time.time())
         prev_seq, prev_hash = self._last_row()
         seq = prev_seq + 1
@@ -115,9 +168,9 @@ class Timeline(object):
              "prev": prev_hash}, ensure_ascii=False, sort_keys=True)
         self_h = _sha(payload)
         self.db.execute(
-            "INSERT INTO timeline(seq,ts,kind,note,prev_hash,self_hash)"
-            " VALUES(?,?,?,?,?,?)",
-            (seq, t, kind, note, prev_hash, self_h))
+            "INSERT INTO timeline(seq,ts,kind,note,prev_hash,self_hash,writer)"
+            " VALUES(?,?,?,?,?,?,?)",
+            (seq, t, kind, note, prev_hash, self_h, self.writer))
         self.db.commit()
         self._last = (seq, self_h)
         # 第一条：记下「我们认识的那一天」
@@ -411,6 +464,15 @@ class Timeline(object):
     def head_hash(self):
         """链头哈希 —— 存在卡外，用来发现「回滚到旧卡」。"""
         return self._last_row()[1]
+
+    def head_writer(self):
+        """链头那条是谁写的；老卡没有这一列/没写过就是空串。"""
+        try:
+            r = self.db.execute(
+                "SELECT writer FROM timeline ORDER BY seq DESC LIMIT 1").fetchone()
+        except Exception:
+            return ""
+        return (r["writer"] if r is not None and "writer" in r.keys() else "") or ""
 
     def count(self):
         return self.db.execute("SELECT COUNT(*) FROM timeline").fetchone()[0]

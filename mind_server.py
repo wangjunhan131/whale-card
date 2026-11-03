@@ -48,6 +48,7 @@ sys.path.insert(0, HERE)
 
 from card2 import MemoryCard          # noqa: E402
 import hormone as hormone_mod          # noqa: E402
+import timeline as timeline_mod        # noqa: E402
 
 VERSION = "1.0"
 DEFAULT_PORT = 8848
@@ -116,9 +117,17 @@ class Mind(object):
         self.anchor = None            # 卡外锚的体检结果（回滚检测）
         try:
             import timeline as timeline_mod
-            self.tl = timeline_mod.Timeline(self.card.db)
+            self.writer = timeline_mod.writer_id()
+            self.writer_lock = ""          # 非空 = 卡被别人占着，只读
+            self.tl = timeline_mod.Timeline(self.card.db, writer=self.writer)
             self.chain_ok, self.chain_bad = self.tl.verify_chain()
-            if self.chain_ok:
+            head_w = self.tl.head_writer()
+            if head_w and head_w != self.writer:
+                self.writer_lock = head_w
+                self.chain_bad.append(
+                    "这张卡的链头是另一台机器（%s）写的，我（%s）先只读"
+                    % (head_w, self.writer))
+            if self.chain_ok and not self.writer_lock:
                 self.tl.catch_up()
                 self.tl.append("boot", "服务启动")
             # 出生证：验一遍；一条证都没有（老卡第一次跑）就回填总章
@@ -260,6 +269,10 @@ class Mind(object):
 
     def report(self, user_message, reply="", ts=None):
         with self.lock:
+            if self.writer_lock:
+                # 卡被另一台机器占着：宁可报错，也不写第二条链
+                raise timeline_mod.ForeignWriter(
+                    "这张卡正被另一台机器用（%s），我这边只读" % self.writer_lock)
             self.flow_time()
             # 他说的话：进短期记忆池（mem），也进原文表（dialogue）。
             # 为什么必须进 mem 而不是只存原文：
@@ -362,7 +375,13 @@ class Mind(object):
                      "birth_ok": self.birth_ok,
                      "birth_bad": self.birth_bad[:3],
                      "anchor": self.anchor,
-                     "alive": self.tl.alive_proof()}
+                     "alive": self.tl.alive_proof(),
+                     # 写入闸（2026-11-03）：谁能写这张卡。
+                     # 锁上就是只读 —— /report 会直接 409 card_locked。
+                     "writer": {"mine": self.writer,
+                                "head": self.tl.head_writer(),
+                                "locked_by": self.writer_lock,
+                                "readonly": bool(self.writer_lock)}}
                     if self.tl is not None else {"error": "时间线未初始化"}),
             }
 
@@ -441,6 +460,11 @@ class Handler(BaseHTTPRequestHandler):
                          "birth_bad": m.birth_bad[:3],
                          "anchor_verdict": (m.anchor or {}).get("verdict"),
                          "anchor_reason": (m.anchor or {}).get("reason"),
+                         # 写入闸：locked_by 非空 = 这卡被别的机器占着，只读
+                         "writer": {"mine": m.writer,
+                                    "head": m.tl.head_writer(),
+                                    "locked_by": m.writer_lock,
+                                    "readonly": bool(m.writer_lock)},
                          "today": m.tl.render_line()}
                         if m.tl is not None else {"error": "时间线未初始化"}),
                 })
@@ -624,7 +648,10 @@ class Handler(BaseHTTPRequestHandler):
                         return self._fail(413, "text_too_large",
                                           "user_message %d 字符 > 上限 %d"
                                           % (len(um), MAX_TEXT))
-                    out = m.report(um, body.get("reply") or "", body.get("ts"))
+                    try:
+                        out = m.report(um, body.get("reply") or "", body.get("ts"))
+                    except timeline_mod.ForeignWriter as e:
+                        return self._fail(409, "card_locked", str(e))
                     return self._send(200, {"ok": True, "report": out})
                 if path == "/recent":
                     # 短期对话原文：从卡里读，不从调用方带。
