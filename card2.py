@@ -2139,6 +2139,52 @@ class MemoryCard:
         return {"n": n_bad, "rows": out,
                 "warn": TRUST_WARN, "block": TRUST_BLOCK_PROMOTE}
 
+    def untrust(self, mid, reason="人工判定：那是玩笑，不是灌输", ts=None):
+        """人工解除一次防污误判：冲突清零、信任抬回 1.0，并留痕迹。
+
+        为什么需要这个：规则只能判断"这句话像不像改写自我"，判不了"是不是在开玩笑"——
+        那需要人。误判的代价是那条记忆永远进不了长期/底色、召回还打对折。
+        解除不能悄悄清字段：**要在 history 里留一笔**，写清原值、理由、时间，
+        以后翻回来能知道"这条是她自己解的，不是从来没被标记过"。
+        """
+        now = time.time() if ts is None else float(ts)
+        r = self.db.execute(
+            "SELECT id,trust,conflict,conflict_why,history,raw,"
+            " t_anchor,pool,tier,w,t_last_recall FROM mem WHERE id=?",
+            (int(mid),)).fetchone()
+        if r is None:
+            return {"ok": False, "error": "no_such_mem"}
+        if not (float(r["trust"] or 1.0) < 1.0 or int(r["conflict"] or 0) == 1):
+            return {"ok": True, "changed": False, "id": int(mid),
+                    "note": "这条本来就没有冲突标记"}
+        hist = []
+        try:
+            hist = json.loads(r["history"] or "[]")
+            if not isinstance(hist, list):
+                hist = []
+        except Exception:
+            hist = []
+        hist.append({
+            "ts": round(now, 3),
+            "kind": "untrust",
+            "reason": reason,
+            "from_trust": round(float(r["trust"] or 1.0), 3),
+            "from_conflict": int(r["conflict"] or 0),
+            "from_why": r["conflict_why"] or "",
+        })
+        if len(hist) > 8:
+            hist = hist[-8:]
+        cur = self.db.cursor()
+        cur.execute(
+            "UPDATE mem SET trust=1.0, conflict=0, conflict_why='', history=?"
+            " WHERE id=?", (json.dumps(hist, ensure_ascii=False), int(mid)))
+        self.db.commit()
+        return {"ok": True, "changed": True, "id": int(mid),
+                "from": {"trust": round(float(r["trust"] or 1.0), 3),
+                         "conflict": int(r["conflict"] or 0)},
+                "to": {"trust": 1.0, "conflict": 0},
+                "reason": reason}
+
     # ---------- 梦境压缩（Dream，2026-11-01） ----------
     def pending_dialogue(self, limit=240, min_ts=0.0):
         """还没被"消化"过的对话原文。给宿主侧的提炼器用。

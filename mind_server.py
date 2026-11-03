@@ -691,6 +691,24 @@ class Handler(BaseHTTPRequestHandler):
                         else:
                             out = _disks.switch_role(here, target)
                     return self._send(200 if out.get("ok") else 409, out)
+                if path == "/mem/untrust":
+                    # 人工解除一次防污误判（"这句是玩笑"）。
+                    # 规则判断不了语气，只有人能；所以这条路故意做成手动。
+                    mid = body.get("id")
+                    if not mid:
+                        return self._fail(400, "no_id", "要给出记忆 id")
+                    reason = (body.get("reason") or "").strip() or "人工判定：那是玩笑"
+                    with m.lock:
+                        out = m.card.untrust(mid, reason=reason)
+                        if out.get("changed") and m.tl is not None:
+                            try:
+                                m.tl.append("untrust", "解除防污误判 id=%s：%s"
+                                           % (mid, reason))
+                            except Exception as e:
+                                out["timeline_error"] = str(e)
+                    if not out.get("ok"):
+                        return self._send(404, out)
+                    return self._send(200, out)
                 if path == "/dream/commit":
                     # 梦境压缩（写回）：外面提炼好的高阶记忆从这里进卡。
                     # items: [{text, region?, salience?, w0?}]
