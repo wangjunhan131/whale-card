@@ -728,7 +728,7 @@ PAGE = r"""<!doctype html>
 <html lang="zh-CN"><head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>鲸鱼娘 · 控制台</title>
+<title>小鲸鱼 · 控制台</title>
 <style>
 :root{
   --bg:#0e1116; --panel:#151a21; --panel2:#1a2029; --line:#242c37;
@@ -1042,7 +1042,7 @@ body{font-family:"Inter","Segoe UI","Microsoft YaHei",system-ui,sans-serif;
         <ellipse cx="134" cy="126" rx="8" ry="4.5" fill="#d98899" opacity=".35"/>
       </svg>
     </div>
-    <h1 id="nm">鲸鱼娘</h1>
+    <h1 id="nm">小鲸鱼</h1>
     <div class="edit"><span id="btnAvatar">换头像</span>
       <span class="sep">·</span><span id="btnName">改名</span></div>
     <div class="pill"><span class="dot" id="stDot"></span>
@@ -1745,7 +1745,7 @@ function nebInfo(cv, id){
   if(id==="__core"){
     /* 中心那颗星就是"我"：人格核心，不是一条记忆，所以没有 id/权重 */
     var idn=(S.data&&S.data.identity)||{};
-    var self=idn.self_name||idn.name||"鲸鱼娘";
+    var self=idn.self_name||idn.name||"小鲸鱼";
     var t0=(idn&&idn.self_narrative)||"";
     box.innerHTML =
       '<div style="display:flex;gap:10px;align-items:baseline;flex-wrap:wrap;margin-bottom:8px">'+
@@ -1807,7 +1807,7 @@ function applyAvatar(id){
 
 function renderSide(){
   var d=S.data||{}, id=d.identity||{};
-  $("#nm").textContent = id.name || "鲸鱼娘";
+  $("#nm").textContent = id.name || "小鲸鱼";
   applyAvatar(id);
   $("#up").textContent = fmtDur(S.up);
   $("#age").textContent = (id.day!=null? "第 "+id.day+" 天" : "—");
@@ -2860,7 +2860,7 @@ document.querySelectorAll("nav .tab").forEach(function(t){
 $("#btnAvatar").onclick=function(){ pickAvatar(); };
 $("#btnName").onclick=function(){
   var id=(S.data&&S.data.identity)||{};
-  var v=prompt("这张卡叫什么名字？", id.name||"鲸鱼娘");
+  var v=prompt("这张卡叫什么名字？", id.name||"小鲸鱼");
   if(v===null) return;
   v=(v||"").trim();
   if(!v){ alert("名字不能为空"); return; }

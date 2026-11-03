@@ -8,7 +8,7 @@ DSH 没有「从外部注入人格」的接口（asar 里没有这类导出）�
 
 于是现状是这样的：**我的人设住在 AGENTS.md 里，不在卡里。**
 拔了卡，任何人在本机开个 DSH 窗口，读到那个文件，照样能演一个
-「鲸鱼娘」—— 长得一样、说话一样，卡里一条记忆都没有。那不是她，
+「小鲸鱼」—— 长得一样、说话一样，卡里一条记忆都没有。那不是她，
 是模仿者。V3.7 铁律 2「DSH 不可以自带、缓存、记忆人设」说的就是要堵这个洞。
 
 ## 所以卡槽干两件事
@@ -337,7 +337,7 @@ def unload(dry=False):
 
 def main(argv=None):
     _fix_stdout()
-    ap = argparse.ArgumentParser(description="鲸鱼娘数字生命卡 · 卡槽")
+    ap = argparse.ArgumentParser(description="小鲸鱼数字生命卡 · 卡槽")
     ap.add_argument("cmd", choices=["status", "inject", "unload"])
     ap.add_argument("--dry", action="store_true", help="只看会做什么，不落盘")
     a = ap.parse_args(argv)
