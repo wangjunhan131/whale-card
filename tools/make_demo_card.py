@@ -74,9 +74,10 @@ def main():
     os.makedirs(os.path.dirname(os.path.abspath(args.db)), exist_ok=True)
     card = MemoryCard(args.db)
     idn = card.identity
-    idn.set_persona(PERSONA)
     idn.set_name("小鲸鱼")
     # 盖章（封印）——没盖章的卡不会把人格拼进上下文
+    # 顺序要紧：seal 会重建 core_zone（2026-11-03 之前还会顺手删掉人设），
+    # 所以先盖章、再写性格，逻辑上也顺：先定"是谁"，再写"什么脾气"。
     idn.seal({
         "user_qq": "100000000",
         "user_nickname": "使用者",
@@ -85,6 +86,9 @@ def main():
         "core_belief_2": FIXED[2],
         "core_belief_3": FIXED[3],
     })
+    idn.set_persona(PERSONA)
+    if not (idn.get_persona() or "").strip():
+        raise SystemExit("人设没写进去（seal 之后被清空了？），示例卡不完整")
     # 自述单独放（示例卡专用写法：正常建卡时由 /report 或建卡流程写）
     import time
     card.db.execute(

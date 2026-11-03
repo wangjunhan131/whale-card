@@ -153,6 +153,15 @@ class IdentityAnchor(object):
         # 重建时先拆触发器才能清空 CORE 区
         c.execute("DROP TRIGGER IF EXISTS trg_core_no_update")
         c.execute("DROP TRIGGER IF EXISTS trg_core_no_delete")
+        # ⚠️ 下面这句会清空整个 CORE 区，而 core_zone 里除六个锚字段外还住着
+        #    persona（性格）和 self_narrative（自述）—— 它们不属于身份锚，
+        #    但同样只读、同样重要。先抄出来，重建完再放回去。
+        #    （2026-11-03 修：原来如此盖章会静默把人设删掉，示例卡首当其冲）
+        extras = [
+            (r["key"], r["val"], r["updated_ts"])
+            for r in self.db.execute("SELECT key,val,updated_ts FROM core_zone")
+            if r["key"] not in CORE_KEYS
+        ]
         c.execute("DELETE FROM core_zone")
         for k in CORE_KEYS:
             v = str(values[k])
@@ -161,6 +170,10 @@ class IdentityAnchor(object):
             c.execute("INSERT OR REPLACE INTO core_zone(key,val,updated_ts)"
                       " VALUES(?,?,?)", (k, v, now))
         c.execute("INSERT OR REPLACE INTO card_meta(key,val) VALUES('sealed','1')")
+        # 把刚才抄出来的人设/自述放回去（不参与锚，所以不重算 sha256）
+        for k, v, ts in extras:
+            c.execute("INSERT OR REPLACE INTO core_zone(key,val,updated_ts)"
+                      " VALUES(?,?,?)", (k, v, ts))
         self.db.commit()
         # 重新装回只读触发器
         self._init_schema()

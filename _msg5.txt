@@ -1,0 +1,23 @@
+fix(identity): 盖章会把性格一起删掉
+
+**病**：`IdentityAnchor.seal()` 先 `DELETE FROM core_zone` 再按六个锚字段重建。
+可 core_zone 里除了那六个字段，还住着 persona（性格）和 self_narrative（自述）——
+它们不属于身份锚（性格要能演化，不能参与 sha256），却是"这张卡有没有性格"的唯一来源。
+
+于是"先写人设、后盖章"的卡，章盖完人设就没了，而且**不报错**：她照样说话，
+只是变成一个没有脾气的客服。
+
+**谁中招了**：`tools/make_demo_card.py` 当时的顺序正是 set_persona → set_name → seal，
+所以每个照着示例卡起步的人，第一张卡都没有性格。我按文档跑了一遍才发现——
+对照真实卡没事，因为真实卡的人设是 seal 之后才补写的。
+
+**修**：
+- `identity.py`：删 CORE 区之前先把非 CORE_KEYS 的行抄出来，重建完放回去（不参与锚，sha256 不动）
+- `tools/make_demo_card.py`：顺序改成先 seal 再 set_persona，并加一句自检——人设空就直接报错退出
+- 新增 `tests/test_t74.py`（8 项）：盖章后人设与自述都在、六个锚字段齐全、
+  改人设不影响 `verify()`、强制重盖章也不丢
+- `docs/FOR-AGENT.md`、`docs/GETTING-STARTED.md` 里的示例代码一并改成真实 API
+  （`identity.IdentityAnchor(con)` 收的是连接，不是路径；`seal()` 必须一次给全六个字段）
+
+验证：`tests/test_t74.py` 8/8、`tests/test_t72.py` 12/12、`test_card2.py` 22/22；
+重建示例卡后 `core_zone` 里 persona 与 self_narrative 都在（人设 63 字）。
