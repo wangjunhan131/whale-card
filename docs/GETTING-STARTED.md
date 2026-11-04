@@ -149,6 +149,9 @@ python bridge.py ask "你还记得我最爱吃什么吗"
 # 一轮说完，写回卡里（第一句 = 他说的，第二句 = 她答的）
 python bridge.py report "我今天模考砸了" "砸哪科了？先别急着难过，说说看。"
 
+# 不需要对话对象的单条记忆（QQ 群、B站、抖音、脚本跑完都能用）
+python bridge.py note "在群里看到有人说海洋馆的鲸鱼很安静" --source qq-group
+
 # 只想翻某件事
 python bridge.py recall "白米饭"
 ```
@@ -165,10 +168,20 @@ curl -X POST http://127.0.0.1:8848/report \
      -H "Content-Type: application/json" \
      -d '{"user_message":"今天模考砸了","reply":"砸哪科了？"}'
 # → {"ok":true,"written":true,"mem_id":37}
+
+# 任意通道的单条记忆 —— 这是「让她记得别处发生的事」的入口
+curl -X POST http://127.0.0.1:8848/remember \
+     -H "Content-Type: application/json" \
+     -d '{"text":"看完一个修凉亭的视频，想起老家那个亭子","source":"bili"}'
+# → {"ok":true,"mem_id":38,"source":"bili","birth":true}
 ```
 
-> 注意两个字段名不一样：`/context` 收 `message`，`/report` 收 `user_message` + `reply`。
-> 传错了会得到 `{"ok":false,"error":"empty_message"}`，这是最常见的一次性坑。
+> 注意字段名：`/context` 收 `message`；`/report` 收 `user_message` + `reply`；
+> `/remember` 收 `text`（+ 可选 `source` / `salience` / `speaker` / `region`）。
+> 传错了会得到 `{"ok":false,"error":"empty_message"}` 之类的错误，这是最常见的一次性坑。
+>
+> `source` 是"这条记忆从哪个通道来的"（chat / qq / qq-group / bili / douyin / console…）。
+> 写进去之后，控制台的账本和后期审计能分清"她是在哪儿听说的"。
 
 ---
 
