@@ -1013,6 +1013,37 @@ body{font-family:"Inter","Segoe UI","Microsoft YaHei",system-ui,sans-serif;
 .inj em{grid-column:1/-1;font:9.5px/1.4 Consolas,monospace;font-style:normal;
   color:#54677c;padding-left:2px}
 .muted{color:#54677c;font-size:11.5px}
+/* 左栏状态灯 + 小数字框（2026-11-04 加，用户要求"填一点点，别挤"） */
+.mini{margin-top:10px;border-top:1px solid var(--line);padding-top:9px}
+.leds{display:flex;gap:5px;margin-bottom:8px}
+.led{flex:1;display:flex;align-items:center;gap:4px;justify-content:center;
+  font:9px/1 Consolas,monospace;letter-spacing:.5px;color:#5b7086;
+  background:#0f1620;border:1px solid #18212b;border-radius:5px;padding:5px 3px}
+.led i{width:6px;height:6px;border-radius:50%;background:#37485a;flex:none;
+  transition:background .3s,box-shadow .3s}
+.led.ok i{background:#2fd07d;box-shadow:0 0 7px #2fd07d99}
+.led.bad i{background:#ff5f6d;box-shadow:0 0 7px #ff5f6d99}
+.led.warn i{background:#e8b44a;box-shadow:0 0 7px #e8b44a99}
+.led.ok{color:#9fb3c6}
+.nums{display:flex;gap:1px;background:#151d26;border:1px solid #18212b;
+  border-radius:6px;overflow:hidden}
+.nums div{flex:1;background:#0d131a;padding:6px 3px;text-align:center}
+.nums b{display:block;font:600 13px/1.25 Consolas,monospace;color:#cfe6f5;
+  font-variant-numeric:tabular-nums}
+.nums i{display:block;font:9px/1.2 Consolas,monospace;font-style:normal;
+  color:#54677c;letter-spacing:.3px;margin-top:1px}
+/* 时间线最近几条：从左栏空白处放，紧凑版（原卡在网格里占一行、右边全空） */
+.mlog{margin-top:9px;border-top:1px solid var(--line);padding-top:8px;
+  display:flex;flex-direction:column;gap:3px;
+  font:10px/1.35 Consolas,monospace;flex:1 1 auto;min-height:120px;
+  overflow:hidden}
+.mlog .r{display:flex;gap:5px;align-items:baseline;color:#7d8fa3}
+.mlog .r i{width:5px;height:5px;border-radius:50%;background:#2fd07d;flex:none}
+.mlog .r.b i{background:#ff5f6d}
+.mlog .r.w i{background:#e8b44a}
+.mlog .r b{color:#4f6074;font-weight:400;min-width:24px}
+.mlog .r span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+  min-width:0;flex:1}
 .lamps{display:flex;flex-wrap:wrap;gap:10px;padding:2px 0 8px}
 .lamp{display:flex;align-items:center;gap:8px;padding:6px 12px;border-radius:8px;
   background:#0e151d;border:1px solid #1a2431;font:11.5px/1.4 Consolas,monospace}
@@ -1091,6 +1122,20 @@ body{font-family:"Inter","Segoe UI","Microsoft YaHei",system-ui,sans-serif;
       <div class="row"><span class="k">心境</span><span class="v" id="mood">—</span></div>
       <div class="row"><span class="k">对谁</span><span class="v" id="who">—</span></div>
     </div>
+    <div class="mini">
+      <div class="leds">
+        <span class="led" id="ledChain" title="时间线链"><i></i>链</span>
+        <span class="led" id="ledAnchor" title="身份锚"><i></i>锚</span>
+        <span class="led" id="ledSlot" title="卡槽"><i></i>卡槽</span>
+        <span class="led" id="ledDisk" title="主盘 / 备份盘"><i></i>盘</span>
+      </div>
+      <div class="nums">
+        <div><b id="mnRecall">—</b><i>召回</i></div>
+        <div><b id="mnSyn">—</b><i>突触</i></div>
+        <div><b id="mnNew">—</b><i>新记</i></div>
+      </div>
+    </div>
+    <div class="mlog" id="mlog"></div>
     <div class="sp"></div>
     <button class="btn danger" id="btnExit">退出实例</button>
   </aside>
@@ -1857,6 +1902,82 @@ function renderSide(){
   if(S.alive){ dot.className="dot"; tx.textContent="已连接"; }
   else { dot.className="dot off"; tx.textContent="连不上"; }
   $("#stamp").textContent = S.stamp || "—";
+  renderMini();
+}
+
+/* 左栏那四个灯 + 三个数字。
+   原则：只读已有数据，不新开接口、不算新东西 —— 免得面板自己成为负担。 */
+function setLed(id, state){
+  var e = document.getElementById(id);
+  if(!e) return;
+  e.className = "led" + (state==="ok"?" ok":(state==="bad"?" bad":(state==="warn"?" warn":"")));
+}
+function renderMini(){
+  var h = S.health || {}, tl = h.timeline || {};
+  var m = (S.data && S.data.metrics) || {};
+
+  /* 链：好了绿，断了红，没数据灰 */
+  setLed("ledChain", tl.chain_ok===true ? "ok" : (tl.chain_ok===false ? "bad" : ""));
+
+  /* 锚：ok 绿；rollback/replaced 红；first/没有 灰 */
+  var av = tl.anchor_verdict || "";
+  setLed("ledAnchor", av==="ok" ? "ok" : (av==="rollback"||av==="replaced" ? "bad" : ""));
+
+  /* 卡槽：插着绿、没插黄（不算错，只是状态）、坏了红 */
+  var sl = S.slot || "";
+  setLed("ledSlot", sl==="injected" ? "ok" : (sl==="broken"||sl==="unknown" ? "bad" : "warn"));
+
+  /* 盘：有备份且在线 → 绿；只有主盘 → 黄；一个都没识别 → 灰 */
+  var dk = (S.data && S.data.disks) || {};
+  var backs = (dk.disks||[]).filter(function(x){ return x.role==="backup"; });
+  var anyOnline = (dk.disks||[]).some(function(x){ return x.online; });
+  setLed("ledDisk", backs.length && backs.some(function(x){return x.online;}) ? "ok"
+                  : (anyOnline ? "warn" : ""));
+
+  var el;
+  el = $("#mnRecall");
+  if(el) el.textContent = (m.recall_24h!=null ? m.recall_24h : "—");
+  el = $("#mnSyn");
+  if(el) el.textContent = ((m.synapse||{}).edges!=null ? (m.synapse||{}).edges : "—");
+  el = $("#mnNew");
+  if(el) el.textContent = (m.created_24h!=null ? m.created_24h : "—");
+  renderMiniLog();
+}
+
+/* 左栏底部"最近几条"：只留 6 行，多了就挤。
+   原来它在网格里独占一行 c4、右边一大片空，挪过来正好。 */
+function renderMiniLog(){
+  var box = document.getElementById("mlog");
+  if(!box) return;
+  var all = ((S.data && S.data.timeline_tail) || []).slice().reverse();
+  /* 相邻同 kind 合并：连着三条 boot 没必要占三行，
+     只留最新那条 + "×3"，省下来的行给真正有内容的 mem */
+  var rows = [];
+  all.forEach(function(x){
+    var k = String(x.kind || "");
+    var last = rows[rows.length-1];
+    if(last && last.kind === k && (k==="boot" || k==="alive")){ last.n++; return; }
+    rows.push({kind:k, seq:x.seq, note:x.note, n:1});
+  });
+  rows = rows.slice(0, 24);
+  if(!rows.length){ box.innerHTML = '<div class="r"><span>还没有记录</span></div>'; return; }
+  var KN = {boot:"启动", alive:"心跳", mem:"记", decay:"忘", recall:"想起",
+            skill:"本事", incident:"出事", untrust:"解封", sleep_start:"睡",
+            sleep_end:"醒", dream:"做梦"};
+  box.innerHTML = rows.map(function(x){
+    var k = x.kind;
+    var cls = (k==="incident") ? " b" : (k.indexOf("sleep")===0 ? " w" : "");
+    /* note 里常带"他#951 使用者☭：整段原文"，一行放不下 —— 冒号前的人名/序号去掉，
+       正文砍到 26 字，左栏只留"发生了什么" */
+    var raw = String(x.note || "")
+      .replace(/\[[^\]]{1,14}\]\s*/g, "")
+      .replace(/^[^：:]{1,24}[：:]\s*/, "");
+    if(raw.length > 26) raw = raw.slice(0, 26) + "…";
+    var tail = (x.n > 1 ? " ×"+x.n : "") + (raw ? " · " + raw : "");
+    return '<div class="r'+cls+'"><i></i><b>'+esc(String(x.seq||""))+'</b>'+
+      '<span title="'+esc(k+' '+String(x.note||""))+'">'+
+      esc((KN[k]||k)+tail)+'</span></div>';
+  }).join("");
 }
 
 function cardHTML(cls, title, body, tag){
@@ -2111,14 +2232,7 @@ function viewDash(){
   var ts=(m.timeline_series||[]).map(function(v,i){ return {day:String(i).padStart(2,"0"),n:v}; });
   out += cardHTML("c4","TIMELINE / 吞吐 (24H)",
     '<canvas id="cvTick"></canvas>','每小时 tick 数');
-  /* ── ⑮ 时间线日志 ── */
-  out += cardHTML("c4","TIMELINE LOG / 最近",
-    '<div class="logs">'+(d.timeline_tail||[]).slice(-8).reverse().map(function(x){
-      var ic = (x.kind==="incident")?"ic b":(x.kind.indexOf("sleep")===0?"ic w":"ic");
-      return '<div class="l"><span class="'+ic+'">●</span>'+
-        '<span class="sq">'+x.seq+'</span>'+
-        '<span class="nt" title="'+esc(x.note)+'">'+esc(x.kind)+
-        (x.note? " · "+esc(x.note):"")+'</span></div>'; }).join('')+'</div>');
+  /* ── ⑮ 时间线日志：挪到左栏（见 aside 的 .mlog），不再占网格一行 ── */
 
   /* ── ⑯ 账本 ── */
   out += cardHTML("c12","LEDGER / 账本",
@@ -2835,6 +2949,7 @@ function refresh(){
   ]).then(function(a){
     var h=a[0], st=a[1], cd=a[2], cs=a[3], tl=a[4], dk=a[5];
     S.alive = !!(h && h.ok);
+    S.health = h || {};
     S.slot = (cs && cs.cardslot && cs.cardslot.state) || "unknown";
     S.data = cd && cd.ok ? cd : (S.data||{});
     /* 盘子/备份：单独一条接口，别塞进 /console_data（那是纯 DB 读数） */
