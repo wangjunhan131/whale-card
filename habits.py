@@ -182,7 +182,16 @@ def confidence_of(hits, days):
     return round(0.5 * h + 0.5 * d, 3)
 
 
-def status_of(hits, days, conflict=False, pinned=False, last_seen=None, now=None):
+# 口头语和"行为习惯"攒起来的速度不一样：行为习惯要见够次数才算数；
+# 口头语本来就偶尔冒一句（实测真卡挖出来的候选最高才 8 次、跨 8 天），
+# 用 10 次 / 14 天的门槛等于永远进不来 —— 所以按类给两套门槛。
+# 不传 category 时行为完全不变（老测试、老用法都安全）。
+STABLE_LANG_MIN_HITS = 5
+STABLE_LANG_MIN_DAYS = 5
+
+
+def status_of(hits, days, conflict=False, pinned=False, last_seen=None, now=None,
+              category=""):
     """状态机：钉住 > 冲突 > 稳定 > 候选 > 衰减。"""
     if pinned:
         return ST_PINNED
@@ -190,7 +199,10 @@ def status_of(hits, days, conflict=False, pinned=False, last_seen=None, now=None
         return ST_CONFLICT
     if last_seen and now and (now - last_seen) > HAB_DECAY_DAYS * DAY:
         return ST_DECAYED
-    if (hits or 0) >= HAB_STABLE_MIN_HITS and (days or 0) >= HAB_STABLE_MIN_DAYS:
+    min_hits, min_days = HAB_STABLE_MIN_HITS, HAB_STABLE_MIN_DAYS
+    if category == "language":
+        min_hits, min_days = STABLE_LANG_MIN_HITS, STABLE_LANG_MIN_DAYS
+    if (hits or 0) >= min_hits and (days or 0) >= min_days:
         return ST_STABLE
     if (hits or 0) >= HAB_CAND_MIN_HITS and (days or 0) >= HAB_CAND_MIN_DAYS:
         return ST_CANDIDATE
@@ -257,7 +269,7 @@ def upsert(con, category, key, hits, days, first_seen, last_seen,
     ev = json.dumps(evidence or [], ensure_ascii=False)
     conf = confidence_of(hits, days)
     st = status_of(hits, days, conflict=False, pinned=pinned,
-                   last_seen=last_seen, now=now)
+                   last_seen=last_seen, now=now, category=category)
     if row is None:
         con.execute(
             "INSERT INTO habits(category,key,trigger,behavior,scope,subject_key,"

@@ -300,6 +300,8 @@ def main(argv=None):
     ap.add_argument("--json", default=DEFAULT_JSON)
     ap.add_argument("--include-reports", action="store_true")
     ap.add_argument("--top", type=int, default=40)
+    ap.add_argument("--write", action="store_true",
+                    help="把 keep/review 的候选写进 habits 表（默认只出报告）")
     args = ap.parse_args(argv)
 
     if not os.path.exists(args.db):
@@ -352,7 +354,46 @@ def main(argv=None):
         for c in cands[:10]))
     print("报告：%s" % args.out)
     print("JSON：%s" % args.json)
+
+    # ---- 可选：写进 habits 表（默认不写） ----
+    # 为什么默认不写：挖出来的是统计，写进去的是"她的习惯"。
+    # 前者错了顶多报告难看，后者错了她会开始演。所以这一步得人点头。
+    if args.write:
+        n = write_back(args.db, cands)
+        print("已写入 habits 表：%d 条（keep + review）" % n)
     return 0
+
+
+def write_back(db_path, cands):
+    """把建议保留/待定的候选 upsert 进 habits 表，返回写入条数。"""
+    import sqlite3 as _s
+    try:
+        import habits as H
+    except Exception:
+        return 0
+    con = _s.connect(db_path, timeout=30.0)
+    try:
+        H.ensure_table(con)
+        n = 0
+        now = time.time()
+        for c in cands:
+            if c.get("suggest") == "drop":
+                continue
+            hits = int(c.get("hits") or 0)
+            days = int(c.get("days") or 0)
+            status = H.status_of(hits, days, 0, 0, now - 86400, now,
+                                 category="language")
+            H.upsert(con, category="language", key=c["key"], hits=hits,
+                     days=days, first_seen=now - days * 86400.0,
+                     last_seen=now, evidence=c.get("samples") or [],
+                     note="由 mine_habits.py 自动挖出（lift=%.2f，%s）"
+                          % (c.get("lift") or 0, c.get("suggest")),
+                     now=now)
+            n += 1
+        con.commit()
+        return n
+    finally:
+        con.close()
 
 
 if __name__ == "__main__":

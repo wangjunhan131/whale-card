@@ -48,6 +48,7 @@ import padlib
 import ctxweight
 import skill
 import identity
+import habits as habits_mod
 import synapse as synapse_mod
 # 🔧 T4-3：语义层。它是唯一需要 numpy 的模块，所以关在 semantic.py 里，
 #    这里只在用得到的时候碰它。拿不到（模型没下/numpy 没装）就退回字面匹配 ——
@@ -4318,7 +4319,65 @@ class MemoryCard:
         if persona:
             lines.append("我的性格和说话方式：")
             lines.append(persona)
+        # 习惯：从 habits 表里捞几条「我平时怎么说」。
+        # 2026-11-04 加。跟性格分开写，因为性格是「我是什么样的人」，
+        # 习惯是「具体场合下我常怎么开口」—— 前者不该被数据改，后者本来就该变。
+        hints = self.habit_hints()
+        if hints:
+            lines.append("我平时说话的口气（是参考，不是台词；"
+                         "没有合适的场合就别硬用）：")
+            for h in hints:
+                lines.append("· " + h)
         return "\n".join(lines)
+
+    # ---------- 习惯层 v2：只读地捞几条给上下文用 ----------
+    def habit_hints(self, limit=5, max_chars=220):
+        """从 habits 表捞几条稳定习惯，拼成短句给【我是谁】用。
+
+        为什么要有它：卡里 565 条记忆全是「发生了什么」，没有一条是
+        「我这人平时怎么说话」。挖出来的习惯如果只躺在报告里，
+        那她还是那个每轮靠提示词临时扮演的自己。
+
+        三条自我约束（都是为了别变成背台词）：
+          1. 只取 stable / pinned，候选和衰减中的不进来 —— 凭印象说不如不说；
+          2. 最多 5 条、总字数 ≤220（密度刹车）；
+          3. 默认开，`WHALE_HABITS=0` 可一键关掉。
+        表不存在（还没挖过）时返回空列表，不报错、不建表。
+        """
+        if os.environ.get("WHALE_HABITS", "1") == "0":
+            return []
+        try:
+            rows = self.db.execute(
+                "SELECT key, category, trigger, behavior, weight, confidence,"
+                " status, pinned, hits FROM habits"
+                " WHERE status IN (?, ?) AND key != ''"
+                " ORDER BY pinned DESC, weight DESC, confidence DESC, hits DESC"
+                " LIMIT ?",
+                (habits_mod.ST_STABLE, habits_mod.ST_PINNED,
+                 max(1, int(limit) * 3))).fetchall()
+        except Exception:
+            return []
+        out = []
+        used = 0
+        for r in rows:
+            trig = (r["trigger"] or "").strip()
+            beh = (r["behavior"] or "").strip()
+            key = (r["key"] or "").strip()
+            if trig and beh:
+                line = "当%s的时候，我一般会%s" % (trig, beh)
+            elif key:
+                line = "我会用「%s」这种说法" % key
+            else:
+                continue
+            if line in out:
+                continue
+            if used + len(line) > max_chars:
+                break
+            out.append(line)
+            used += len(line)
+            if len(out) >= int(limit):
+                break
+        return out
 
     def assemble_context(self, query, identity="", recent_lines=None,
                          budget=TOKEN_BUDGET, scene=None):
