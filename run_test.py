@@ -34,7 +34,7 @@ def show(title, card, query):
 
 def main():
     print(line)
-    print("鲸鱼娘数字生命卡 · 第一期验收")
+    print("小鲸鱼数字生命卡 · 第一期验收")
     print(line)
 
     # ---------- 场景 1：存进去，立刻问 ----------

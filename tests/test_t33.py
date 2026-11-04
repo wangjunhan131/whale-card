@@ -142,9 +142,9 @@ def main():
                   salience=0.95)
     card.remember("用户喜欢吃白米饭", salience=0.8)
 
-    c1 = card.assemble_context("今天过得怎么样", identity="你是鲸鱼娘。")
+    c1 = card.assemble_context("今天过得怎么样", identity="你是小鲸鱼。")
     c2 = card.assemble_context("帮我把这个脚本改一下，报错了",
-                               identity="你是鲸鱼娘。")
+                               identity="你是小鲸鱼。")
     print(f"  普通 → 场景「{c1['scene']}」配额 {c1['quota']}")
     print(f"  技能 → 场景「{c2['scene']}」配额 {c2['quota']}")
     ok = (c2["quota"]["recall"] > c1["quota"]["recall"]
@@ -155,7 +155,7 @@ def main():
 
     # ---- 13) 总长度永不超预算 ----
     junk = ["x" * 200] * 60
-    c3 = card.assemble_context("你还记得什么", identity="你是鲸鱼娘。",
+    c3 = card.assemble_context("你还记得什么", identity="你是小鲸鱼。",
                                recent_lines=junk)
     ok = c3["est_tokens"] <= 6000
     print(("  ✅" if ok else "  ❌") +
@@ -163,7 +163,7 @@ def main():
     ok_all &= ok
 
     # ---- 14) 情绪场景格 4 变大 ----
-    c4 = card.assemble_context("我今天很难受，想哭", identity="你是鲸鱼娘。")
+    c4 = card.assemble_context("我今天很难受，想哭", identity="你是小鲸鱼。")
     ok = c4["scene"] == "情绪陪伴" and c4["quota"]["recall"] > c1["quota"]["recall"]
     print(("  ✅" if ok else "  ❌") +
           f" 情绪场景「{c4['scene']}」格4 {c1['quota']['recall']}"

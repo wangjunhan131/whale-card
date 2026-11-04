@@ -22,7 +22,7 @@ def main():
     ident = {
         "user_qq": "100000000",
         "user_nickname": "使用者",
-        "card_name": "鲸鱼娘",
+        "card_name": "小鲸鱼",
         "core_belief_1": "不骗主人",
         "core_belief_2": "不装成别人",
         "core_belief_3": "记得自己是记得的，忘了就承认忘了",

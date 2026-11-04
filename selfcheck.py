@@ -195,7 +195,7 @@ def check_card():
                 if gc:
                     vals[k] = gc
         if vals.get("card_name") in (None, ""):
-            vals["card_name"] = c.identity.get_live("self_name") or "鲸鱼娘"
+            vals["card_name"] = c.identity.get_live("self_name") or "小鲸鱼"
         ok, bad = c.identity.verify(vals)
         rec("B 卡完整", "身份锚校验", OK if ok else BAD, "对不上的键：%s" % (bad or "无"))
         miss = [k for k in ("card_name", "user_nickname", "user_qq",

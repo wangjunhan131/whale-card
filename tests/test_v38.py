@@ -103,7 +103,7 @@ class LifeCardManager:
     def __init__(self, ctx_base_n=3):
         self.ctx_base_n = ctx_base_n
         self.loaded = True
-        self.card_meta = {"card_id":"whalegirl_001","name":"鲸鱼娘","version":"V3.8"}
+        self.card_meta = {"card_id":"whalegirl_001","name":"小鲸鱼","version":"V3.8"}
         self.personality = [0.62,0.75,0.41,0.58]
         self.mood_base = [0.2,0.1,0.05,0.0]
         self.oxy_bond = {USER_ID: 0.78}

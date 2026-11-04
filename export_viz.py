@@ -240,7 +240,7 @@ HTML = r"""<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8">
-<title>鲸鱼娘 · 记忆星云</title>
+<title>小鲸鱼 · 记忆星云</title>
 <style>
   :root{
     --bg:#0b0f16; --panel:#131a24; --line:#1f2b3a;

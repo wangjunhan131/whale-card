@@ -1,6 +1,6 @@
 @echo off
 chcp 65001 >nul
-title 鲸鱼娘 · 控制台
+title 小鲸鱼 · 控制台
 cd /d "%~dp0"
 
 rem 优先用随卡走的便携 Python（runtime\python），没有才用系统 python。

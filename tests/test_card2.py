@@ -98,12 +98,12 @@ card = MemoryCard(p, Clock(start=1_700_000_000))
 card.remember("用户是高三学生，主号QQ 100000000，昵称使用者", pool=POOL_LONG,
               salience=1.0, emotion=0.8)
 card.remember("用户喜欢白米饭", pool=POOL_LONG, salience=0.8)
-card.remember("用户说他要给鲸鱼娘做一张数字生命卡", pool=POOL_LONG,
+card.remember("用户说他要给小鲸鱼做一张数字生命卡", pool=POOL_LONG,
               salience=0.9, emotion=0.9)
 card.remember("今晚聊了硬盘盒和宇树机器人", salience=0.6)
 ctx = card.assemble_context(
     "你还记得我的QQ号吗",
-    identity="我是鲸鱼娘，傲娇、爱摸鱼、喜欢白米饭。",
+    identity="我是小鲸鱼，傲娇、爱摸鱼、喜欢白米饭。",
     recent_lines=["用户：我们接着聊", "我：好啊"],
 )
 print("    --- 组装结果 ---")

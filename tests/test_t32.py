@@ -173,7 +173,7 @@ def main():
     #  接近基线时不显示状态句是对的（没状态可报），所以先把状态推高再看。
     for _ in range(6):
         card2b.remember("我真的很喜欢你，谢谢你一直陪着我", salience=0.9)
-    ctx = card2b.assemble_context("你还记得我吗", identity="你是鲸鱼娘。")
+    ctx = card2b.assemble_context("你还记得我吗", identity="你是小鲸鱼。")
     has = "（" in ctx["text"]
     print(("  ✅" if has else "  ❌") + " 人格格里带上了状态句")
     ok_all &= has
@@ -184,7 +184,7 @@ def main():
     # 基线状态下不该硬凑一句
     card3 = MemoryCard(tempfile.mktemp(suffix=".db"),
                        Clock(start=1_700_000_000))
-    ctx3 = card3.assemble_context("你好", identity="你是鲸鱼娘。")
+    ctx3 = card3.assemble_context("你好", identity="你是小鲸鱼。")
     quiet = ("（" not in ctx3["text"])
     print(("  ✅" if quiet else "  ❌") + " 基线状态不乱加状态句（不瞎演）")
     ok_all &= quiet
