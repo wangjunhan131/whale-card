@@ -1,8 +1,1 @@
-# 运行时依赖（都很轻，没有 torch）
-numpy>=1.24
-psutil>=5.9
-
-# 可选：只有跑 tests/test_t52.py（原文归档压缩）时需要
-# zstandard>=0.22
-# 可选：语音转写（装了 tools/media_audio.py 才能用 --asr）
-# faster-whisper>=1.2
+IyDov5DooYzml7bkvp3otZbvvIjpg73lvojovbvvvIzmsqHmnIkgdG9yY2jvvIkKbnVtcHk+PTEuMjQKcHN1dGlsPj01LjkKCiMg5Y+v6YCJ77ya5Y+q5pyJ6LeRIHRlc3RzL3Rlc3RfdDUyLnB577yI5Y6f5paH5b2S5qGj5Y6L57yp77yJ5pe26ZyA6KaBCiMgenN0YW5kYXJkPj0wLjIyCiMg5Y+v6YCJ77ya6K+t6Z+z6L2s5YaZ77yI6KOF5LqGIHRvb2xzL21lZGlhX2F1ZGlvLnB5IOaJjeiDveeUqCAtLWFzcu+8iQojIGZhc3Rlci13aGlzcGVyPj0xLjIKIyDlj6/pgInvvJpNQ1Ag5aOz5o6l5a6/5Li777yId2hhbGVfbWNwLnB577yJ5pe26ZyA6KaB44CCCiMg5rOo5oSP5LiK55WMIDwy77yabWNwIDIueCDmioogRmFzdE1DUCDmlLnlkI3miJAgTUNQU2VydmVy77yMd2hhbGVfbWNwLnB5IOaYryAxLnggQVBJ44CCCiMgbWNwPj0xLjIsPDIKCg==
