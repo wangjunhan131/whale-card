@@ -80,6 +80,31 @@ def main():
         os.environ.pop("WHALE_HABITS", None)
         ck("关完再打开又有了", len(c.habit_hints()) > 0)
 
+        # ---- 弱注入（2026-11-04 加）----
+        # 语料还少的时候 stable 一条都过不去，这层就白做了。
+        # 折中：词面闸先过一遍，剩下的以 weak 身份进上下文，硬限 3 条、
+        # 且拼句里必须标出"这条还弱"，免得变成背词表。
+        for k in ("弱一号", "弱二号", "弱三号", "弱四号", "弱五号"):
+            _add(c.db, k, habits.ST_WEAK, hits=3, days=2, weight=0.5)
+        hw = c.habit_hints(limit=50, max_chars=4000)
+        weak_lines = [x for x in hw if "还弱" in x]
+        ck("弱注入最多 3 条", len(weak_lines) <= habits.HAB_WEAK_MAX, weak_lines)
+        ck("弱条目自带提示", all("别当口头禅硬套" in x for x in weak_lines),
+           weak_lines)
+        ck("弱条目排在稳定之后",
+           all(hw.index(x) > 0 for x in weak_lines), hw)
+        # 词面闸：语法碎片不该被当口癖
+        ck("词面闸挡语法碎片",
+           all(habits.is_gram_junk(g) for g in
+               ("跟你", "刚才", "你那", "那句", "说一", "我把")),
+           [habits.is_gram_junk(g) for g in
+            ("跟你", "刚才", "你那", "那句", "说一", "我把")])
+        ck("词面闸放行真口癖",
+           not any(habits.is_gram_junk(g) for g in
+                   ("我记下", "记下了", "晚安", "睡吧", "反正")),
+           [habits.is_gram_junk(g) for g in
+            ("我记下", "记下了", "晚安", "睡吧", "反正")])
+
         # 真拼进【我是谁】
         idn = identity.IdentityAnchor(c.db)
         idn.set_name("小鲸鱼")

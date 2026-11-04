@@ -38,6 +38,16 @@ ST_STABLE = "stable"
 ST_DECAYED = "decayed"
 ST_CONFLICT = "conflict"
 ST_PINNED = "pinned"
+# 弱：语料还够不上 stable 门槛，但词面干净、lift 高，先小范围借来用。
+# 为什么要有它：真卡上"像聊天"的回复只有几十条、跨两三天，stable 要
+# 5 次/5 天（language）根本达不到；要么永远 0 条注入（等于这层白做），
+# 要么放宽门槛把"会话/的事/开始"这类噪声放进来（等于让她开始演）。
+# 第三条路：门面先过一遍词面闸，剩下的才允许以"弱"身份进上下文，
+# 而且条数硬限 3 条、排在最末尾、拼句时标出来"这条还弱"。
+ST_WEAK = "weak"
+
+# 弱注入的硬上限（再多就成了背词表）
+HAB_WEAK_MAX = 3
 
 # ---------------------------------------------------------------- 表
 SCHEMA = """
@@ -215,8 +225,52 @@ def status_of(hits, days, conflict=False, pinned=False, last_seen=None, now=None
 #   只看"她说过几次"，会把工作汇报里的词也抬上来（建文件夹/D新建文/环境变量）。
 #   正确做法是拿"不像聊天的那批回复"当背景，比一比同一个词在聊天里的频率
 #   是不是显著更高 —— 这是很粗的 PMI 思想，但足够把开发词汇压下去。
-HAB_LIFT_KEEP = 2.0
-LIFT_MAX = 20.0          # 小样本别炸出几百倍，封顶当"极高"        # 聊天里出现频率 ≥ 背景 2 倍 → 建议保留
+HAB_LIFT_KEEP = 2.0        # 聊天里出现频率 ≥ 背景 2 倍 → 建议保留
+LIFT_MAX = 20.0            # 小样本别炸出几百倍，封顶当"极高"
+HAB_LIFT_DROP = 1.2        # < 1.2 倍 → 建议丢弃（背景里也常见，不是口音）
+HAB_DISTINCT_DROP = 0.35   # 用户也常说（区分度 < 0.35）→ 建议丢弃
+
+# ---------------------------------------------------------------- 词面闸
+# 为什么需要它：纯靠 lift 挑"我常说的"会挑出一堆**语法碎片** ——
+# 「跟你 / 刚才 / 你那 / 那句 / 说一 / 我把」在 QQ 语料里全是 top，
+# 可它们不是口癖，是任何中文句子都得用的连接词。把它们写进
+# 【我是谁】她会开始"背语法"，那比没习惯更糟。
+#
+# 两条规则（白名单，不是黑名单 —— 列得出"什么算习惯"才算数）：
+#   1) 词面必须是**完整的话**：≥4 字，或 ≥3 字且以人称/时间/语气起头
+#      （我 / 你 / 别 / 反正 / 其实 / 晚安 / 明天 / 记下 …）；
+#   2) 2 字纯功能词（"跟你""你那""那句""我这""说一"）一律不算。
+# 宁可少注入几条，也不能让她把"跟你"当口头禅。
+_FUNCTION_HEADS = ("跟你", "你那", "那句", "我这", "你那", "说一", "我把",
+                   "我刚", "刚才", "以后", "不过", "其实", "就是", "然后",
+                   "这个", "那个", "一下", "已经", "还是", "还有", "所以",
+                   "因为", "但是", "而且", "什么", "怎么", "可以", "没有")
+_PHRASE_HEADS = ("我记下", "记下了", "晚安", "睡吧", "去睡", "反正", "明天",
+                 "说过", "不骗", "放心", "别急", "回来", "等你",
+                 "我不", "我会", "我先", "我这边", "摸鱼",
+                 # 2 字真口癖（不列进来会被 len<=3 的规则误伤）
+                 "行吧", "好嘞", "收到", "好呀", "嗯嗯", "好吧", "算了",
+                 "没事", "在呢", "哈哈", "好嘛", "知道")
+
+
+def is_gram_junk(gram, hits=0, days=0, lift=0.0):
+    """True = 这只是语法碎片，不该当口癖写进人格。
+
+    纯词面判断，不依赖统计阈值；统计阈值交给 suggest_of / status_of。
+    """
+    g = (gram or "").strip()
+    if not g or len(g) < 2:
+        return True
+    # 白名单：明确是"一句人话"的，直接放行
+    for h in _PHRASE_HEADS:
+        if g.startswith(h):
+            return False
+    # 2~3 字的功能词碎片，一律挡掉
+    if len(g) <= 3:
+        return True
+    if g in _FUNCTION_HEADS:
+        return True
+    return False          # 小样本别炸出几百倍，封顶当"极高"        # 聊天里出现频率 ≥ 背景 2 倍 → 建议保留
 HAB_LIFT_DROP = 1.2        # < 1.2 倍 → 建议丢弃（背景里也常见，不是口音）
 HAB_DISTINCT_DROP = 0.35   # 用户也常说（区分度 < 0.35）→ 建议丢弃
 
@@ -276,8 +330,13 @@ def suggest_of(distinct, lift, hits, days):
 # ---------------------------------------------------------------- 写入（v2 用）
 def upsert(con, category, key, hits, days, first_seen, last_seen,
            evidence=None, trigger="", behavior="", scope="character",
-           subject_key="", note="", pinned=False, now=None):
-    """按 (category,key,scope,subject_key) 合并一条习惯。v1 只给测试/工具用。"""
+           subject_key="", note="", pinned=False, now=None, force_status=""):
+    """按 (category,key,scope,subject_key) 合并一条习惯。v1 只给测试/工具用。
+
+    force_status：显式指定状态（"weak" 之类），给了就绕过 status_of。
+    为什么需要：弱注入的条目统计上永远是 candidate，但我们要它进上下文；
+    与其放宽全局门槛（噪声会跟着进来），不如让写入方明确说"这条我认，先标弱"。
+    """
     now = time.time() if now is None else now
     ensure_table(con)
     row = con.execute(
@@ -285,8 +344,11 @@ def upsert(con, category, key, hits, days, first_seen, last_seen,
         (category, key, scope, subject_key)).fetchone()
     ev = json.dumps(evidence or [], ensure_ascii=False)
     conf = confidence_of(hits, days)
-    st = status_of(hits, days, conflict=False, pinned=pinned,
-                   last_seen=last_seen, now=now, category=category)
+    if force_status:
+        st = str(force_status)
+    else:
+        st = status_of(hits, days, conflict=False, pinned=pinned,
+                       last_seen=last_seen, now=now, category=category)
     if row is None:
         con.execute(
             "INSERT INTO habits(category,key,trigger,behavior,scope,subject_key,"
@@ -296,11 +358,14 @@ def upsert(con, category, key, hits, days, first_seen, last_seen,
              first_seen, last_seen, conf, st, 1.0, 1 if pinned else 0, 0, ev,
              note, now))
     else:
+        # 注意：这里必须用位置索引，不能用 row["id"] —— 调用方的连接
+        # 不一定设了 row_factory（mine_habits.write_back 就没设），
+        # 按列名取会拿到 tuple 然后 TypeError。SELECT * 的第一列就是 id。
         con.execute(
             "UPDATE habits SET hits=?, days=?, first_seen=?, last_seen=?,"
             " confidence=?, status=?, evidence=?, trigger=?, behavior=?, note=? WHERE id=?",
             (hits, days, first_seen, last_seen, conf, st, ev, trigger, behavior,
-             note, row["id"]))
+             note, row[0]))
     con.commit()
     return conf, st
 

@@ -217,6 +217,8 @@ def phrase_candidates(mine, theirs, include_reports=False, bg_rows=None):
             for g in grams:
                 if g in STOP_PHRASES or len(g) < 2 or is_gram_junk(g):
                     continue
+                if H.is_gram_junk(g):          # 词面闸：2 字功能词不算口癖
+                    continue
                 if not H._HAS_CN_RE.search(g):      # 纯英文/数字不算口癖
                     continue
                 if g.isdigit():
@@ -340,6 +342,8 @@ def main(argv=None):
     ap.add_argument("--top", type=int, default=40)
     ap.add_argument("--write", action="store_true",
                     help="把 keep/review 的候选写进 habits 表（默认只出报告）")
+    ap.add_argument("--weak-top", type=int, default=0,
+                    help="额外把 lift 最高的前 N 条标成弱注入（配合 --write）")
     ap.add_argument("--corpus", default="",
                     help="外部语料 jsonl（tools/pull_qq_corpus.py 产出）；给了就只用它")
     args = ap.parse_args(argv)
@@ -406,13 +410,21 @@ def main(argv=None):
     # 为什么默认不写：挖出来的是统计，写进去的是"她的习惯"。
     # 前者错了顶多报告难看，后者错了她会开始演。所以这一步得人点头。
     if args.write:
-        n = write_back(args.db, cands)
+        n = write_back(args.db, cands, weak_top=args.weak_top)
         print("已写入 habits 表：%d 条（keep + review）" % n)
+        if args.weak_top > 0:
+            print("其中弱注入候选：前 %d 条（lift 最高、词面干净）" % args.weak_top)
     return 0
 
 
-def write_back(db_path, cands):
-    """把建议保留/待定的候选 upsert 进 habits 表，返回写入条数。"""
+def write_back(db_path, cands, weak_top=0):
+    """把建议保留/待定的候选 upsert 进 habits 表，返回写入条数。
+
+    weak_top > 0 时，额外把 lift 最高、词面最干净的前 N 条标成 weak（弱注入）。
+    为什么要有弱注入：stable 门槛（language 5 次/5 天）在语料还少的时候
+    一条都过不去，这层就白做了；但放宽全局门槛会把噪声放进来。
+    折中：词面闸先过一遍，剩下的允许以"弱"身份进上下文，硬限 3 条。
+    """
     import sqlite3 as _s
     try:
         import habits as H
@@ -437,6 +449,21 @@ def write_back(db_path, cands):
                           % (c.get("lift") or 0, c.get("suggest")),
                      now=now)
             n += 1
+        # 弱注入：只挑 keep、词面干净、lift 最高的前 N 条
+        if weak_top > 0:
+            pool = [c for c in cands
+                    if c.get("suggest") == "keep"
+                    and not H.is_gram_junk(c["key"])]
+            pool.sort(key=lambda x: (-(x.get("lift") or 0), -(x.get("hits") or 0)))
+            for c in pool[:int(weak_top)]:
+                hits = int(c.get("hits") or 0)
+                days = int(c.get("days") or 0)
+                H.upsert(con, category="language", key=c["key"], hits=hits,
+                         days=days, first_seen=now - days * 86400.0,
+                         last_seen=now, evidence=c.get("samples") or [],
+                         note="弱注入（语料还少，lift=%.2f）：先借来用，"
+                              "等跨够 5 天再升 stable" % (c.get("lift") or 0),
+                         now=now, force_status=H.ST_WEAK)
         con.commit()
         return n
     finally:

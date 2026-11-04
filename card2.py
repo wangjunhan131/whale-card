@@ -4354,16 +4354,21 @@ class MemoryCard:
             rows = self.db.execute(
                 "SELECT key, category, trigger, behavior, weight, confidence,"
                 " status, pinned, hits FROM habits"
-                " WHERE status IN (?, ?) AND key != ''"
+                " WHERE status IN (?, ?, ?) AND key != ''"
                 " ORDER BY pinned DESC, weight DESC, confidence DESC, hits DESC"
                 " LIMIT ?",
-                (habits_mod.ST_STABLE, habits_mod.ST_PINNED,
+                (habits_mod.ST_STABLE, habits_mod.ST_PINNED, habits_mod.ST_WEAK,
                  max(1, int(limit) * 3))).fetchall()
         except Exception:
             return []
         out = []
         used = 0
+        weak_n = 0
         for r in rows:
+            st = str(r["status"] or "")
+            if st == habits_mod.ST_WEAK:
+                if weak_n >= habits_mod.HAB_WEAK_MAX:
+                    continue
             trig = (r["trigger"] or "").strip()
             beh = (r["behavior"] or "").strip()
             key = (r["key"] or "").strip()
@@ -4373,6 +4378,9 @@ class MemoryCard:
                 line = "我会用「%s」这种说法" % key
             else:
                 continue
+            if st == habits_mod.ST_WEAK:
+                line += "（这条还弱，别当口头禅硬套）"
+                weak_n += 1
             if line in out:
                 continue
             if used + len(line) > max_chars:
