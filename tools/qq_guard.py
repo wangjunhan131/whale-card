@@ -29,6 +29,7 @@ import argparse
 import io
 import json
 import os
+import random
 import sys
 import time
 import urllib.error
@@ -344,21 +345,74 @@ def status_save(d):
         json.dump(d, f, ensure_ascii=False, indent=1)
 
 
+# 常驻进程和命令行脚本会同时改这个文件。
+# 原来"读 → 改 → 写"三步没有锁，谁后写谁赢，先写的那批标记直接丢：
+# 实测我手动标的 6 条"已回"，被值守下一轮读到的旧副本覆盖回 unreplied，
+# 表现成"明明回过却一直挂在未回里"。
+_LOCK_F = os.path.join(STATE, "status.lock")
+
+
+class _FileLock(object):
+    """跨进程互斥。拿不到就等，最多等 5 秒。"""
+
+    def __init__(self, path=_LOCK_F, timeout=5.0):
+        self.path = path
+        self.timeout = timeout
+        self.fd = None
+
+    def __enter__(self):
+        deadline = time.time() + self.timeout
+        while True:
+            try:
+                self.fd = os.open(self.path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+                return self
+            except OSError:
+                if time.time() > deadline:
+                    # 锁文件可能是上一个进程崩掉留下的，过期就抢过来
+                    try:
+                        if time.time() - os.path.getmtime(self.path) > 10:
+                            os.remove(self.path)
+                            continue
+                    except OSError:
+                        pass
+                    raise
+                time.sleep(0.02)
+
+    def __exit__(self, *exc):
+        try:
+            if self.fd is not None:
+                os.close(self.fd)
+            os.remove(self.path)
+        except OSError:
+            pass
+        return False
+
+
+def status_patch(patch):
+    """原子地改若干条状态。patch = {mid: {"st":..., "at":..., "by":...}}。
+
+    读-改-写全程持锁，避免和常驻进程互相覆盖。
+    """
+    with _FileLock():
+        d = status_load()
+        d.update(patch)
+        status_save(d)
+        return d
+
+
 def mark(mid, st=ST_REPLIED, by="self"):
     """给一条消息打标签。这是"已回/未回"的唯一写入口。"""
-    d = status_load()
     k = str(mid)
-    d[k] = {"st": st, "at": int(_now()), "by": by}
-    status_save(d)
-    return d[k]
+    rec = {"st": st, "at": int(_now()), "by": by}
+    status_patch({k: rec})
+    return rec
 
 
 def mark_many(mids, st=ST_REPLIED, by="self"):
-    d = status_load()
     ts = int(_now())
-    for mid in mids:
-        d[str(mid)] = {"st": st, "at": ts, "by": by}
-    status_save(d)
+    patch = {str(m): {"st": st, "at": ts, "by": by} for m in mids}
+    if patch:
+        status_patch(patch)
     return len(mids)
 
 
@@ -370,12 +424,13 @@ def _mark_if_new(mid, st=ST_UNREPLIED):
     """
     if not mid:
         return
-    d = status_load()
     k = str(mid)
-    if k in d:
-        return
-    d[k] = {"st": st, "at": int(_now()), "by": "guard"}
-    status_save(d)
+    with _FileLock():
+        d = status_load()
+        if k in d:          # 已有标签：一个字节都不动
+            return
+        d[k] = {"st": st, "at": int(_now()), "by": "guard"}
+        status_save(d)
 
 
 def read_todo(only_unreplied=True, kind="", limit=40, only_background=False):
@@ -434,6 +489,9 @@ def poll_once(seen, verbose=True):
     q = quota_load()
     groups = list_groups()
     friends = list_friends()
+    # 每轮把群的顺序打散：永远按 group_id 升序去读，
+    # 抓包一看就是一条固定序列，和"人挨个点开看看"不一样。
+    random.shuffle(groups)
 
     # ---- 群 ----
     for g in groups:
@@ -603,6 +661,42 @@ def overdue():
                time.strftime("%m-%d %H:%M", time.localtime(oldest))))
 
 
+# ---------------------------------------------------------------- 节奏
+# 为什么要有这个：真人不会每隔整 5 秒去敲一次门。
+# 固定间隔 + 固定顺序 = 机器指纹，平台风控最先抓的就是这个。
+# 所以三件事都得抖：
+#   ①轮询间隔：base 上下浮动（抖动 ±40%），闲下来再乘 2~4 倍随机；
+#   ②每次轮询之间的顺序（先看哪个群）随机打散；
+#   ③真要开口说话时，间隔按"人打字"估：短句 8~20 秒、长句 20~70 秒，
+#     而且每次在前一条基础上再叠一个随机，绝不连着两条一样长。
+JITTER = 0.40          # 轮询间隔抖动幅度
+
+
+def _jitter(sec, amp=JITTER):
+    """把 sec 抖成 sec*(1±amp) 之间的随机值，最低 1 秒。"""
+    lo = max(1.0, sec * (1.0 - amp))
+    hi = max(lo + 0.5, sec * (1.0 + amp))
+    return random.uniform(lo, hi)
+
+
+def human_gap(text, rnd=None):
+    """按"人要打这句话"估一个发送间隔（秒），并带随机。
+
+    参考：中文手机打字约 2~4 字/秒，加上读上文、犹豫、删改，
+    短句（<10 字）落在 8~20 秒，中句 20~45 秒，长句 45~70 秒。
+    这里再乘一个 0.75~1.35 的随机，保证任何两条都不会等长。
+    """
+    rnd = rnd or random
+    n = len(text or "")
+    if n <= 10:
+        base = rnd.uniform(8, 20)
+    elif n <= 30:
+        base = rnd.uniform(20, 45)
+    else:
+        base = rnd.uniform(45, 70)
+    return round(base * rnd.uniform(0.75, 1.35), 1)
+
+
 # ---------------------------------------------------------------- 常驻
 def run_forever(interval=5):
     _ensure()
@@ -635,8 +729,12 @@ def run_forever(interval=5):
             print("[qq_guard] 轮询出错：%s" % e)
         with io.open(BEAT, "w", encoding="utf-8") as f:
             f.write(str(int(_now())))
-        # 有消息时快一点，闲着时慢一点（省 CPU 也给 NapCat 喘息）
-        time.sleep(interval if idle < 12 else interval * 3)
+        # 有消息时快一点，闲着时慢一点（省 CPU 也给 NapCat 喘息）；
+        # 两档都带抖动，别让心跳成为可被统计的固定节拍。
+        if idle < 12:
+            time.sleep(_jitter(interval))
+        else:
+            time.sleep(_jitter(interval * random.uniform(2.0, 4.0)))
     for p in (PIDF, BEAT):
         try:
             os.remove(p)
@@ -699,14 +797,18 @@ def main(argv=None):
             print("（没有）")
             return 0
         for r in rows:
-            tag = "未回" if r["st"] == ST_UNREPLIED else "已回"
+            # 三种状态都得能看见。以前只认"未回/已回"两种，
+            # 背景闲聊被显示成"已回" —— 看着像回过，其实没人理过。
+            tag = {ST_UNREPLIED: "未回", ST_REPLIED: "已回",
+                   ST_BACKGROUND: "背景"}.get(r["st"], r["st"])
             where = r.get("group_name") or ("私聊 " + str(r.get("sender")))
             print("[%s] %s  %s：%s"
                   % (tag, time.strftime("%m-%d %H:%M",
                                         time.localtime(int(r.get("ts") or 0))),
                      where, (r.get("text") or "")[:50]))
         s = summary()
-        print("—— 未回 %d 条 ｜ 已回 %d 条" % (s["unreplied"], s["replied"]))
+        print("—— 未回 %d 条 ｜ 已回 %d 条 ｜ 背景 %d 条"
+              % (s["unreplied"], s["replied"], s["background"]))
         return 0
     if args.once:
         n, kept = poll_once(_load_seen())
