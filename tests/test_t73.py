@@ -107,6 +107,54 @@ ok("有备份行", "backup" in roles, roles)
 ok("每行都有 serial", all(d.get("serial") is not None for d in st["disks"]), 
    [d.get("serial") for d in st["disks"]])
 
+# ---- [7] reseed：分叉先拒、预演、再重做，并留证 ----
+print("\n[7] 分叉与重做备份（reseed）")
+import timeline  # noqa: E402
+
+A = os.path.join(tmp, "A")
+B = os.path.join(tmp, "B")
+# 造真分叉：A 和 B 各写一条不同的，长度一样但哈希不同
+# （只给 B 加一条的话，会先撞上"备份比主盘新"那条分支，测不到分叉）
+_con_a = sqlite3.connect(os.path.join(A, "card.db"))
+_con_a.row_factory = sqlite3.Row
+ta = timeline.Timeline(_con_a)
+ta.append("talk", "只有A有的一条", ts=time.time() + 1)
+_con_b = sqlite3.connect(os.path.join(B, "card.db"))
+_con_b.row_factory = sqlite3.Row
+tb = timeline.Timeline(_con_b)
+tb.append("talk", "只有B有的一条", ts=time.time() + 1)
+
+r = disks.sync_to(A, B, confirm=True)
+ok("分叉时 sync 拒绝", r.get("ok") is False, r.get("why"))
+ok("拒绝时说清丢什么", r.get("need_reseed") is True and len(r.get("orphans") or []) >= 1,
+   r.get("orphans"))
+ok("给得出分叉点", r.get("fork_at") is not None, r.get("fork_at"))
+
+r = disks.sync_to(A, B, confirm=False, reseed=True)
+ok("reseed 不确认时只预演", r.get("dry_run") is True and r.get("action") == "reseed", r.get("action"))
+
+r = disks.sync_to(A, B, confirm=True, reseed=True)
+ok("reseed 成功", r.get("ok") is True, r.get("why"))
+ok("reseed 后两边链头一致",
+   disks.card_fp(os.path.join(A, "card.db"))["head_hash"]
+   == disks.card_fp(os.path.join(B, "card.db"))["head_hash"])
+seedlog = os.path.join(B, "SEED-LOG.json")
+ok("丢掉的孤儿记进 SEED-LOG", os.path.exists(seedlog))
+if os.path.exists(seedlog):
+    note = json.load(open(seedlog, encoding="utf-8"))
+    ok("SEED-LOG 里有孤儿", isinstance(note.get("orphans"), list) and len(note["orphans"]) >= 1,
+       len(note.get("orphans") or []))
+
+fa = disks.card_fp(os.path.join(A, "card.db"))
+fb = disks.card_fp(os.path.join(B, "card.db"))
+ok("reseed 后前缀判定为真", disks._prefix_match(fb, fa) is True)
+
+# Windows：连接没关时 rmtree 会失败（文件被占用）
+for _c in ("_con_a", "_con_b"):
+    try:
+        globals()[_c].close()
+    except Exception:
+        pass
 shutil.rmtree(tmp, ignore_errors=True)
 print("\n临时目录已删:", not os.path.exists(tmp))
 print("\n结果：%d 过 / %d 挂" % (PASS, FAIL))

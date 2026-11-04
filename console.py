@@ -2325,11 +2325,40 @@ function diskPost(act, path){
     .then(function(r){ return r.json().then(function(j){ return {code:r.status, j:j}; }); })
     .then(function(o){
       var j = o.j || {};
+      if(j.need_reseed){
+        /* 分叉：不是"坏了"，是"两块盘各自写过东西"。把丢什么说清楚，让人拍板。 */
+        var killed = (j.orphans||[]).map(function(x){
+          return "#" + x.seq + " " + (x.kind||"") + (x.note ? "「" + x.note + "」" : "");
+        }).join("、");
+        msg.textContent = "两边在 seq=" + j.fork_at + " 之后分叉了：备份盘上有 " +
+          (j.orphans||[]).length + " 条主盘没有的记录（" + killed + "）。";
+        if(confirm("备份盘上这几条主盘没有：\n\n" + killed +
+                   "\n\n如果这些是测试留下的垃圾，可以重做备份（用主盘整份覆盖它）。"
+                   + "\n\n它们会被记进 G:\\SEED-LOG.json 留证，不会凭空消失。\n\n要继续吗？")){
+          diskPost2(path);
+        }
+        return;
+      }
       var t = j.ok ? ("好了：" + (j.action || (j.switched?"已换主备":"完成")))
                    : ("没做成：" + (j.why || o.code));
       if(j.old_main_now) t += " · 原来那块现在是" + j.old_main_now;
       msg.textContent = t;
       setTimeout(refresh, 1200);
+    })
+    .catch(function(e){ msg.textContent = "请求失败：" + e; });
+}
+/* 重做备份：reseed=true，明确允许"分叉也覆盖"（丢的是备份盘上的孤儿） */
+function diskPost2(path){
+  var msg = $("#diskMsg");
+  msg.textContent = "正在重做备份…（要覆盖整份卡，稍等几十秒）";
+  fetch("/disks/sync", {method:"POST", headers:{"Content-Type":"application/json"},
+        body: JSON.stringify({path:path, confirm:true, reseed:true})})
+    .then(function(r){ return r.json().then(function(j){ return {code:r.status, j:j}; }); })
+    .then(function(o){
+      var j = o.j || {};
+      msg.textContent = j.ok ? ("重做完成：seq " + j.from_seq + " → " + j.to_seq)
+                             : ("没做成：" + (j.why || o.code));
+      setTimeout(refresh, 1500);
     })
     .catch(function(e){ msg.textContent = "请求失败：" + e; });
 }

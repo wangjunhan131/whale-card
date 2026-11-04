@@ -728,7 +728,10 @@ class Handler(BaseHTTPRequestHandler):
                         if path == "/disks/backup":
                             out = _disks.backup_to(here, target, confirm=True)
                         elif path == "/disks/sync":
-                            out = _disks.sync_to(here, target, confirm=True)
+                            # reseed=true 才允许"分叉也覆盖"：那是丢掉备份盘上
+                            # 主盘没有的孤儿记录，必须由人显式点。
+                            out = _disks.sync_to(here, target, confirm=True,
+                                                 reseed=bool(body.get("reseed")))
                         else:
                             out = _disks.switch_role(here, target)
                     return self._send(200 if out.get("ok") else 409, out)

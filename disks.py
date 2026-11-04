@@ -316,6 +316,37 @@ def status(card_dir=HERE):
             "disks": rows}
 
 
+def _fork_of(main_db, back_db):
+    """两条链从哪儿开始不一样。返回 (共同前缀末节, 备份盘上被丢掉的条目)。
+
+    为什么要它：分叉判断只看链头是"对不上"，但用户需要知道**丢的是什么**。
+    把孤儿条目列出来，人才能判断"这是测试垃圾"还是"这是我自己的日子"。
+    """
+    try:
+        a = sqlite3.connect("file:%s?mode=ro" % main_db.replace("\\", "/"), uri=True)
+        b = sqlite3.connect("file:%s?mode=ro" % back_db.replace("\\", "/"), uri=True)
+        A = {r[0]: (r[1] or "") for r in a.execute("SELECT seq, self_hash FROM timeline")}
+        B = {r[0]: (r[1] or "") for r in b.execute("SELECT seq, self_hash FROM timeline")}
+        meta = {r[0]: (r[1], r[2], r[3]) for r in b.execute(
+            "SELECT seq, ts, kind, note FROM timeline")}
+        a.close()
+        b.close()
+    except Exception as e:
+        return None, [], str(e)
+    last_ok = 0
+    for seq in sorted(set(A) & set(B)):
+        if A[seq] != B[seq]:
+            break
+        last_ok = seq
+    orphans = []
+    for seq in sorted(B):
+        if seq > last_ok:
+            ts, kind, note = meta.get(seq, (None, "", ""))
+            orphans.append({"seq": seq, "ts": ts, "kind": kind,
+                            "note": (note or "")[:80]})
+    return last_ok, orphans, None
+
+
 def _prefix_match(backup_fp, main_fp):
     """备份的链头是不是主盘这条链上的某一节（同一张卡、只是落后）。"""
     if not backup_fp.get("head_hash") or not main_fp.get("head_hash"):
@@ -347,6 +378,12 @@ def _snapshot_db(src_db, dst_db):
     finally:
         src.close()
         dst.close()
+
+
+def io_open_seedlog(path):
+    """SEED-LOG.json 用追加写文件句柄包一层 —— 只记"什么时候丢过什么"。"""
+    import io as _io
+    return _io.open(path, "a", encoding="utf-8")
 
 
 def _guard(card_dir, what):
@@ -442,7 +479,7 @@ def backup_to(card_dir, target, confirm=False):
             "backup": info, "bundle": bundle}
 
 
-def sync_to(card_dir, target, confirm=False):
+def sync_to(card_dir, target, confirm=False, reseed=False):
     """把活卡的最新状态同步到一块落后于它的备份盘。
 
     只允许"备份落后"这一种情况：
@@ -462,10 +499,41 @@ def sync_to(card_dir, target, confirm=False):
         return {"ok": False, "why": "备份比主盘还新（%s > %s），拒绝用主盘覆盖它"
                 % (back.get("head_seq"), main.get("head_seq"))}
     if not _prefix_match(back, main):
-        return {"ok": False,
-                "why": "备份的链头不在主盘这条链上（分叉），拒绝同步",
-                "backup_head": (back.get("head_hash") or "")[:12],
-                "main_seq": main.get("head_seq")}
+        last_ok, orphans, err = _fork_of(
+            os.path.join(card_dir, "card.db"), os.path.join(target, "card.db"))
+        if not reseed:
+            return {"ok": False,
+                    "why": "两条链在 seq=%s 之后就分叉了：备份盘上有 %d 条主盘没有的记录。"
+                           "分叉时不敢自动覆盖 —— 万一那几条才是真的呢。"
+                           % (last_ok, len(orphans)),
+                    "need_reseed": True,
+                    "fork_at": last_ok,
+                    "orphans": orphans[:8],
+                    "backup_head": (back.get("head_hash") or "")[:12],
+                    "main_seq": main.get("head_seq")}
+        if not confirm:
+            return {"ok": True, "dry_run": True, "action": "reseed",
+                    "fork_at": last_ok, "orphans": orphans[:8],
+                    "n_orphans": len(orphans),
+                    "from_seq": back.get("head_seq"), "to_seq": main.get("head_seq"),
+                    "note": "重做备份会丢掉上面这些孤儿记录（主盘上没有它们）。"
+                            "确认请传 confirm=true 且 reseed=true"}
+        # 真做：先把丢掉的东西记成证据，再整份覆盖
+        try:
+            import json as _json
+            import time as _time
+            log = {"at": _time.time(),
+                   "when": _time.strftime("%Y-%m-%d %H:%M:%S"),
+                   "main_db": os.path.join(card_dir, "card.db"),
+                   "backup_db": os.path.join(target, "card.db"),
+                   "fork_at": last_ok,
+                   "main_seq": main.get("head_seq"),
+                   "backup_seq": back.get("head_seq"),
+                   "orphans": orphans}
+            with io_open_seedlog(os.path.join(target, "SEED-LOG.json")) as fh:
+                fh.write(_json.dumps(log, ensure_ascii=False, indent=1))
+        except Exception:
+            pass
     if not confirm:
         return {"ok": True, "dry_run": True, "action": "sync",
                 "from_seq": back.get("head_seq"), "to_seq": main.get("head_seq"),
