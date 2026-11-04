@@ -2045,6 +2045,10 @@ class MemoryCard:
             #          指令不是回忆，不能在「我一直记得的事」里占位。
             "speaker": "TEXT NOT NULL DEFAULT ''",
             "mtype": "TEXT NOT NULL DEFAULT 'episode'",
+            # 🔧 2026-11-04：这条记忆是从哪个通道来的（chat/qq/qq-group/
+            # bili/douyin/console/self）。以前只有 /report 一条入口，
+            # 别的通道听见了也写不进来 —— 「考试考得不错」就是这么丢的。
+            "source": "TEXT NOT NULL DEFAULT ''",
             # 🔧 2026-11-01：五层记忆（m02952/m02959 讨论后定）。
             # tier 只管"这条属于哪一层"，实际的时间行为仍由 pool + 下面几列决定：
             #   core_fixed   骨头：我是谁、我从哪来、三条底线 —— 只增不改不衰减
@@ -2251,7 +2255,7 @@ class MemoryCard:
     # ---------- 存 ----------
     def remember(self, text, salience=0.6, ts=None, pool=POOL_SHORT,
                  oxy=0.0, entities=None, emotion=None, normalize=True,
-                 region=None, speaker=None, mtype=None):
+                 region=None, speaker=None, mtype=None, source=""):
         now = self.clock.now()
         at = min(now if ts is None else float(ts), now)
         age = max(0.0, now - at)
@@ -2372,12 +2376,12 @@ class MemoryCard:
         c.execute(
             "INSERT INTO mem(raw,core,vec,pool,w,t_anchor,salience,oxy,entities,"
             "emotion,create_ts,last_active_ts,region,subj,verb,obj,erase_stage,emb,"
-            "speaker,mtype,trust,conflict,conflict_why,value) "
-            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "speaker,mtype,trust,conflict,conflict_why,value,source) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (text, core, json.dumps(vec, ensure_ascii=False), pool, w0, at,
              salience, oxy, entities, emotion, at, at, region,
              _subj, _verb, _obj, 0, _emb, speaker, mtype,
-             _trust, _conflict, _why, _value))
+             _trust, _conflict, _why, _value, source or ""))
         mid = c.lastrowid
         if _emb is not None:
             self._emb_cache[mid] = semantic_mod.from_blob(_emb)

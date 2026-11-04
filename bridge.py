@@ -257,9 +257,40 @@ def cmd_remodel(argv):
     return 0
 
 
+def cmd_note(argv):
+    """任意通道写一条 —— QQ/B站/抖音/控制台都能用。
+
+    和 report 的区别：report 是「一问一答」，note 是「发生了什么/我说了什么」。
+    以前没有这个入口，别的通道听见了也写不进卡。
+    """
+    import argparse
+    ap = argparse.ArgumentParser(prog="bridge.py note")
+    ap.add_argument("text", nargs="+", help="要记下来的那句话")
+    ap.add_argument("--source", default="cli",
+                    help="从哪条通道来的（qq/qq-group/bili/douyin/console…）")
+    ap.add_argument("--salience", type=float, default=0.55)
+    ap.add_argument("--speaker", default="self")
+    ap.add_argument("--region", default=None)
+    args = ap.parse_args(argv)
+    tx = " ".join(args.text).strip()
+    if not tx:
+        print("要记的话不能为空", file=sys.stderr)
+        return 2
+    _need_server()
+    body = {"text": tx, "source": args.source, "salience": args.salience,
+            "speaker": args.speaker}
+    if args.region:
+        body["region"] = args.region
+    out = _post("/remember", body)
+    print("[bridge] 已写回卡：mem_id=%s source=%s"
+          % (out.get("mem_id"), out.get("source")), file=sys.stderr)
+    return 0
+
+
 CMDS = {
     "ask": cmd_ask,
     "report": cmd_report,
+    "note": cmd_note,
     "health": cmd_health,
     "status": cmd_status,
     "recall": cmd_recall,

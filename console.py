@@ -107,6 +107,9 @@ def timeline_tail(db_path=DEFAULT_DB, n=40):
     return out
 
 
+MIN_CURVE_POINTS = 12     # 少于这么多个点就换更大的窗口
+
+
 def hormones_series(db_path=DEFAULT_DB, hours=24.0, limit=400):
     """h_log 里最近 N 小时的采样点。空表就是空数组 —— 不补假数据。"""
     out = []
@@ -116,6 +119,24 @@ def hormones_series(db_path=DEFAULT_DB, hours=24.0, limit=400):
         rows = c.execute(
             "SELECT ts, sero, dopa, cort, oxy, mood, oxy_g FROM h_log"
             " WHERE ts >= ? ORDER BY ts ASC LIMIT ?", (since, limit)).fetchall()
+        # 采样太少（关机、服务没起）时往更长的窗口退：5 个点画不出形状，
+        # 3 天里通常有几十个点。前端按首尾时间写"近 N 小时"，不谎称 24H。
+        if len(rows) < MIN_CURVE_POINTS:
+            for _h in (72.0, 168.0, 720.0):
+                _since = time.time() - _h * 3600.0
+                _rows = c.execute(
+                    "SELECT ts, sero, dopa, cort, oxy, mood, oxy_g FROM h_log"
+                    " WHERE ts >= ? ORDER BY ts ASC LIMIT ?",
+                    (_since, limit)).fetchall()
+                if len(_rows) >= MIN_CURVE_POINTS:
+                    rows = _rows
+                    hours = _h
+                    break
+            else:
+                rows = c.execute(
+                    "SELECT ts, sero, dopa, cort, oxy, mood, oxy_g FROM h_log"
+                    " ORDER BY ts DESC LIMIT ?", (limit,)).fetchall()
+                rows = list(reversed(rows))
         if not rows:
             rows = c.execute(
                 "SELECT ts, sero, dopa, cort, oxy, mood, oxy_g FROM h_log"
@@ -268,15 +289,28 @@ def card_metrics(db_path=DEFAULT_DB):
             pass
 
         # 召回：24h 总量、来源分布、逐小时曲线、最常被想起的几条
+        # 🔧 2026-11-04：24 小时窗口经常是 0（MCP 没装，回想只走 bridge ask），
+        #    卡片就一片空。改法：24h 空了就退到 7 天，并把实际窗口一起返回，
+        #    前端照实写「7D」。空着不等于没这功能，只是这两天没被叫醒。
         try:
-            since = now - 86400
-            out["recall_24h"] = one("SELECT COUNT(*) FROM recall_event WHERE ts>=?", (since,))
+            win = 86400
+            n24 = one("SELECT COUNT(*) FROM recall_event WHERE ts>=?", (now - win,))
+            if not n24:
+                w7 = one("SELECT COUNT(*) FROM recall_event WHERE ts>=?", (now - 7 * 86400,))
+                if w7:
+                    win = 7 * 86400
+                    n24 = w7
+            since = now - win
+            out["recall_window"] = "24H" if win == 86400 else "7D"
+            out["recall_win_s"] = int(win)
+            out["recall_24h"] = n24
             for r in c.execute("SELECT source, COUNT(*) n FROM recall_event"
                                " WHERE ts>=? GROUP BY source ORDER BY n DESC", (since,)):
                 out["recall_sources"].append({"k": r["source"] or "direct", "n": int(r["n"])})
             bins = [0] * 24
+            span = max(1, int(win))
             for r in c.execute("SELECT ts FROM recall_event WHERE ts>=?", (since,)):
-                h = int((now - _f(r["ts"])) // 3600)
+                h = int((now - _f(r["ts"])) * 24 // span)
                 if 0 <= h < 24:
                     bins[23 - h] += 1
             out["recall_series"] = bins
@@ -1318,7 +1352,7 @@ function donut(cv, items, h, center){
   var cx=W/2, cy=H/2, R=Math.min(W,H)/2-10, r=R*0.64;
   var tot=0; items.forEach(function(it){ tot+=it.n; });
   if(!tot){ g.fillStyle="#4d5665"; g.font="11px sans-serif";
-    g.textAlign="center"; g.fillText("还没有记忆",cx,cy); g.textAlign="left"; return; }
+    g.textAlign="center"; g.fillText("这段时间没有召回记录",cx,cy); g.textAlign="left"; return; }
   var a=-Math.PI/2;
   var PAL=["#57c8f0","#2fd07d","#9d8bff","#e8b44a","#ff5f6d","#5f9ea0","#c78bb8"];
   items.forEach(function(it,i){
@@ -1926,23 +1960,27 @@ function viewDash(){
     tileN("DB","记忆库", String(h.db_mb||0), "", "MB · WAL "+(h.wal_mb||0))+
     tileN("DISK","磁盘剩余", String(st.disk_free_gb||0), (st.disk_free_gb<5)?"bad":"",
           "GB FREE")+
-    tileN("RECALL","24H 召回", String(m.recall_24h||0), "", "EVENTS")+
+    tileN("RECALL",(m.recall_window||"24H")+" 召回", String(m.recall_24h||0), "", "EVENTS")+
     tileN("EMBED","向量维度", String((m.emb_dims&&m.emb_dims[0]&&m.emb_dims[0].dim)||"—"),
           "", "DIM · "+(m.usable_emb||0)+" COVER")+
     '</div>');
 
   /* ── ② 激素场 ── */
-  out += cardHTML("c12","HORMONE FIELD / 激素场 (24H)",
+  /* 采样太少时后端会自动换更长窗口 —— 标题和副标题都按真实跨度写，
+     不能把 3 天的线挂在"(24H)"下面。 */
+  var hspan=(hlog.length>1)?Math.round((hlog[hlog.length-1].ts-hlog[0].ts)/3600):0;
+  var hwin=(hspan>=168)?"近 7 天":(hspan>=48)?"近 3 天":(hspan>=20)?"近 24H":"近 12H";
+  out += cardHTML("c12","HORMONE FIELD / 激素场 ("+hwin+")",
     '<canvas id="cvH"></canvas>'+
     '<div class="legend">'+
     '<span><i style="background:#57c8f0"></i>SERO 血清素</span>'+
     '<span><i style="background:#2fd07d"></i>DOPA 多巴胺</span>'+
     '<span><i style="background:#ff5f6d"></i>CORT 皮质醇</span>'+
     '<span><i style="background:#9d8bff"></i>OXY 催产素</span>'+
-    '</div>', hlog.length+" 采样点");
+    '</div>', hlog.length+" 采样点 · 跨 "+hspan+" 小时");
   /* ── ②b PAD 三维（由 h_log 现算；公式只在 padlib.py 一处） ── */
   var padNow=(d.status&&d.status.pad)||{};
-  out += cardHTML("c12","PAD FIELD / 情绪三维 (24H)",
+  out += cardHTML("c12","PAD FIELD / 情绪三维 ("+hwin+")",
     '<canvas id="cvPad"></canvas>'+
     '<div class="legend">'+
     '<span><i style="background:#e8b44a"></i>P 愉悦</span>'+
@@ -2001,7 +2039,9 @@ function viewDash(){
   /* ── ④ 召回活动 ── */
   var rs=(m.recall_series||[]).map(function(v,i){ return {day:String(i).padStart(2,"0"),n:v}; });
   out += cardHTML("c4","RECALL RATE / 召回频率",
-    '<canvas id="cvRec"></canvas>','24H · 每小时');
+    '<canvas id="cvRec"></canvas>',
+    (m.recall_window||"24H")+" · 每格"+
+      (m.recall_window==="7D"?"（3.5 小时）":"（1 小时）"));
   /* ── ⑤ 召回来源 ── */
   out += cardHTML("c4","RECALL SOURCE / 召回来源",
     '<canvas id="cvSrc"></canvas>'+

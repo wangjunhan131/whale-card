@@ -267,7 +267,7 @@ class Mind(object):
                 "hormones": hormone_mod.describe(self.card.h),
             }
 
-    def report(self, user_message, reply="", ts=None):
+    def report(self, user_message, reply="", ts=None, source="chat"):
         with self.lock:
             if self.writer_lock:
                 # 卡被另一台机器占着：宁可报错，也不写第二条链
@@ -278,7 +278,7 @@ class Mind(object):
             # 为什么必须进 mem 而不是只存原文：
             #   原文表不参与召回。只存原文的话，「三天内几乎不遗忘」这条
             #   根本用不上 —— 因为压根没东西可遗忘，下次说话翻不到。
-            mid = self.card.remember(user_message, ts=ts)
+            mid = self.card.remember(user_message, ts=ts, source=source)
             # 出生证：记忆落库就上链（只锁出生那一刻，不锁权重）
             if self.tl is not None and mid:
                 try:
@@ -296,7 +296,7 @@ class Mind(object):
                 try:
                     reply_mid = self.card.remember(
                         reply, ts=ts, salience=0.45,
-                        speaker="self", mtype="episode")
+                        speaker="self", mtype="episode", source=source)
                     if self.tl is not None and reply_mid:
                         self.tl.birth_stamp(reply_mid)
                 except Exception as e:
@@ -649,10 +649,51 @@ class Handler(BaseHTTPRequestHandler):
                                           "user_message %d 字符 > 上限 %d"
                                           % (len(um), MAX_TEXT))
                     try:
-                        out = m.report(um, body.get("reply") or "", body.get("ts"))
+                        out = m.report(um, body.get("reply") or "", body.get("ts"),
+                                       source=body.get("source") or "chat")
                     except timeline_mod.ForeignWriter as e:
                         return self._fail(409, "card_locked", str(e))
                     return self._send(200, {"ok": True, "report": out})
+                if path == "/remember":
+                    # 🔧 2026-11-04：任意通道的单条记忆入口。
+                    #   以前只有 /report（一问一答）能写卡，于是 QQ、B站、抖音里
+                    #   发生的事全进不来 —— 「考试考得不错」就是这么丢的。
+                    #   这里不假装有对话对象：text 就是"发生了什么/我说了什么"，
+                    #   source 标明从哪来，speaker 默认 self（是我经历的）。
+                    tx = (body.get("text") or "").strip()
+                    if not tx:
+                        return self._fail(400, "empty_text", "text 不能为空")
+                    if len(tx) > MAX_TEXT:
+                        return self._fail(413, "text_too_large",
+                                          "text %d 字符 > 上限 %d"
+                                          % (len(tx), MAX_TEXT))
+                    src = (body.get("source") or "").strip() or "unknown"
+                    with m.lock:
+                        if m.writer_lock:
+                            return self._fail(409, "card_locked",
+                                              "这张卡正被另一台机器用（%s）"
+                                              % m.writer_lock)
+                        m.flow_time()
+                        try:
+                            mid = m.card.remember(
+                                tx,
+                                salience=float(body.get("salience") or 0.55),
+                                ts=body.get("ts"),
+                                speaker=(body.get("speaker") or "self"),
+                                region=body.get("region"),
+                                source=src)
+                        except Exception as e:
+                            return self._fail(500, "remember_failed", str(e))
+                        birth = None
+                        if m.tl is not None and mid:
+                            try:
+                                m.tl.birth_stamp(mid)
+                                birth = True
+                            except Exception as e:
+                                m.birth_bad.append("出生证写入失败：%s" % e)
+                                birth = False
+                    return self._send(200, {"ok": True, "mem_id": mid,
+                                            "source": src, "birth": birth})
                 if path == "/recent":
                     # 短期对话原文：从卡里读，不从调用方带。
                     # 调用方传 recent 时这里**仍然以卡为准** —— 卡是唯一真值源，

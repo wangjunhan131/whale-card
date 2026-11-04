@@ -75,6 +75,34 @@ def has_dev_word(s):
     return any(w in s for w in DEV_WORDS)
 
 
+def load_corpus(path):
+    """读 pull_qq_corpus.py 落盘的 jsonl：role=self 是我方，其它是背景。
+
+    为什么要这条路：卡里的 dialogue 只有"正经对话"，
+    群里/私聊里那些零碎的短句才是口音真正待的地方。
+    """
+    mine, theirs = [], []
+    with open(path, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                r = json.loads(line)
+            except Exception:
+                continue
+            text = (r.get("text") or "").strip()
+            if not text:
+                continue
+            item = {"id": r.get("ts"), "ts": r.get("ts"), "text": text}
+            if r.get("role") == "self":
+                item["report_like"] = H.is_report_like(text) or has_dev_word(text)
+                mine.append(item)
+            else:
+                theirs.append(item)
+    return mine, theirs
+
+
 def collect(con):
     rows = [dict(r) for r in con.execute(
         "SELECT id, ts, role, text FROM dialogue ORDER BY id")]
@@ -139,16 +167,26 @@ def ngram_stats(texts, lo=1, hi=3, top=20):
     return head.most_common(top), tail.most_common(top)
 
 
-def phrase_candidates(mine, theirs, include_reports=False):
+def phrase_candidates(mine, theirs, include_reports=False, bg_rows=None):
     """候选口头禅：2~4 字，出现在我方回复里，统计次数/天数/用户是否也说。
 
     返回 (cands, totals)，totals 里有聊天段数与背景段数 —— 算 lift 要用。
-    背景 = 被判定为"像工作汇报"的那批回复：同一个词在聊天里是不是显著更高频。
+    背景默认 = 被判定为"像工作汇报"的那批回复（同一个词在聊天里是不是显著更高频）。
+    用 QQ 语料时改传 bg_rows=别人的话：那时要问的是
+    「这个词是我常说的，还是大家都这么说」—— 这才是口音。
     """
     stat = defaultdict(lambda: {"hits": 0, "days": set(), "ids": [], "samples": []})
     user_stat = Counter()
     bg_hits = Counter()
     chat_segs = bg_segs = 0
+
+    if bg_rows:
+        for r in bg_rows:
+            for s in H.segments(r["text"]):
+                bg_segs += 1
+                for g in H.ngrams(s, 2, 4):
+                    if H._HAS_CN_RE.search(g):
+                        bg_hits[g] += 1
 
     for r in theirs:
         for s in H.segments(r["text"]):
@@ -157,7 +195,7 @@ def phrase_candidates(mine, theirs, include_reports=False):
 
     for r in mine:
         segs = H.segments(r["text"])
-        is_bg = bool(r.get("report_like"))
+        is_bg = bool(r.get("report_like")) and not bg_rows
         if is_bg and not include_reports:
             # 不算进候选，但算进背景频率
             bg_segs += len(segs)
@@ -302,19 +340,28 @@ def main(argv=None):
     ap.add_argument("--top", type=int, default=40)
     ap.add_argument("--write", action="store_true",
                     help="把 keep/review 的候选写进 habits 表（默认只出报告）")
+    ap.add_argument("--corpus", default="",
+                    help="外部语料 jsonl（tools/pull_qq_corpus.py 产出）；给了就只用它")
     args = ap.parse_args(argv)
 
     if not os.path.exists(args.db):
         print("找不到库：%s" % args.db)
         return 2
     con = open_ro(args.db)
-    mine, theirs = collect(con)
+    if args.corpus:
+        mine, theirs = load_corpus(args.corpus)
+        print("语料来源：%s（我方 %d ／ 别人 %d）"
+              % (args.corpus, len(mine), len(theirs)))
+    else:
+        mine, theirs = collect(con)
     chat = [r for r in mine if not r.get("report_like") or args.include_reports]
 
     shape_chat = shape_stats([r["text"] for r in chat])
     shape_all = shape_stats([r["text"] for r in mine])
     head_chat, tail_chat = ngram_stats([r["text"] for r in chat])
-    cands, tot = phrase_candidates(mine, theirs, include_reports=args.include_reports)
+    cands, tot = phrase_candidates(
+        mine, theirs, include_reports=args.include_reports,
+        bg_rows=(theirs if args.corpus else None))
 
     meta = {
         "db": args.db,

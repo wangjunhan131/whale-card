@@ -136,12 +136,15 @@ def main():
         ck("只读打开不会写文件", os.path.getsize(db2) > 0)
 
         # ---- 背景对比与建议分档（v1 完善）----
-        ck("lift：背景为零给大数", H.lift_of(6, 100, 0, 1000) == 99.0,
-           H.lift_of(6, 100, 0, 1000))
-        ck("lift：同频率约等于 1", abs(H.lift_of(1, 100, 10, 1000) - 1.0) < 0.01,
-           H.lift_of(1, 100, 10, 1000))
-        ck("lift：聊天 2 倍于背景", abs(H.lift_of(2, 100, 10, 1000) - 2.0) < 0.01,
-           H.lift_of(2, 100, 10, 1000))
+        # 加一平滑后：背景 0 次不再返回 99，而是有上限的有限值
+        _l0 = H.lift_of(6, 100, 0, 1000)
+        ck("lift：背景为零给有限大数（不再 99）", 10.0 < _l0 <= H.LIFT_MAX, _l0)
+        _l1 = H.lift_of(10, 1000, 10, 1000)
+        ck("lift：同频率比率接近 1", abs(_l1 - 1.0) < 0.10, _l1)
+        _l2 = H.lift_of(2, 100, 10, 1000)
+        ck("lift：聊天更多 -> lift 更大", _l2 > _l1, (_l2, _l1))
+        ck("lift：封顶不超过 LIFT_MAX", H.lift_of(50, 1, 0, 1) <= H.LIFT_MAX,
+           H.lift_of(50, 1, 0, 1))
         ck("rate_per_1k 除零安全", H.rate_per_1k(3, 0) == 0.0)
         ck("建议：高频+高 lift -> keep", H.suggest_of(0.9, 3.0, 5, 3) == "keep")
         ck("建议：用户也说 -> drop", H.suggest_of(0.2, 9.0, 5, 3) == "drop")
