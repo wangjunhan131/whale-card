@@ -33,6 +33,8 @@
 - **想知道为什么这么设计** → [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)（表结构与流程）、
   [`docs/DESIGN-SYNAPSE-1024.txt`](docs/DESIGN-SYNAPSE-1024.txt)（完整设计说明）、
   [`docs/technical-report.pdf`](docs/technical-report.pdf)（技术报告）
+- **想直接读一篇**（不装东西、不讲接口，只看"她为什么会忘"）→ [`docs/WHY-SHE-FORGETS.md`](docs/WHY-SHE-FORGETS.md)
+  十四节，从三条底线讲到没做成的事。适合转给不懂技术但关心这件事的人。
 
 ---
 

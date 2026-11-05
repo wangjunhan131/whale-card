@@ -1013,6 +1013,14 @@ body{font-family:"Inter","Segoe UI","Microsoft YaHei",system-ui,sans-serif;
 .inj em{grid-column:1/-1;font:9.5px/1.4 Consolas,monospace;font-style:normal;
   color:#54677c;padding-left:2px}
 .muted{color:#54677c;font-size:11.5px}
+@keyframes ledBreath{0%,100%{opacity:.5}50%{opacity:1}}
+.led i{animation:ledBreath 2.8s ease-in-out infinite}
+.led.warn i{animation-duration:1.9s}
+.nums b{transition:color .3s ease,text-shadow .3s ease}
+.nums b.hit{color:#bfefff;text-shadow:0 0 9px #57c8f0aa}
+#cvPulse{width:100%;height:44px;display:block;margin-top:7px;border-radius:5px;
+  background:linear-gradient(180deg,#0a1017,#0d131a);
+  border:1px solid #16202b}
 /* 左栏状态灯 + 小数字框（2026-11-04 加，用户要求"填一点点，别挤"） */
 .mini{margin-top:10px;border-top:1px solid var(--line);padding-top:9px}
 .leds{display:flex;gap:5px;margin-bottom:8px}
@@ -1134,6 +1142,7 @@ body{font-family:"Inter","Segoe UI","Microsoft YaHei",system-ui,sans-serif;
         <div><b id="mnSyn">—</b><i>突触</i></div>
         <div><b id="mnNew">—</b><i>新记</i></div>
       </div>
+      <canvas id="cvPulse"></canvas>
     </div>
     <div class="mlog" id="mlog"></div>
     <div class="sp"></div>
@@ -1889,6 +1898,8 @@ function renderSide(){
   $("#nm").textContent = id.name || "小鲸鱼";
   applyAvatar(id);
   $("#up").textContent = fmtDur(S.up);
+  startLiveClock();
+  drawPulse($("#cvPulse"));
   $("#age").textContent = (id.day!=null? "第 "+id.day+" 天" : "—");
   $("#ins").textContent = id.instance || "—";
   $("#seal").textContent = id.sealed ? "开启" : "未封";
@@ -1934,18 +1945,112 @@ function renderMini(){
   setLed("ledDisk", backs.length && backs.some(function(x){return x.online;}) ? "ok"
                   : (anyOnline ? "warn" : ""));
 
-  var el;
-  el = $("#mnRecall");
-  if(el) el.textContent = (m.recall_24h!=null ? m.recall_24h : "—");
-  el = $("#mnSyn");
-  if(el) el.textContent = ((m.synapse||{}).edges!=null ? (m.synapse||{}).edges : "—");
-  el = $("#mnNew");
-  if(el) el.textContent = (m.created_24h!=null ? m.created_24h : "—");
+  tweenNum($("#mnRecall"), m.recall_24h != null ? Number(m.recall_24h) : null);
+  tweenNum($("#mnSyn"),    (m.synapse||{}).edges != null ? Number((m.synapse||{}).edges) : null);
+  tweenNum($("#mnNew"),    m.created_24h != null ? Number(m.created_24h) : null);
+  startLiveClock();
   renderMiniLog();
 }
 
 /* 左栏底部"最近几条"：只留 6 行，多了就挤。
    原来它在网格里独占一行 c4、右边一大片空，挪过来正好。 */
+/* ===== 让他看起来在活着 =====
+   心跳带：CPU 占用（真采样，2 秒一个点，自己往左滚）
+   补间：数字从旧值滚到新值，滚完停真值 —— 绝不显示假小数
+   秒表：运行时间每秒 +1 */
+var PULSE = [], MEMP = [], PULSE_N = 72, _lastNums = {}, _tickT = null;
+function _line(g, arr, x0, step, padT, plotH, vmax, color, fill){
+  if(arr.length < 2) return;
+  var y = function(v){ return padT + plotH * (1 - Math.max(0, Math.min(vmax, v))/vmax); };
+  if(fill){
+    g.beginPath();
+    arr.forEach(function(v,i){ var x=x0+i*step; if(i===0) g.moveTo(x,y(v)); else g.lineTo(x,y(v)); });
+    g.lineTo(x0+(arr.length-1)*step, padT+plotH); g.lineTo(x0, padT+plotH); g.closePath();
+    var grd = g.createLinearGradient(0,padT,0,padT+plotH);
+    grd.addColorStop(0, color==="#57c8f0" ? "rgba(87,200,240,.30)" : "rgba(157,139,255,.18)");
+    grd.addColorStop(1, "rgba(0,0,0,0)");
+    g.fillStyle = grd; g.fill();
+  }
+  g.beginPath();
+  arr.forEach(function(v,i){ var x=x0+i*step; if(i===0) g.moveTo(x,y(v)); else g.lineTo(x,y(v)); });
+  g.strokeStyle = color; g.lineWidth = 1.3; g.lineJoin="round"; g.stroke();
+  var lx = x0+(arr.length-1)*step, ly = y(arr[arr.length-1]);
+  g.beginPath(); g.arc(lx, ly, 2, 0, Math.PI*2); g.fillStyle = color; g.fill();
+}
+function drawPulse(cv){
+  if(!cv) return;
+  var dpr = Math.min(2, window.devicePixelRatio || 1);
+  var w = cv.clientWidth, h = cv.clientHeight;
+  if(!w || !h) return;
+  if(cv.width !== Math.round(w*dpr) || cv.height !== Math.round(h*dpr)){
+    cv.width = Math.round(w*dpr); cv.height = Math.round(h*dpr);
+  }
+  var g = cv.getContext("2d");
+  g.setTransform(dpr,0,0,dpr,0,0);
+  g.clearRect(0,0,w,h);
+  if(PULSE.length < 2) return;
+  var padT = 5, padB = 5, plotH = h - padT - padB;
+  var vmax = 20;
+  PULSE.forEach(function(v){ if(v > vmax) vmax = v; });
+  MEMP.forEach(function(v){ if(v > vmax) vmax = v; });
+  vmax = Math.min(100, Math.ceil(vmax * 1.25));
+  var step = w / (PULSE_N - 1);
+  var xc = w - (PULSE.length-1) * step;   /* CPU 从右往左滚 */
+  var xm = w - (MEMP.length-1) * step;
+  _line(g, MEMP, xm, step, padT, plotH, vmax, "#9d8bff", false);
+  _line(g, PULSE, xc, step, padT, plotH, vmax, "#57c8f0", true);
+  /* 左上角读数：数字本身每秒在动，看着就知道是活的 */
+  var cv2 = PULSE.length ? PULSE[PULSE.length-1] : 0;
+  var mv2 = MEMP.length ? MEMP[MEMP.length-1] : 0;
+  g.font = "9px Consolas,monospace";
+  g.textBaseline = "top";
+  g.fillStyle = "rgba(87,200,240,.95)";
+  g.fillText("CPU " + cv2.toFixed(1), 5, 4);
+  g.fillStyle = "rgba(157,139,255,.9)";
+  g.fillText("MEM " + mv2.toFixed(1), 62, 4);
+}
+function pollPulse(){
+  API("/syslive").then(function(j){
+    if(!j || !j.now) return;
+    PULSE.push(j.now.cpu || 0);
+    while(PULSE.length > PULSE_N) PULSE.shift();
+    MEMP.push(j.now.mem || 0);
+    while(MEMP.length > PULSE_N) MEMP.shift();
+    drawPulse($("#cvPulse"));
+  }).catch(function(){});
+}
+/* 补间：把 el 里的数字从旧值滚到新值。非数字（"—"）直接写。 */
+function tweenNum(el, target){
+  if(!el) return;
+  if(target == null || isNaN(target)){ el.textContent = "—"; return; }
+  var key = el.id, from = _lastNums[key];
+  _lastNums[key] = target;
+  if(from == null || from === target || Math.abs(target-from) < 1){
+    el.textContent = target; return;
+  }
+  var t0 = performance.now(), dur = 520, d = target - from;
+  el.classList.add("hit");
+  setTimeout(function(){ el.classList.remove("hit"); }, 560);
+  (function step(now){
+    var k = Math.min(1, (now - t0) / dur);
+    var e = 1 - Math.pow(1-k, 3);            /* easeOutCubic */
+    el.textContent = Math.round(from + d*e);
+    if(k < 1) requestAnimationFrame(step);
+    else el.textContent = target;
+  })(t0);
+}
+function tickUptime(){
+  if(S.up == null) return;
+  S.up += 1;
+  var el = $("#up");
+  if(el) el.textContent = fmtDur(S.up);
+}
+function startLiveClock(){
+  if(_tickT) return;
+  _tickT = setInterval(tickUptime, 1000);
+  setInterval(pollPulse, 2000);
+  pollPulse();
+}
 function renderMiniLog(){
   var box = document.getElementById("mlog");
   if(!box) return;
