@@ -218,6 +218,32 @@ REGION_DECAY_SCALE = {
     R_EPISODE: 1.00,
 }
 
+# --- 闲聊区（V5.1，用户 2026-11-05）-----------------------------------
+# 「闲聊这个东西还是要进卡的，不过我希望他忘的很快，今天闲聊，明天就忘得差不多了，
+#   除非有重要的事情或学到的知识，或者有很丰富的情绪。」—— 用户 m13252
+#
+# 为什么不复用 episode 的倍率：
+#   REGION_DECAY_SCALE 是乘在各池 λ 上的。闲聊多半先落短期池（λ=1.8e-6），
+#   乘 81.3 倍（0.0123）后，半衰期只有 1.3 小时 —— 下午聊的晚上就没了，
+#   比「明天忘光」快太多。所以闲聊用自己的固定 λ，不受池和倍率影响。
+#
+# 为什么是 8.77 小时：
+#   目标是「今天聊的，明天剩 0.15」。λ = -ln(0.15)/86400 = 2.196e-5。
+#   实测：1 小时 0.924、8 小时 0.531、1 天 0.150、2 天 0.022、3 天 0.003。
+R_CHATTER = "chatter"
+LAM_CHATTER = 2.196e-5        # 半衰期 8.77 小时
+
+# 关系倍率：越亲近的人，闲聊留得越久（用户 m13292）。
+# 注意这不是「好感度打分」—— 分数会变、会诱导讨好；这里只是把**已有的关系层**
+# 接到遗忘速度上。倍率直接除 λ，所以 24 倍 = 半衰期拉长 24 倍。
+CHATTER_PERSON_SCALE = {
+    "":        1.0,    # 无标签（陌生群友）      半衰期 8.8 小时
+    "known":   0.6,    # 群里见过             5.3 小时
+    "friend":  2.2,    # 常聊的朋友            19 小时
+    "close":   6.0,    # 亲近的人              2.2 天
+    "core":   24.0,    # 我的人                8.8 天
+}
+
 # --- 上下文组装 ---
 _DBG_SCORES = None   # 排错钩子：设成 list 就会收集每条的实际分数
 TOKEN_BUDGET = 6000          # 总预算（中文 1 字 ≈ 1 token）
@@ -1137,6 +1163,51 @@ _STRONG_EMO = [
 ]
 
 
+# --- 闲聊判定（V5.1，用户 2026-11-05）---------------------------------
+# 「今天闲聊，明天就忘得差不多了，除非有重要的事情或学到的知识，或者有很丰富的情绪。」
+#
+# 判据全部是规则，不调模型 —— 卡里没有模型，也不该有。
+# 宁可判得保守（多留一点），也别把"他说他生日"这种话判成闲聊。
+_RE_CHATTER_EMO = re.compile(
+    r"(难受|难过|开心|高兴|害怕|慌|烦死|累死|哭|气死|生气|心疼|"
+    r"崩溃|委屈|孤独|兴奋|感动|后悔|遗憾|绝望|舍不得|想念)")
+_RE_CHATTER_KNOW = re.compile(
+    r"(我是|我叫|我住|我的名字|生日|学校|班级|年级|专业|考试|成绩|"
+    r"记住|下次|以后别|教训|明白了|懂了|原来|才知道|学会了|长记性|"
+    r"计划|打算|目标|决定|要买|要攒|想买|因为|所以|意味着|原理|"
+    r"总结|规律|方法|步骤|结论)")
+_RE_CHATTER_PREF = re.compile(
+    r"(喜欢|讨厌|爱吃|爱看|不爱|不喜欢|最怕|最爱|偏爱|受不了|吃不惯|忌口)")
+# 纯寒暄 / 语气 / 工具性指令 —— 这些连"日常叙述"都算不上
+_RE_CHATTER_TINY = re.compile(
+    r"^(嗯|哦|啊|哈|好|行|对|是|不是|可以|谢谢|晚安|早|在吗|收到|"
+    r"哈哈|嘿嘿|好哦|好嘞|行吧|算了|没事)[。！？!?~～\.]*$")
+
+
+def is_chatter(text, emotion=0.0):
+    """这句是"闲聊"吗？是就返回 True（该忘得快）。
+
+    只判"要不要短命"，不判具体分区 —— 分区还是走 classify_region，
+    这样原有逻辑一行不改，闲聊只是多了一层"提前出局"。
+    """
+    t = (text or "").strip()
+    if not t:
+        return False
+    # 1) 强情绪 → 不是闲聊（留住）
+    if emotion >= 0.85 and _RE_CHATTER_EMO.search(t):
+        return False
+    if _RE_CHATTER_EMO.search(t):
+        return False
+    # 2) 重要 / 知识 → 不是闲聊
+    if _RE_CHATTER_KNOW.search(t):
+        return False
+    # 3) 偏好 → 不是闲聊
+    if _RE_CHATTER_PREF.search(t):
+        return False
+    # 4) 剩下的：短句、纯寒暄、日常叙述，都算闲聊
+    return True
+
+
 def classify_region(text, emotion=0.0):
     """判这句话该进哪个分区。返回 R_* 常量。
 
@@ -1164,8 +1235,21 @@ def classify_region(text, emotion=0.0):
     # 偏好
     if _RE_PREF_HINT.search(t):
         return R_PREF
+    # 🔧 2026-11-05：到这一步还没被前五条拦住的，就是日常闲聊。
+    #    它进 chatter 区 —— 进卡、能召回，但明天基本忘光。
+    #    注意放在最后：前面五条（闪光/自图式/事实/习惯/偏好）都不受影响。
+    if is_chatter(t, emotion):
+        return R_CHATTER
     # 有时间地点 + 动作 → 情景
     return R_EPISODE
+
+
+def chatter_lambda(person_layer=""):
+    """闲聊的衰减率。关系越近，λ 越小（活得越久）。"""
+    sc = CHATTER_PERSON_SCALE.get((person_layer or "").strip(), 1.0)
+    if sc <= 0:
+        sc = 1.0
+    return LAM_CHATTER / sc
 
 
 def region_decay_scale(region):
@@ -1358,7 +1442,8 @@ def lam_for(pool, age):
     return LAM_L
 
 
-def weight_now(w0, pool, t_anchor, now, region=None, tier=None):
+def weight_now(w0, pool, t_anchor, now, region=None, tier=None,
+                person_layer=""):
     """从锚点算到现在。分段双速率用积分，不能简单相乘。
 
     V4.1：分区衰减倍率直接乘在时间上 —— 等价于「这条记忆活得更慢」。
@@ -1381,6 +1466,11 @@ def weight_now(w0, pool, t_anchor, now, region=None, tier=None):
             age -= LONG_PROTECT_DAYS * DAY
         else:
             age = 0.0
+    # 🔧 2026-11-05：闲聊不乘分区倍率，用自己的固定 λ。
+    #    乘倍率会让它先落短期池时半衰期只剩 1.3 小时，比"明天忘光"快太多。
+    if region == R_CHATTER:
+        lam = chatter_lambda(person_layer or "")
+        return w0 * math.exp(-lam * age)
     if region:
         age *= region_decay_scale(region)
     if pool == POOL_SHORT:
@@ -1400,13 +1490,19 @@ def weight_now(w0, pool, t_anchor, now, region=None, tier=None):
 
 
 def wn_row(r, now):
+    """按行算当前权重。person_layer 从 about_layer 列读（没有就当空）。"""
     """按行算权重：core_* 三档不衰减，其余照旧。
     单独包一层是因为调用点多，改签名容易漏。"""
     try:
         tier = r["tier"]
     except Exception:
         tier = None
-    return weight_now(r["w"], r["pool"], r["t_anchor"], now, r["region"], tier)
+    try:
+        _lay = r["about_layer"] or ""
+    except Exception:
+        _lay = ""
+    return weight_now(r["w"], r["pool"], r["t_anchor"], now, r["region"], tier,
+                      person_layer=_lay)
 
 
 def pool_of_k(k):
@@ -2056,7 +2152,11 @@ class MemoryCard:
             #   core_mutable 底色：爱好/接受度/价值观/习惯/技能/身体/目标/雷点/处境
             #   mid / short  就是原来的长期池 / 短期池（保持旧字段兼容）
             "tier": "TEXT NOT NULL DEFAULT 'mid'",
-            # subject_key：认"这是同一件事"的主题键（"香菜"），演化合并靠它
+            # about_uid / about_layer：这条是关于谁的、那人在第几层关系
+        # （V5.1 用户 m13292：闲聊的寿命按"对谁"来定）
+        "about_uid": "TEXT NOT NULL DEFAULT ''",
+        "about_layer": "TEXT NOT NULL DEFAULT ''",
+        # subject_key：认"这是同一件事"的主题键（"香菜"），演化合并靠它
             "subject_key": "TEXT NOT NULL DEFAULT ''",
             # history：[{ts, text, why}]，被替换掉的旧正文压在这里，留证不参与召回
             "history": "TEXT NOT NULL DEFAULT '[]'",
@@ -2092,12 +2192,22 @@ class MemoryCard:
                 c.execute("UPDATE mem SET pool=?, w=?, t_anchor=? WHERE id=?",
                           (p, r["clarity"], r["create_ts"], r["id"]))
         c.execute("UPDATE mem SET t_anchor=create_ts WHERE t_anchor=0")
-        # V4.1：老数据补分区。region 全是默认 'episode' 的才需要补。
-        for r in c.execute(
-                "SELECT id, raw, emotion FROM mem WHERE region='episode'").fetchall():
-            rg = classify_region(r["raw"], r["emotion"])
-            if rg != R_EPISODE:
-                c.execute("UPDATE mem SET region=? WHERE id=?", (rg, r["id"]))
+        # V4.1：老数据补分区。
+        # 🔧 2026-11-05 事故修正：这段原来每次开机都跑，加了 chatter 之后
+        #    它把 440 条历史记忆改判成闲聊（一天后剩 0.15）—— 等于悄悄删了
+        #    四分之三的记忆。现在用 meta 里的标记只跑一次。
+        #    新卡写入时就判好了，本来也不需要回填。
+        _done = c.execute(
+            "SELECT val FROM meta WHERE key='region_backfill_done'").fetchone()
+        if not _done:
+            for r in c.execute(
+                    "SELECT id, raw, emotion FROM mem"
+                    " WHERE region='episode'").fetchall():
+                rg = classify_region(r["raw"], r["emotion"])
+                if rg != R_EPISODE:
+                    c.execute("UPDATE mem SET region=? WHERE id=?", (rg, r["id"]))
+            c.execute("INSERT OR REPLACE INTO meta(key,val) VALUES(?,?)",
+                      ("region_backfill_done", str(int(self.clock.now()))))
         c.execute("CREATE INDEX IF NOT EXISTS ix_mem_pool ON mem(pool)")
         c.execute("CREATE INDEX IF NOT EXISTS ix_mem_region ON mem(region)")
         # 🔧 T4-3b：detail 加语义向量列（老库升级）
@@ -2255,7 +2365,8 @@ class MemoryCard:
     # ---------- 存 ----------
     def remember(self, text, salience=0.6, ts=None, pool=POOL_SHORT,
                  oxy=0.0, entities=None, emotion=None, normalize=True,
-                 region=None, speaker=None, mtype=None, source=""):
+                 region=None, speaker=None, mtype=None, source="",
+                 about_uid=""):
         now = self.clock.now()
         at = min(now if ts is None else float(ts), now)
         age = max(0.0, now - at)
@@ -2278,6 +2389,18 @@ class MemoryCard:
         # 🔧 分区：不传就自动判
         if region is None:
             region = classify_region(text, emotion)
+
+        # 🔧 2026-11-05 闲聊寿命按「对谁」来定（用户 m13292）。
+        #    关系层在写入时算好存下（衰减是热路径，不能每次现查 core_tag）。
+        _lay = ""
+        if about_uid:
+            try:
+                _lay = self.person_layer_of(about_uid)
+            except Exception:
+                _lay = ""
+        if region == R_CHATTER and not _lay:
+            # 没登记过的人：群里见过的按 known，其余按默认
+            _lay = "known" if str(source or "").startswith("qq") else ""
 
         # 🔧 2026-11-01 防污层（提前算：下面的去重路径也要看它）
         _trust, _conflict, _why = assess_trust(text, self)
@@ -2376,12 +2499,14 @@ class MemoryCard:
         c.execute(
             "INSERT INTO mem(raw,core,vec,pool,w,t_anchor,salience,oxy,entities,"
             "emotion,create_ts,last_active_ts,region,subj,verb,obj,erase_stage,emb,"
-            "speaker,mtype,trust,conflict,conflict_why,value,source) "
-            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "speaker,mtype,trust,conflict,conflict_why,value,source,"
+            "about_uid,about_layer) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (text, core, json.dumps(vec, ensure_ascii=False), pool, w0, at,
              salience, oxy, entities, emotion, at, at, region,
              _subj, _verb, _obj, 0, _emb, speaker, mtype,
-             _trust, _conflict, _why, _value, source or ""))
+             _trust, _conflict, _why, _value, source or "",
+             str(about_uid or ""), _lay))
         mid = c.lastrowid
         if _emb is not None:
             self._emb_cache[mid] = semantic_mod.from_blob(_emb)
@@ -2602,6 +2727,24 @@ class MemoryCard:
         _trust = float(r["trust"] if "trust" in r.keys() else 1.0)
         _conflict = int(r["conflict"] if "conflict" in r.keys() else 0)
         _dirty = (_trust < TRUST_BLOCK_PROMOTE) or _conflict == 1
+        # 🔧 2026-11-05：闲聊不许进长期。
+        #    它本来就该一天内淡掉，进了长期等于永不消散 —— 那等于白设这个区。
+        if r["region"] == R_CHATTER:
+            _dirty = True
+        # 🔧 2026-11-05：闲聊不参加海马评选。
+        #    它的三样分数（显著度/情绪/被想起）天生都是零，必然"没上榜"被删 ——
+        #    那不是"明天忘光"，是"进门就死"。直接落中期，让它按 chatter 的
+        #    λ 自己淡掉（8.77 小时后自然归零，不需要海马再判一次）。
+        if r["region"] == R_CHATTER:
+            # 只换池名，w 和 t_anchor 一律不动 —— 闲聊的衰减由 LAM_CHATTER
+            # 独立决定（weight_now 对 chatter 不看池），抬到存活线等于给它续命。
+            # 已经掉到回收线以下的，直接走正常遗忘。
+            if wn_row(r, now) < CLARITY_GC:
+                self._forget_row(c, r["id"], "闲聊到期，自然淡出")
+                return None
+            c.execute("UPDATE mem SET pool=? WHERE id=?",
+                      (POOL_MEDIUM, r["id"]))
+            return POOL_MEDIUM
         if (not _dirty) and score >= THETA_LONG_STRICT and self._long_ticket_ok(r):
             target, floor = POOL_LONG, W_FLOOR_LONG
         elif score >= THETA_MEDIUM:
@@ -3028,6 +3171,25 @@ class MemoryCard:
         self.db.commit()
         return True
 
+    def refresh_about_layers(self):
+        """关系标签改过之后，重算所有带 about_uid 的行的 about_layer。
+
+        不这么做的话，把某人从 friend 提到 close 之后，他过去的闲聊
+        还是按旧层算寿命 —— 关系变了，命也该跟着变。
+        """
+        c = self.db.cursor()
+        rows = c.execute(
+            "SELECT id, about_uid, about_layer FROM mem"
+            " WHERE about_uid IS NOT NULL AND about_uid != ''").fetchall()
+        n = 0
+        for r in rows:
+            lay = self.person_layer_of(r["about_uid"])
+            if lay != (r["about_layer"] or ""):
+                c.execute("UPDATE mem SET about_layer=? WHERE id=?", (lay, r["id"]))
+                n += 1
+        self.db.commit()
+        return {"ok": True, "checked": len(rows), "changed": n}
+
     def promote_core(self, mid, tier=TIER_CORE_MUTABLE, kind="hobby",
                      subject_key="", why=""):
         """晋升进底色。配额满了就先挤掉同 kind 里最不活跃的那条。"""
@@ -3043,6 +3205,11 @@ class MemoryCard:
             return {"ok": False, "reason": "trust_too_low",
                     "trust": _t, "conflict": _cf,
                     "why": (r["conflict_why"] or "")}
+        # 🔧 2026-11-05：闲聊不许进底色。
+        #    底色是"她对自己的认知"，一句"你先停一下"不配当自我。
+        if (r["region"] or "") == R_CHATTER:
+            return {"ok": False, "reason": "is_chatter",
+                    "region": r["region"]}
         cap = CORE_KIND_CAPS.get(kind)
         if cap:
             rows = c.execute(
@@ -3167,7 +3334,58 @@ class MemoryCard:
         return {"ok": True, "id": mid, "invest": invest,
                 "used": round(sum(h["invest"] for h in self.hobby_list()), 3)}
 
-    def role_tag(self, person, role, layer="friend", note=""):
+    def person_layer_of(self, uid="", name=""):
+        """这个人排在第几层关系？core / close / friend / known / ""（不认识）。
+
+        查法：core_tag 层的 subject_key 是 "role:<名字>" 或 "role:<名字>#<uid>"。
+        uid 优先（改名不影响），没 uid 再按名字。
+        """
+        uid = str(uid or "").strip()
+        name = (name or "").strip()
+        c = self.db.cursor()
+        # 按 uid 查不到、但这个 uid 就是卡里记的那个人 → 换成他的名字再查。
+        # （老标签是「role:使用者」这种，加 uid 之前建的，没有 #uid 后缀）
+        if uid and not name:
+            try:
+                uq = c.execute(
+                    "SELECT val FROM core_zone WHERE key='user_qq'").fetchone()
+                if uq and (uq[0] or "").strip() == uid:
+                    nn = c.execute(
+                        "SELECT val FROM core_zone WHERE key='user_nickname'").fetchone()
+                    if nn and (nn[0] or "").strip():
+                        name = nn[0].strip()
+            except Exception:
+                pass
+        rows = c.execute(
+            "SELECT subject_key, core, mtype FROM mem WHERE tier=?"
+            " AND subject_key LIKE ?",
+            (TIER_CORE_TAG, "role:%")).fetchall()
+        for r in rows:
+            sk = r["subject_key"] or ""
+            tag = sk[len("role:"):]
+            hit = False
+            if uid and ("#" + uid) in tag:
+                hit = True
+            elif name and tag.split("#")[0] == name:
+                hit = True
+            if not hit:
+                continue
+            # 正路：创建时写进 mtype 的 "role:<层>"
+            mt = (r["mtype"] or "")
+            if mt.startswith("role:"):
+                lay = mt[len("role:"):].strip()
+                if lay in ("core", "close", "friend", "known"):
+                    return lay
+            # 老标签兜底：按角色词猜（没有 mtype 的历史数据）
+            txt = r["core"] or ""
+            for kw, lay in (("最重要", "core"), ("亲人", "core"),
+                            ("亲近", "close"), ("好朋友", "close"),
+                            ("朋友", "friend"), ("认识", "known")):
+                if kw in txt:
+                    return lay
+        return ""
+
+    def role_tag(self, person, role, layer="friend", note="", uid=""):
         """给一个人挂角色标签（core_tag）。标签不动，这条就不动。
 
         用户 m02956：对象/重要的人当成"对某个特定角色的标签"，标签可以改，
@@ -3175,6 +3393,8 @@ class MemoryCard:
         """
         c = self.db.cursor()
         key = "role:" + person.strip()
+        if str(uid or "").strip():
+            key += "#" + str(uid).strip()
         now = self.clock.now()
         old = c.execute(
             "SELECT * FROM mem WHERE tier=? AND subject_key=?",
@@ -3186,9 +3406,16 @@ class MemoryCard:
             # 换标签：留痕
             self.supersede(old["id"], text, ts=now,
                            why="角色标签：%s → %s" % (old["core"], text))
+            c.execute("UPDATE mem SET mtype=? WHERE id=?",
+                      ("role:%s" % (layer or "friend"), old["id"]))
+            self.db.commit()
             return {"ok": True, "id": old["id"], "changed": True}
         mid = self.remember(text, salience=0.9, pool=POOL_LONG, region=R_SELF)
         self.set_tier(mid, TIER_CORE_TAG, kind="role", subject_key=key)
+        # 关系层写进 mtype —— 正文是给人看的（"使用者 = 最重要的人"），
+        # 层是给代码用的，两件事别混在一个字段里。
+        c.execute("UPDATE mem SET mtype=? WHERE id=?",
+                  ("role:%s" % (layer or "friend"), mid))
         c.execute("UPDATE mem SET w=0.95, history=? WHERE id=?",
                   (json.dumps([{"ts": now, "why": note or ("标签：%s" % role),
                                 "text": ""}], ensure_ascii=False), mid))

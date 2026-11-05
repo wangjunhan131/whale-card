@@ -187,14 +187,20 @@ def call(action, **params):
         return json.loads(r.read().decode("utf-8"))
 
 
-def remember(text, source, speaker="other", region="episode", salience=0.5):
-    """把一条消息写进卡。失败不抛 —— 值守不能因为卡忙就停。"""
+def remember(text, source, speaker="other", region="episode", salience=0.5,
+             about_uid=""):
+    """把一条消息写进卡。失败不抛 —— 值守不能因为卡忙就停。
+
+    about_uid：这条是关于谁的。卡里按这个人的关系层决定闲聊能活多久
+    （用户 m13292：越重要的人，闲聊留得越久）。
+    """
     try:
         req = urllib.request.Request(
             MIND + "/remember",
             data=json.dumps({"text": text, "source": source,
                              "speaker": speaker, "region": region,
-                             "salience": salience}).encode("utf-8"),
+                             "salience": salience,
+                             "about_uid": str(about_uid or "")}).encode("utf-8"),
             headers={"Content-Type": "application/json"})
         with urllib.request.urlopen(req, timeout=30) as r:
             return json.loads(r.read().decode("utf-8"))
@@ -531,6 +537,7 @@ def poll_once(seen, verbose=True):
         for m in fresh:
             sender = m.get("sender") or {}
             name = sender.get("card") or sender.get("nickname") or "?"
+            uid = int(sender.get("user_id") or 0)
             text = flat_text(m)
             if not text:
                 continue
@@ -543,7 +550,8 @@ def poll_once(seen, verbose=True):
             if keep:
                 r = remember("[%s] %s：%s" % (gname, name, text),
                              source="qq-group", speaker="other",
-                             region=region, salience=sal)
+                             region=region, salience=sal,
+                             about_uid=str(uid or ""))
                 mem_id = (r or {}).get("mem_id")
             # 进待回队列（素材也留着，但那是"待回"，不是"记忆"）
             ok, why_q = quota_allow(q, gid)
@@ -602,7 +610,8 @@ def poll_once(seen, verbose=True):
             if keep:
                 r = remember("[私聊] %s：%s" % (name, text),
                              source="qq", speaker="other",
-                             region=region, salience=sal)
+                             region=region, salience=sal,
+                             about_uid=str(uid or ""))
                 mem_id = (r or {}).get("mem_id")
             ok, why_q = quota_allow(q, None)
             _append(TODO, {"ts": ts, "kind": "private", "user_id": uid,

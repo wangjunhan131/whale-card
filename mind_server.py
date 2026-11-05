@@ -115,6 +115,18 @@ class Mind(object):
         self.birth_ok = True
         self.birth_bad = []
         self.anchor = None            # 卡外锚的体检结果（回滚检测）
+        # 本地对话框里说话的人 —— 这条记的是"关于他"，所以填他的 uid。
+        # 用户 m13292：重要的人闲聊记得更久，所以本地默认按 core 层算。
+        # 优先级：环境变量 > 卡里 core_zone.user_qq > 空
+        self.local_uid = os.environ.get("WHALE_LOCAL_UID", "").strip()
+        if not self.local_uid:
+            try:
+                _r = self.card.db.execute(
+                    "SELECT val FROM core_zone WHERE key='user_qq'").fetchone()
+                if _r and (_r[0] or "").strip():
+                    self.local_uid = _r[0].strip()
+            except Exception:
+                pass
         try:
             import timeline as timeline_mod
             self.writer = timeline_mod.writer_id()
@@ -278,7 +290,8 @@ class Mind(object):
             # 为什么必须进 mem 而不是只存原文：
             #   原文表不参与召回。只存原文的话，「三天内几乎不遗忘」这条
             #   根本用不上 —— 因为压根没东西可遗忘，下次说话翻不到。
-            mid = self.card.remember(user_message, ts=ts, source=source)
+            mid = self.card.remember(user_message, ts=ts, source=source,
+                                 about_uid=self.local_uid)
             # 出生证：记忆落库就上链（只锁出生那一刻，不锁权重）
             if self.tl is not None and mid:
                 try:
@@ -296,7 +309,8 @@ class Mind(object):
                 try:
                     reply_mid = self.card.remember(
                         reply, ts=ts, salience=0.45,
-                        speaker="self", mtype="episode", source=source)
+                        speaker="self", mtype="episode", source=source,
+                        about_uid=self.local_uid)
                     if self.tl is not None and reply_mid:
                         self.tl.birth_stamp(reply_mid)
                 except Exception as e:
@@ -681,7 +695,8 @@ class Handler(BaseHTTPRequestHandler):
                                 ts=body.get("ts"),
                                 speaker=(body.get("speaker") or "self"),
                                 region=body.get("region"),
-                                source=src)
+                                source=src,
+                                about_uid=str(body.get("about_uid") or ""))
                         except Exception as e:
                             return self._fail(500, "remember_failed", str(e))
                         birth = None
