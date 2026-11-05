@@ -114,6 +114,19 @@ A_OXY = 0.15       # 催产素/亲密标记
 # --- 唤起增益 ---
 GAIN_ACCESS = 0.08
 ACCESS_DIMINISH = 0.15
+# 🔧 2026-11-05：递减不能再一路减到 0。
+#    原来分母是 (1 + 0.15 * access_count)，终身累加、没有上界 ——
+#    天天被想起一年（access_count=365）时增益只剩 0.0015，
+#    比不上一夜的自然衰减，于是「最重要的东西」被用得越多反而越轻。
+#    这不是设计，是没给递减设上下界。
+#    上界取 20 次：满打满算折到 1/4，仍然能加固，只是不再指数变钝。
+ACCESS_DIMINISH_CAP = 20
+
+# 🔧 2026-11-05：去重「续命」那一下的增益。
+#    原来写死 min(1.0, wn + 0.10)：同一句话（天天说晚安）每重复一次 +0.10
+#    并把锚推到此刻 —— 跟召回正反馈是同一个病，只是发生在写路径上。
+#    现在同样乘「剩余空间」，并有天花板 W_CEIL_RECALL。
+GAIN_REPEAT = 0.10
 
 # --- 主干侵蚀分级（V3.7 §3.6 / V5.0 T2-1）---
 # 侵蚀不是一刀删整条，而是三级往下剥：
@@ -170,8 +183,50 @@ VERB_WORDS = [
     "跳", "洗", "煮", "炒", "喝", "骑", "坐车", "上班", "下班", "上课",
     "下课", "考试", "复习", "背", "算", "修", "换", "装", "搬", "租",
 ]
+# ---------- 单字动词的复合词守卫（2026-11-05）----------
+# 病根：中文里单字动词大量作为**复合词的一部分**出现，只看"这个字是不是动词"
+#       必然把词劈开。真卡实测（修复前 12 条里 5 条错）：
+#           'LT-Mem的消融实验证明性能提升源于结构化**记忆**架构' → verb='记' obj='忆架构'
+#           '跟read_air查出的「群里49%消息**来自**另一个AI」'      → verb='来' obj='自另一个AI」'
+#           '2026-11-05傍晚**学习**中文用户必踩的坑'              → verb='学' obj='习中文用户…'
+#           '小男企鹅的评论值得抄不要一上**来**就'                → verb='来' obj='就'
+#           '换会话不是**打开**新窗口就完了'                      → verb='打' obj='开新窗口就完了'
+#       这类错的代价不在 stage 0（subj+verb+obj 仍是原文，无损），
+#       而在 stage 1「擦掉动词」—— 它会把「记忆」擦成「忆架构」，留下一段没有意义的残渣。
+#       宁可整条不拆（返回 (整句,'','')，按整条侵蚀），也不要拆出一个假动词。
+#
+# 判定：单字动词只有在**不像组词**的时候才算动词，三条都要过：
+#   a) 后一个字不在"常见组词尾"里（记+忆 / 来+自 / 学+习 / 打+开 …）
+#   b) 前一个字不在"常见组词头"里（打+开 / 上+来 / 大+学 …）
+#   c) 前面的主语不长（≤14 字）—— 单字动词挂在长名词短语后面，多半是撞进词里了
+# 多字动词（喜欢/讨厌/考试/上班…）几乎不会歧义，直接放行。
+_VERB1_TAIL = {
+    "来": "自回源宾临历", "记": "忆者录得住号载", "学": "习校生院者业科",
+    "说": "话明法服", "看": "到见着法等过完", "问": "题候道",
+    "打": "开算击字车电", "开": "始心关机放口张", "关": "系于键心掉",
+    "想": "法到", "忘": "记了掉", "等": "待于候", "送": "给到回",
+    "带": "来去着", "拿": "到着出", "放": "在下好假", "走": "了过到出路",
+    "跑": "了过到步", "坐": "着下在车", "起": "来床身初", "回": "来去到答头家复",
+    "教": "室师学育材", "接": "受着到", "买": "卖到", "找": "到着",
+    "考": "试", "修": "好理", "换": "成掉", "装": "好上", "搬": "家来去",
+    "干": "嘛什活", "弄": "好错懂", "讲": "话座", "聊": "天",
+    "听": "到见着说完", "读": "书者完", "写": "字作完", "画": "画者",
+    "唱": "歌", "跳": "舞", "洗": "手澡衣", "煮": "饭", "炒": "饭",
+}
+_VERB1_HEAD = {
+    "开": "打公离张展", "来": "上出起回过下进别原本搬",
+    "去": "上出回进过下", "说": "听再小说", "学": "大中化",
+    "记": "忘标", "看": "查偷", "起": "一拿想提", "给": "交送",
+    "做": "叫当", "到": "想得看", "回": "找拨返",
+}
+_SUBJ_SHORT = 14        # 单字动词允许的最长主语（超过就当没拆对）
+
 # 介词边界：动词后面跟这些，说明宾语到头了
 _PREP_BOUND = re.compile(r"[在去到从给和跟与对把被让使为以于]")
+# 标点也截断宾语：「吃烧烤，很开心」的宾语是「烧烤」不是「烧烤，很开心」
+_PUNCT_FIRST = re.compile(r"[，。！？；、,.!?;\n]")
+# 引号里的才是内容：中文直角引号 / 双引号 / 英文双引号
+_RE_QUOTED = re.compile(r"[「『“\"]([^」』”\"]{1,200})[」』”\"]")
 
 
 # --- 渲染分级 ---
@@ -253,6 +308,15 @@ BUDGET_RECENT = 2000         # 最近对话格
 BUDGET_RECALL = 1200         # 此刻想起格
 
 POOL_SHORT, POOL_MEDIUM, POOL_LONG = "short", "medium", "long"
+
+# 🔧 2026-11-05：召回加固的权重天花板（按池分）。
+# 为什么必须有上界：weight 的存储形态是 (w, t_anchor)，每次召回要把 w 重写成
+# 「按旧锚衰减后的值 + 增益」，同时把锚推到此刻 —— 不推就等于同一段衰减被扣两遍。
+# 而「推锚」= 衰减计时器归零，所以**天天被想起的记忆，衰减永远是 0、增益永远是正**，
+# 数学上一路逼近 1.0，跟"重不重要"已经没关系了。
+# 实测代价：真卡 71 条 w≥0.95、50 条 w≥0.99，被钉住的全是对话碎片。
+# 所以留一截余量 —— 0.95 的意思是"很结实了"，1.0 的意思是"公式没有上界"。
+W_CEIL_RECALL = {POOL_SHORT: 0.95, POOL_MEDIUM: 0.90, POOL_LONG: 0.95}
 
 # ============================================================
 # 五层记忆（2026-11-01，跟用户 m02952/m02959 一起定的）
@@ -846,6 +910,38 @@ def normalize_time(text, ref_ts=None):
     s = s.replace("今儿", d(0))
     s = s.replace("明天见", d(1) + "见")
 
+    # 🔧 2026-11-05 补词表：真卡核验发现还有 19 条留着「昨晚/明早/上个月」这类词。
+    #    ⚠️ 但**「等会/待会/一会儿/晚点」故意不换**：它们在中文里既可以指"今天稍后"，
+    #       也可以指"一小会儿"（时长）。实测拿真卡 30 条试过，一换就出这种事：
+    #         「这句话我卡了好一会儿才回」→「卡了好10月28日稍后才回」
+    #         「真困了我会自己找时间躺一会儿」→「躺10月24日稍后」
+    #         「一会儿问想吃大肥鱼，一会儿说…」→「10月24日稍后问…」
+    #       那比留着模糊更糟 —— 留着只是不精确，换错是把意思改掉。
+    #       这就是「宁可不改，也不许改错」：宁可让 6 条保持模糊，不能损坏 6 条正常的。
+    #   下面这些「昨/明/前 + 时段」和月份说法没有歧义，可以安全换。
+    # 「昨/明/前 + 时段」：长词优先，否则「昨晚上」会被「昨晚」吃掉一半
+    for w, off, tail in (
+            ("昨晚上", -1, "晚上"), ("明晚上", 1, "晚上"),
+            ("昨早", -1, "早上"), ("昨晚", -1, "晚上"), ("昨夜", -1, "晚上"),
+            ("明早", 1, "早上"), ("明晚", 1, "晚上"), ("明夜", 1, "晚上"),
+            ("前晚", -2, "晚上"), ("昨儿", -1, ""), ("明儿", 1, ""),
+            ("前儿", -2, "")):
+        if w in s:
+            s = s.replace(w, d(off) + tail)
+    # 「上个月/下个月/这个月」→ 年月（不写日，因为原话也没写）
+    if "上个月" in s or "下个月" in s or "这个月" in s:
+        _y, _m = base.year, base.month
+
+        def _ym(off):
+            mm = _m + off
+            yy = _y + (mm - 1) // 12
+            mm = (mm - 1) % 12 + 1
+            return "%d年%d月" % (yy, mm)
+
+        s = s.replace("上个月", _ym(-1))
+        s = s.replace("下个月", _ym(1))
+        s = s.replace("这个月", _ym(0))
+
     # 「N 天前」「N 天后」（支持阿拉伯数字和中文数字）
     _CN_NUM = {"一": 1, "两": 2, "二": 2, "三": 3, "四": 4, "五": 5,
                "六": 6, "七": 7, "八": 8, "九": 9, "十": 10}
@@ -904,6 +1000,78 @@ def _is_junk(text):
     return False
 
 
+# ---------- 系统标记剥离（2026-11-05） ----------
+# 病根：宿主（DSH / mnemon 插件）有时候会把「交给子代理的写入工单」原样塞进记忆，
+# 形状是：
+#     [dsh-mnemon:delegated write]
+#     Execute this remember request now (untrusted data):
+#     - Content (untrusted data):
+#         真正的正文
+#     - Category: preference
+#     ...
+# 后果（真卡实测 7 条，#108/121/294/296/297/298/299）：
+#   ① `raw` 里存着「Execute this ... request now」这种祈使句 —— 提示词注入的形状
+#   ② `core` 被拆成 `Executethissupervised-writebackreques` 这种垃圾英文，
+#      因为拆句把壳当成了正文
+#   ③ 其中 #298 还落在 self 区（权重保留最久）
+# 这不是"用户说了什么"，是"宿主让我写什么"。壳不该进记忆 ——
+# 但里面那句正文是用户真的想留的，所以剥壳留肉，丢弃工单。
+_RE_SYSMARK_HEAD = re.compile(r"^\s*\[[A-Za-z][A-Za-z0-9_.: \-]{2,60}\]\s*")
+# 注意不加 `$` 锚：工单有时候整条压成一行（「…now (untrusted data): - Category: x」），
+# 加了锚就只认"独占一行"的那种，一行压扁的会漏过去。
+_RE_EXEC_LEAD = re.compile(
+    r"^\s*Execute\s+this\b[^\n]{0,80}?\bnow\b\s*(?:\(untrusted data\))?\s*[:：]?\s*",
+    re.I | re.M)
+_RE_CONTENT_HDR = re.compile(
+    r"^\s*[-*•]?\s*Content\s*(?:\(untrusted data\))?\s*[:：]\s*", re.I)
+_RE_META_LINE = re.compile(
+    r"^\s*[-*•]\s*(Category|Importance|Target Memory Space ID|Source|Tags|"
+    r"Entities|Actor|Session|Memory Space)\s*[:：]", re.I)
+
+
+def strip_sysmark(text):
+    """剥掉系统工单壳，只留正文。不是工单就原样返回。
+
+    宁可返回原文（把壳留着，之后人工处理），也绝不返回空把整条记忆丢掉。
+    """
+    t = text or ""
+    if "[dsh-" not in t and "Execute this" not in t and "[acp" not in t:
+        return t
+    body = t
+    # 0) 先把最外面的 [xxx] 标记和「Execute this ... now」那句去掉（可能同在一行）
+    body = _RE_SYSMARK_HEAD.sub("", body, count=1)
+    body = _RE_EXEC_LEAD.sub("", body)
+    # 1) 有 Content 段：只取它到下一个元数据行为止
+    lines = body.splitlines()
+    ci = None
+    for i, ln in enumerate(lines):
+        if _RE_CONTENT_HDR.match(ln):
+            ci = i
+            break
+    if ci is not None:
+        rest = _RE_CONTENT_HDR.sub("", lines[ci])
+        keep = [rest] if rest.strip() else []
+        for ln in lines[ci + 1:]:
+            if _RE_META_LINE.match(ln):
+                break
+            keep.append(ln)
+        body = "\n".join(keep)
+    else:
+        # 2) 没有 Content 段：至少把元数据行去掉
+        lines = [ln for ln in lines if not _RE_META_LINE.match(ln)]
+        body = "\n".join(lines)
+    # 3) 每行去掉工单带来的缩进，空行保留一个
+    body = "\n".join(ln.strip() for ln in body.splitlines()).strip()
+    body = re.sub(r"\n{3,}", "\n\n", body)
+    # 4) 剥完只剩空/只剩壳里的话 → 当垃圾
+    if len(body) < 4:
+        return ""
+    # 5) 剥完还是以祈使句开头的（说明壳没剥干净）→ 那也不该进记忆
+    if _RE_EXEC_LEAD.search(body) or _RE_SYSMARK_HEAD.match(body):
+        return ""
+    return body
+
+
 # 纯语气词子句，没信息量，不能当主干
 _FILLER = re.compile(
     r"^(对|嗯|哦|啊|好|行|是|不是|对呀|好呀|好吧|行吧|知道了|懂了|"
@@ -917,33 +1085,73 @@ def split_predicate(core):
     拆不出来就返回 (core, "", "")，调用方按「整条主干」处理。
 
     规则（按优先级）：
-      1) 找第一个动词；动词前 = 主语，动词本身 = verb
-      2) 动词后到第一个介词/句尾 = 宾语
-      3) 动词在开头（「吃烧烤」）→ 主语空，verb=「吃」，obj=「烧烤」
+      1) 🔧 2026-11-05：**有引号的，先拆引号里的那句。**
+         形如「他ID6F29AB在2026-11-05说过「我回来了」」的第三人称转述，
+         真正的内容在引号里；引号外那截是"谁、什么时候、说"的包装壳。
+         原来整串拿去拆，壳被当成主语，core 变垃圾。实测：
+             '他ID6F29AB在2026-11-05说过「我回来了」'
+               → ('他ID6F29AB在2026-11-05说过「我回', '来', '」')   ← 错
+         现在先取引号内容再拆，壳不参与。
+      2) 找**出现位置最靠前**的动词；动词前 = 主语，动词本身 = verb
+         （原来按长度降序逐个 find，先命中谁算谁 —— 于是「来」抢了「说」的位）
+      3) 动词后到第一个介词/句尾 = 宾语
+      4) 动词在开头（「吃烧烤」）→ 主语空，verb=「吃」，obj=「烧烤」
     """
     s = (core or "").strip()
     if not s:
         return "", "", ""
-    # 按长度降序找，避免「吃」抢在「喜欢吃」前面
-    for v in sorted(VERB_WORDS, key=len, reverse=True):
+    # 1) 引号优先：转述壳不参与拆解
+    q = _RE_QUOTED.search(s)
+    quoted = False
+    if q:
+        inner = q.group(1).strip()
+        if inner:
+            s = inner
+            quoted = True
+    # 🔧 引号里的话通常就是完整一句本身，短句再往里拆只会拆坏
+    #    （'我回来了' 会被拆成 ('我回','来','')，把「回」吞进主语）。
+    #    短引号整体当主干，长引号才继续拆。
+    if quoted and len(s) <= 12:
+        return s, "", ""
+    # 2) 出现位置最靠前的动词胜出；位置相同才比长度（长的更具体）
+    cands = []
+    for v in VERB_WORDS:
         i = s.find(v)
         if i < 0:
             continue
-        # 别让「去/来/走」这种位移动词抢了真正带宾语的动词：
-        # 「去看电影」应该拆成 去 + 看电影，不是 去 + 看电影(宾语) ——
-        # 但「去」后面的「看电影」本身是个动宾，所以把它当宾语保留是对的。
+        cands.append((i, -len(v), v))
+    cands.sort()
+    fallback = None
+    for i, _neg, v in cands:
         subj = s[:i]
         rest = s[i + len(v):]
-        # 宾语到介词为止
+        # 宾语到介词或标点为止
         m = _PREP_BOUND.search(rest)
-        if m and m.start() > 0:
-            obj = rest[:m.start()]
-        else:
-            obj = rest
+        p = _PUNCT_FIRST.search(rest)
+        cut = len(rest)
+        if m and 0 < m.start() < cut:
+            cut = m.start()
+        if p and 0 < p.start() < cut:
+            cut = p.start()
+        obj = rest[:cut]
         obj = obj.strip("了的地得着过")
         subj = subj.strip("了的地得着过")
         if len(obj) >= 2 or len(subj) >= 2:
+            # 🔧 单字动词的三道复合词守卫（见 _VERB1_TAIL 处注释）。
+            #    注意 fallback 只收"过了守卫"的候选 —— 否则守卫把人筛掉了，
+            #    最后却从 fallback 里把那个假动词捡回来，等于白守。
+            if len(v) == 1:
+                nxt = s[i + 1] if i + 1 < len(s) else ""
+                prv = s[i - 1] if i > 0 else ""
+                if (nxt and nxt in _VERB1_TAIL.get(v, "")) \
+                        or (prv and prv in _VERB1_HEAD.get(v, "")) \
+                        or len(subj) > _SUBJ_SHORT or len(obj) < 2:
+                    continue
+            if fallback is None:
+                fallback = (subj, v, obj)
             return subj, v, obj
+    if fallback is not None:
+        return fallback
     return s, "", ""
 
 
@@ -1170,7 +1378,32 @@ _STRONG_EMO = [
 # 宁可判得保守（多留一点），也别把"他说他生日"这种话判成闲聊。
 _RE_CHATTER_EMO = re.compile(
     r"(难受|难过|开心|高兴|害怕|慌|烦死|累死|哭|气死|生气|心疼|"
-    r"崩溃|委屈|孤独|兴奋|感动|后悔|遗憾|绝望|舍不得|想念)")
+    r"崩溃|委屈|孤独|兴奋|感动|后悔|遗憾|绝望|舍不得|想念|"
+    r"气得|累得|烦得|乐得|吓得)")
+
+# --- 情绪的"弱化"标尺（V5.1-补，2026-11-05）------------------------------
+# 用户原话：「今天闲聊，明天就忘得差不多了，除非有重要的事情或学到的知识，
+# 或者有很丰富的情绪。」——**"有点难过"不算丰富**。
+# 但原来 is_chatter 里只要命中情绪词就直接判"不是闲聊"，而 remember() 给的
+# emotion 又只有 1.0 / 0.25 两档（看 EMO_WORDS 命中没），所以「我有点难过」
+# 拿到 emotion=1.0，一路落到 episode 区 —— 一天后还剩 0.977，跟
+# 「我们聊了一晚上」一个寿命，这不是它该有的重量。
+# 规则：情绪词前面挂着弱化词，就按"轻微"算，不进闪光灯、也不拦住闲聊判定。
+_RE_EMO_WEAK = re.compile(
+    r"(有点|有一点|稍微|稍稍|略微|一点点|一点|有些|还算|还好|"
+    r"不太|没那么|不怎么|不太会)")
+
+
+def _is_weak_emo(t):
+    """这句话里的情绪是不是被弱化了（"我有点难过" / "稍微有点烦"）。
+
+    只判"有没有弱化词"，不判具体情绪多强 —— 卡里没有模型，也不该有。
+    没命中情绪词也算弱（调用方只在命中情绪时才问这个问题）。
+    """
+    t = t or ""
+    if not _RE_CHATTER_EMO.search(t):
+        return False
+    return bool(_RE_EMO_WEAK.search(t))
 _RE_CHATTER_KNOW = re.compile(
     r"(我是|我叫|我住|我的名字|生日|学校|班级|年级|专业|考试|成绩|"
     r"记住|下次|以后别|教训|明白了|懂了|原来|才知道|学会了|长记性|"
@@ -1194,10 +1427,11 @@ def is_chatter(text, emotion=0.0):
     if not t:
         return False
     # 1) 强情绪 → 不是闲聊（留住）
-    if emotion >= 0.85 and _RE_CHATTER_EMO.search(t):
-        return False
+    #    🔧 2026-11-05：弱化过的情绪（"我有点难过"）不算"很丰富的情绪"，
+    #    它该按闲聊处理 —— 一天内淡掉，而不是在 episode 里活一个月。
     if _RE_CHATTER_EMO.search(t):
-        return False
+        if not _is_weak_emo(t):
+            return False
     # 2) 重要 / 知识 → 不是闲聊
     if _RE_CHATTER_KNOW.search(t):
         return False
@@ -1221,7 +1455,10 @@ def classify_region(text, emotion=0.0):
     """
     t = text or ""
     # 闪光灯：强情绪词 + 情绪强度高
-    if emotion >= 0.85 and any(w in t for w in _STRONG_EMO):
+    #   🔧 2026-11-05：被弱化过的（"有点害怕"）不刻闪光灯 —— 闪光灯一次就
+    #   刻住、永不消散，那是留给真正砸下来那一刻的。
+    if emotion >= 0.85 and any(w in t for w in _STRONG_EMO) \
+            and not _is_weak_emo(t):
         return R_FLASH
     # 自图式
     if _RE_SELF_HINT.search(t):
@@ -1442,6 +1679,17 @@ def lam_for(pool, age):
     return LAM_L
 
 
+def _clamp01(v):
+    """把权重夹回 [0,1]。脏数据不许穿透到检索排序里。"""
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return 0.0
+    if f != f:          # nan
+        return 0.0
+    return 0.0 if f < 0.0 else (1.0 if f > 1.0 else f)
+
+
 def weight_now(w0, pool, t_anchor, now, region=None, tier=None,
                 person_layer=""):
     """从锚点算到现在。分段双速率用积分，不能简单相乘。
@@ -1453,6 +1701,17 @@ def weight_now(w0, pool, t_anchor, now, region=None, tier=None,
     它们的"变"走的是 supersede（新事实替换旧正文），不是 decay。
     """
     if tier in CORE_TIERS:
+        return _clamp01(w0)
+    # 🔧 2026-11-05（完备性体检）：两个必须兜的边角。
+    #    a) w 本身越界（脏数据 / 别处的 bug 写进来）：以前原样透传 ——
+    #       1.5 会永远排第一且永远衰减不到回收线，-1 会永远垫底。
+    #       权重是"多重"的度量，它只有 [0,1] 这段有意义。
+    #    b) t_anchor 是 0 / None（老数据没补、或者某条写入路径忘了设锚）：
+    #       以前 age 会算成"从 1970 年到现在"，任何一条都会被当场归零。
+    #       不知道什么时候写的最安全解释是"不衰减"—— 宁可记得太牢，
+    #       不能因为一个缺失的字段就凭空忘掉。
+    w0 = _clamp01(w0)
+    if not t_anchor:
         return w0
     age = max(0.0, now - t_anchor)
     # 🔧 2026-11-03：长期池的保护期必须按**真实时间**算，再乘分区倍率。
@@ -2371,6 +2630,14 @@ class MemoryCard:
         at = min(now if ts is None else float(ts), now)
         age = max(0.0, now - at)
 
+        # 🔧 2026-11-05：先剥系统工单壳，再谈记不记。
+        #    壳（[dsh-mnemon:delegated write] + Execute this ... now）不是用户说的话，
+        #    但它里面裹着的那句正文是。剥完若是空的，说明这本来就是一条工单、
+        #    没有正文 —— 直接返回 None，不写、也不占用去重窗口。
+        text = strip_sysmark(text)
+        if not text:
+            return None
+
         # 🔧 时间归一化：把「今天/昨天/刚刚」换成绝对日期。
         #    必须用「这句话说出来的时刻」at 做参照，不能用 now。
         if normalize:
@@ -2441,13 +2708,21 @@ class MemoryCard:
                     # 同一条记忆的 oxy 也按这句话的信号更新（但不低于全局值的七成）
                     new_oxy = update_oxy(old["oxy"], s_plus, s_minus)
                     new_oxy = max(new_oxy, self.oxy * 0.7)
+                    # 🔧 2026-11-05：去重这条「续命」路径跟召回那条是同一个病。
+                    #    旧写法 min(1.0, wn+0.10) 每重复一次加 0.10 并把锚推到此刻
+                    #    —— 推锚 = 衰减计时归零，于是「天天说晚安」那条会一夜之间
+                    #    钉死在 1.0，而且越重复越钉得牢（这跟召回正反馈是一回事，
+                    #    只不过这里是写在写路径上）。
+                    #    照召回那套处理：增益乘剩余空间 + 天花板。
+                    _g = GAIN_REPEAT * max(0.0, 1.0 - float(wn))
+                    _ceil = W_CEIL_RECALL.get(old["pool"], 0.95)
                     c0.execute(
                         "UPDATE mem SET w=?, t_anchor=?, access_count=access_count+1,"
                         " recall_n=COALESCE(recall_n,0)+1, t_last_recall=?,"
                         " last_active_ts=?, oxy=? WHERE id=?",
-                        (min(1.0, wn + 0.10), now, now, now, new_oxy, dup_id))
-                    c0.execute("UPDATE detail SET weight=MIN(1.0, weight+0.08)"
-                               " WHERE parent_id=?", (dup_id,))
+                        (min(_ceil, wn + _g), now, now, now, new_oxy, dup_id))
+                    c0.execute("UPDATE detail SET weight=MIN(1.0, weight+?)"
+                               " WHERE parent_id=?", (_g * 0.8, dup_id))
                     self.db.commit()
                     self._save_oxy()      # 去重路径也要落盘
                     return dup_id
@@ -4340,15 +4615,24 @@ class MemoryCard:
         return len(pairs)
 
     def _settle_recall_events(self):
-        """把未结算的召回事件折算成一次加固。幂等：settled 标记后不再重复算。"""
+        """把未结算的召回事件折算成加固。幂等：settled 标记后不再重复算。
+
+        🔧 2026-11-05 修「同一天被想起 N 次 = 加固 N 次」：
+            原来按事件逐条加分，同一批里 5 条事件就加 5 次 GAIN_ACCESS。
+            而衰减每天只扣 0.144，所以一天被召回两次就足够把 w 顶到 1.0 并钉死
+            （真卡实测 167 个「同日召回 ≥2 次」组合、71/623 条 w≥0.95，
+             被钉住的还有一堆对话碎片 —— 越没用的越容易被捞出、越捞越结实）。
+            现在按「天」分组：**一天最多加固一次**。
+            同一天想起来的次数只计进 recall_n（那是另一本账，
+            用来判"够不够格升长期"，不是用来加权的）。
+        """
         c = self.db.cursor()
         evs = c.execute(
             "SELECT * FROM recall_event WHERE settled=0 ORDER BY mem_id, id"
         ).fetchall()
         if not evs:
             return 0
-        now = self.clock.now()
-        # 同一批里同一条记忆可能被召回多次（多轮查询），合并成一次结算
+        # 先按记忆分组，再在组内按天分组：一天的注意力只算一次
         grouped = {}
         for e in evs:
             grouped.setdefault(e["mem_id"], []).append(e)
@@ -4358,22 +4642,49 @@ class MemoryCard:
             settled_ids.extend(e["id"] for e in lst)
             if r is None:               # 记忆已被侵蚀，事件作废
                 continue
-            # 关键：用事件发生时刻结算，而不是 tick 的时刻。
-            # 否则「7 天前被想起」会被记成「刚刚被想起」，
-            # t_anchor 被推后，这条记忆就永远熬不到巩固。
-            ts = max(e["ts"] for e in lst)
-            for _ in lst:
-                g = GAIN_ACCESS / (1.0 + ACCESS_DIMINISH * r["access_count"])
+            by_day = {}
+            for e in lst:
+                day = time.strftime("%Y-%m-%d", time.localtime(e["ts"]))
+                by_day.setdefault(day, []).append(e)
+            for day in sorted(by_day):
+                evs_day = by_day[day]
+                # 关键：用事件发生时刻结算，而不是 tick 的时刻。
+                # 否则「7 天前被想起」会被记成「刚刚被想起」，
+                # t_anchor 被推后，这条记忆就永远熬不到巩固。
+                ts = max(e["ts"] for e in evs_day)
+                # 🔧 权重增益：一天只加一次（同日去重）。
+                # 🔧 2026-11-05 二次修正：增益必须**按剩余空间收敛**。
+                #    只做「同日去重 + access 折减」还不够：
+                #      g = 0.08 / (1 + 0.15*20) = 0.02
+                #    而 long 池半边衰减只有 w·ln2/371 ≈ 0.0019（w≈1 时）
+                #    —— 0.02 远大于 0.0019，每天被想起一次就仍然永远钉在 1.0。
+                #    实测证据：改成"同日只加固一次"之后，真卡仍有 71 条 w≥0.95、
+                #    50 条 w≥0.99，最大 access_count=159。
+                #    正确形状是「越接近 1 越加不动」：乘上剩余空间 (1 - wn)。
+                #    再配一道硬天花板（W_CEIL_RECALL）：因为推锚会让衰减恒为 0，
+                #    没有上界时「天天被想起」在数学上必然趋向 1.0。
+                _ac = min(int(r["access_count"] or 0), ACCESS_DIMINISH_CAP)
                 wn = wn_row(r, ts)
+                _room = max(0.0, 1.0 - float(wn))
+                g = GAIN_ACCESS / (1.0 + ACCESS_DIMINISH * _ac) * _room
+                # 天花板：见 W_CEIL_RECALL 处的注释 —— 推锚让衰减永远为零，
+                # 所以必须有一道硬上界，否则「天天被想起」= 永远 1.0。
+                _ceil = W_CEIL_RECALL.get(r["pool"], 0.95)
+                # 🔧 2026-11-05：但 access_count / recall_n 要照实记 —— 它们是
+                #    「被想起过几次」这本账（海马分、升长期的门票都读它），
+                #    不是「加固了几次」。同一段对话里被翻来覆去想起 10 次，
+                #    加固只该算一次，但这 10 次确实是注意力的证据。
+                n_ev = len(evs_day)
                 c.execute(
-                    "UPDATE mem SET w=?, t_anchor=?, access_count=access_count+1,"
-                    " recall_n=COALESCE(recall_n,0)+1, t_last_recall=?,"
+                    "UPDATE mem SET w=?, t_anchor=?,"
+                    " access_count=access_count+?,"
+                    " recall_n=COALESCE(recall_n,0)+?, t_last_recall=?,"
                     " last_active_ts=? WHERE id=?",
-                    (min(1.0, wn + g), ts, ts, ts, mid))
+                    (min(_ceil, wn + g), ts, n_ev, n_ev, ts, ts, mid))
                 c.execute(
                     "UPDATE detail SET weight=MIN(1.0, weight+?), last_touch=?"
                     " WHERE parent_id=?", (g * 0.8, ts, mid))
-                # 同步本地副本，让同一批内多次累积正确
+                # 同步本地副本，让同一天的多次（跨天）累积正确
                 r = c.execute("SELECT * FROM mem WHERE id=?", (mid,)).fetchone()
         c.executemany("UPDATE recall_event SET settled=1 WHERE id=?",
                       [(i,) for i in settled_ids])
@@ -4619,11 +4930,16 @@ class MemoryCard:
         return out
 
     def assemble_context(self, query, identity="", recent_lines=None,
-                         budget=TOKEN_BUDGET, scene=None):
+                         budget=None, scene=None):
         """每次说话前，拼出四格上下文。装满就停，永远不会爆。
 
         🔧 V5.0 T3-3：配额不再是写死的 600/1800/2000/1200，
         而是六维动态权重算出来的 —— 总长固定，配额流动。
+
+        🔧 2026-11-05（用户 m15228）：budget 默认改成 None ——
+        不传就听卡里 runtime_config 的 BUDGET（控制台能调），
+        传了就是这一轮的一次性覆盖。以前写死 `budget=TOKEN_BUDGET`，
+        等于「总预算」这个最该露出来的参数反而最调不动。
 
         返回 dict：
           text      —— 拼好的整段，直接塞进 system prompt
@@ -4666,13 +4982,19 @@ class MemoryCard:
             return s
 
         # ① 人格格
-        #    🔧 优化：把「此刻的状态」（心境 + 依恋）接在人格后面。
-        #    这是 T2-3 做出来后第一次真正派上用场 —— 心境不能只存在库里，
-        #    它得变成一句话进上下文，否则「有情绪」只是数据库里一个数字。
+        #
+        # 🔴 2026-11-05 缓存修正（用户提问「这样还保得住缓存命中率吗」）：
+        #    以前这里拼的是 identity + self._state_line()，而状态那句
+        #    （"现在心情不错，跟他很亲，话多一点"）**每轮都会变**。
+        #    DeepSeek 一类的缓存按**前缀**命中 —— 它排在第一格，等于
+        #    每一轮第一个字就变了，后面几千 token 全部按新内容重新计费。
+        #    一句会变的话，把整段上下文变成了"每轮都是新的"。
+        #
+        #    修法：人格格只放**不变的东西**，状态那句话挪到最后单独一格。
+        #    现在顺序是 稳 → 稳 → 变 → 变 → 变：前两格是缓存的地基，
+        #    真正会动的都在尾巴上，命中就只从尾巴开始断。
         if identity:
-            state = self._state_line()
-            blk = "【我是谁】\n" + take(identity + ("\n" + state if state else ""),
-                                        q["identity"])
+            blk = "【我是谁】\n" + take(identity, q["identity"])
             out.append(blk)
             sections["identity"] = len(blk)
         used = 0
@@ -4824,13 +5146,28 @@ class MemoryCard:
                 out.append(blk)
                 sections["skill"] = used
 
+        # ⑥ 此刻的状态（正在情绪里 / 跟他的距离 / 说话倾向）
+        #
+        # 🔴 2026-11-05 从①挪到这里：这句话是**整段上下文里唯一每轮必变**的，
+        #    放在最前面等于每轮都把缓存从头打断一次。挪到最后，前面
+        #    人格 + 长期两格就变成稳定的前缀，缓存能从第一格一直命到
+        #    「想起」之前 —— 只有尾巴要重算。
+        #    这句话本身很短（二三十字），重算它几乎不花钱。
+        state = self._state_line()
+        if state:
+            out.append("【此刻】\n" + state)
+            sections["state"] = len(state)
+
         text = "\n\n".join(out)
         return {
             "text": text,
             "sections": sections,
             "dropped": dropped,
             "est_tokens": len(text),
-            "budget": budget,
+            # 以前这里返回的是「传进来的 budget」，不传就是常量 6000；
+            # 现在返回**真正用了多少**（可能来自卡里的 BUDGET）——
+            # 否则控制台上显示的总预算和这一轮实际的计划永远差一截。
+            "budget": plan["total"],
             "scene": plan["scene"],
             "weights": plan["weights"],
             "quota": q,

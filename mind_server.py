@@ -62,6 +62,65 @@ MAX_BODY = 6 * 1024 * 1024             # 6 MB，超过直接拒
 # 20000 字符 ≈ 一万字中文，真人一次消息远到不了这个量。
 MAX_TEXT = 20000                       # 单条 message / user_message 超过就 413
 
+# 控制台下拉框里的候选音色（edge-tts 的常用中文音色）。
+# 为什么不现拉：edge_tts.list_voices() 要联网、要几秒，控制台一开页就卡住。
+# 想用列表以外的，直接在下拉框旁边的输入框里填 ShortName 就行。
+ZHV = [
+    ["zh-CN-XiaoyiNeural", "小艺 · 女 · 活泼少女（现在用的）"],
+    ["zh-CN-XiaoxiaoNeural", "晓晓 · 女 · 温柔成熟"],
+    ["zh-CN-XiaochenNeural", "晓辰 · 女 · 慵懒随性"],
+    ["zh-CN-XiaohanNeural", "晓涵 · 女 · 知性"],
+    ["zh-CN-XiaomengNeural", "晓梦 · 女 · 软萌"],
+    ["zh-CN-XiaomoNeural", "晓墨 · 女 · 清冷"],
+    ["zh-CN-XiaoruiNeural", "晓睿 · 女 · 沉稳"],
+    ["zh-CN-XiaoshuangNeural", "晓双 · 女 · 童声"],
+    ["zh-CN-XiaoyanNeural", "晓颜 · 女 · 亲和"],
+    ["zh-CN-XiaoyouNeural", "晓悠 · 女 · 童声"],
+    ["zh-CN-XiaozhenNeural", "晓甄 · 女 · 干练"],
+    ["zh-CN-YunxiNeural", "云希 · 男 · 年轻"],
+    ["zh-CN-YunyangNeural", "云扬 · 男 · 播音"],
+    ["zh-CN-YunjianNeural", "云健 · 男 · 浑厚"],
+    ["zh-CN-YunxiaNeural", "云夏 · 男 · 少年"],
+]
+
+
+def _voice_mod():
+    """把 tools/voice.py 拿进来。它跟卡无关，所以不经过 m 也不用锁。"""
+    import sys as _sys
+    _vp = os.path.join(HERE, "tools")
+    if _vp not in _sys.path:
+        _sys.path.insert(0, _vp)
+    import voice as _vc
+    return _vc
+
+
+def _voice_payload(patch=None, reset=False):
+    _vc = _voice_mod()
+    if reset:
+        _vc.save_cfg(_vc.CFG_DEFAULTS)
+    elif patch:
+        _vc.save_cfg(patch)
+    return {"ok": True, "cfg": _vc.load_cfg(),
+            "defaults": dict(_vc.CFG_DEFAULTS),
+            "voices": ZHV,
+            "limits": {"max_chars": [2, 300]}}
+
+
+def _voice_send(text):
+    """试听：真合成一条，落盘，返回路径。不发 QQ、不写卡。"""
+    _vc = _voice_mod()
+    txt = (text or "").strip()
+    if not txt:
+        raise ValueError("先写一句话")
+    if len(txt) > 300:
+        txt = txt[:300]
+    p = _vc.synth(txt)
+    if not p:
+        raise RuntimeError("合成失败（网络或音色不可用）")
+    return {"ok": True, "file": p, "dur": round(_vc.duration(p), 2),
+            "name": os.path.basename(p)}
+
+
 
 class Mind(object):
     """卡 + 一把锁 + 一个「上次 tick 是什么时候」"""
@@ -484,6 +543,37 @@ class Handler(BaseHTTPRequestHandler):
                 })
             if method == "GET" and path == "/status":
                 return self._send(200, {"ok": True, "status": m.status()})
+            if method == "GET" and path == "/voice_config":
+                return self._send(200, _voice_payload())
+            if method == "GET" and path == "/voice_file":
+                # 试听用的那条 mp3，直接回字节流。
+                # 只认「音色缓存目录里的一个纯文件名」—— 不让路径参与，
+                # 免得哪天有人用 ../ 把整台机器读一遍。
+                from urllib.parse import parse_qs
+                _qs = parse_qs(self.path.split("?", 1)[1] if "?" in self.path else "")
+                _nm = os.path.basename((_qs.get("n") or [""])[0])
+                if not _nm or not _nm.lower().endswith(".mp3"):
+                    return self._fail(400, "bad_name", "要一个 mp3 文件名")
+                try:
+                    _vc = _voice_mod()
+                    _f = os.path.join(_vc.CACHE, _nm)
+                    if not os.path.isfile(_f):
+                        return self._fail(404, "not_found", "没有这条语音")
+                    with open(_f, "rb") as _fh:
+                        _data = _fh.read()
+                except Exception as e:
+                    return self._fail(500, "read_failed",
+                                      "%s: %s" % (type(e).__name__, e))
+                self.send_response(200)
+                self.send_header("Content-Type", "audio/mpeg")
+                self.send_header("Content-Length", str(len(_data)))
+                self.send_header("Cache-Control", "no-store")
+                self.end_headers()
+                try:
+                    self.wfile.write(_data)
+                except Exception:
+                    pass
+                return
             if method == "GET" and path == "/skill_list":
                 # 技能清单（V5.0 §7）。放 GET：它只读不写，
                 # 探活脚本和面板都能直接 curl。
@@ -501,6 +591,9 @@ class Handler(BaseHTTPRequestHandler):
                                         "stats": st})
             if method == "GET" and path == "/config":
                 # V5.0 §10.9 热改：读运行时配置（场景权重等）。
+                # 🔧 2026-11-05（用户 m15228）：把「总预算 / 每格下限 / A 保底」
+                #   和七张场景表一起露出来 —— 控制台的「上下文组合」栏就吃这一份。
+                #   同时带上 defaults 便于前端标"这一项是你改过的还是默认的"。
                 import ctxweight as _cw
                 with m.lock:
                     cfg = _cw.load_config(m.card.db, force=True)
@@ -509,6 +602,36 @@ class Handler(BaseHTTPRequestHandler):
                         "scene_weights": cfg["scene_weights"],
                         "a_min": cfg["a_min"],
                         "cell_min": cfg["cell_min"],
+                        "budget": cfg.get("budget") or _cw.BUDGET_DEFAULT,
+                        # 自动跟随模型（2026-11-05 用户：能不能自动识别用的
+                        # 什么模型、该调多少）。auto 只是开关，真正算多少在
+                        # auto_now 里现读 —— 换模型不 bump _rev，缓存吃不得。
+                        "auto": bool(cfg.get("auto")),
+                        "auto_now": _cw.auto_now(m.card.db),
+                        "models": _cw.model_table(),
+                        "suggest_ratio": _cw.SUGGEST_RATIO,
+                        "defaults": {
+                            "scene_weights": dict(
+                                (k, list(v)) for k, v
+                                in _cw.SCENE_WEIGHTS.items()),
+                            "a_min": _cw.A_MIN,
+                            "cell_min": _cw.CELL_MIN,
+                            "budget": _cw.BUDGET_DEFAULT},
+                        "limits": {
+                            "a_min": [0.0, 0.80],
+                            "cell_min": [0, 4000],
+                            "budget": [_cw.BUDGET_MIN, _cw.BUDGET_MAX]},
+                        "dims": list(_cw.DIM_NAMES),
+                        "cells": [
+                            {"key": "identity", "name": "格1 我是谁",
+                             "dims": "A+B"},
+                            {"key": "longterm", "name": "格2 我一直记得的事",
+                             "dims": "D"},
+                            {"key": "recent", "name": "格3 我们最近在聊",
+                             "dims": "C"},
+                            {"key": "recall", "name": "格4 这句话让我想起了",
+                             "dims": "E+F"}],
+                        "scenes": list(_cw.SCENE_WEIGHTS.keys()),
                         "bad": cfg["bad"],
                         "raw": _cw.rc_all(m.card.db)})
 
@@ -608,15 +731,36 @@ class Handler(BaseHTTPRequestHandler):
                     # 等于「打开控制台」这件事本身在改记忆权重。
                     try:
                         import card2 as _c2
+                        # budget 传 None = 听卡里配的 BUDGET（跟 /context 走的
+                        # 是同一条路）；以前这里写死 _c2.TOKEN_BUDGET，
+                        # 结果「控制台显示的总预算」和「真跑起来用的」会分家。
                         plan = _cw.compute(
-                            "", _c2.TOKEN_BUDGET,
+                            "", None,
                             hormones=getattr(m.card, "h", None),
                             turns=getattr(m.card, "turn_count", None),
                             db=m.card.db)
                         ov["weights"] = plan["weights"]
                         ov["scene"] = plan["scene"]
+                        # 控制台「上下文组合」栏要的那几个数（这一轮用多少、
+                        # 四格怎么分）—— 现算，跟 /config 里的配置是同一份真值。
+                        try:
+                            cfg = _cw.load_config(m.card.db)
+                            ov["ctx"] = {
+                                "scene": plan["scene"],
+                                "weights": plan["weights"],
+                                "total": plan["total"],
+                                "quota": plan["quota"],
+                                "trace": plan["trace"],
+                                "a_min": cfg["a_min"],
+                                "cell_min": cfg["cell_min"],
+                                "budget": cfg.get("budget") or _cw.BUDGET_DEFAULT,
+                                "bad": cfg["bad"],
+                            }
+                        except Exception:
+                            ov["ctx"] = None
                     except Exception as e:
                         ov["weights"] = None
+                        ov["ctx"] = None
                         ov["weights_err"] = str(e)
                 return self._send(200, ov)
             if method == "GET" and path == "/avatar":
@@ -682,6 +826,15 @@ class Handler(BaseHTTPRequestHandler):
                                           "text %d 字符 > 上限 %d"
                                           % (len(tx), MAX_TEXT))
                     src = (body.get("source") or "").strip() or "unknown"
+                    # 🔧 2026-11-05：/remember 支持 pool。
+                    #    病根（外部七问第 1 问）：默认池是 short，
+                    #    一次灌 1600 条历史时短期池只有 32 个位置，
+                    #    被踢出去的那些海马分不够 → 直接遗忘（实测丢 1020 条）。
+                    #    迁历史必须显式给 pool="long"。
+                    _pool = (body.get("pool") or "").strip() or None
+                    if _pool is not None and _pool not in ("short", "medium", "long"):
+                        return self._fail(400, "bad_pool",
+                                          "pool 只能是 short/medium/long")
                     with m.lock:
                         if m.writer_lock:
                             return self._fail(409, "card_locked",
@@ -689,6 +842,9 @@ class Handler(BaseHTTPRequestHandler):
                                               % m.writer_lock)
                         m.flow_time()
                         try:
+                            _kw = {}
+                            if _pool:
+                                _kw["pool"] = _pool
                             mid = m.card.remember(
                                 tx,
                                 salience=float(body.get("salience") or 0.55),
@@ -696,9 +852,15 @@ class Handler(BaseHTTPRequestHandler):
                                 speaker=(body.get("speaker") or "self"),
                                 region=body.get("region"),
                                 source=src,
-                                about_uid=str(body.get("about_uid") or ""))
+                                about_uid=str(body.get("about_uid") or ""),
+                                **_kw)
                         except Exception as e:
                             return self._fail(500, "remember_failed", str(e))
+                        # 2026-11-05：剥完壳是空的（纯系统工单）→ 不写、明确告诉调用方
+                        if mid is None:
+                            return self._send(200, {"ok": True, "mem_id": None,
+                                                    "skipped": "empty_after_strip",
+                                                    "source": src, "birth": None})
                         birth = None
                         if m.tl is not None and mid:
                             try:
@@ -912,6 +1074,25 @@ class Handler(BaseHTTPRequestHandler):
                     #   走这里至少能校验一次、能看见 bad。
                     import ctxweight as _cw
                     key = (body.get("key") or "").strip()
+                    # 🔧 2026-11-05：支持"恢复默认" —— 删掉这一条 runtime_config。
+                    #   为什么需要：改坏了要能一键回去，而不是让人去 UPDATE 数据库。
+                    if key and body.get("reset"):
+                        with m.lock:
+                            try:
+                                m.card.db.execute(
+                                    "DELETE FROM runtime_config WHERE key=?",
+                                    (key,))
+                                m.card.db.commit()
+                                _cw.rc_set(m.card.db, _cw.RC_REV_KEY,
+                                           "%.6f" % time.time(),
+                                           ts=time.time())
+                            except Exception as e:
+                                return self._fail(
+                                    400, "bad_config", "恢复默认失败：%s" % e)
+                            cfg = _cw.load_config(m.card.db, force=True)
+                        return self._send(200, {"ok": True, "key": key,
+                                                "reset": True, "bad": cfg["bad"],
+                                                "note": "已恢复成代码里的默认值"})
                     if not key:
                         return self._fail(400, "bad_config", "key 不能为空")
                     if key.startswith("scene_weight:"):
@@ -931,6 +1112,35 @@ class Handler(BaseHTTPRequestHandler):
                                 "权重必须是 6 个 0~1 的数，逗号分隔，例如 "
                                 "0.18,0.16,0.26,0.10,0.24,0.06")
                         key = "scene_weight:" + name
+                        body["value"] = val
+                    # 三个标量：范围要在这儿挡一次（写进去再发现就晚了）
+                    elif key == "BUDGET_AUTO":
+                        # 自动跟随模型：只认 0/1
+                        v = str(body.get("value") or "").strip().lower()
+                        if v in ("1", "true", "on", "yes"):
+                            body["value"] = "1"
+                        elif v in ("0", "false", "off", "no", ""):
+                            body["value"] = "0"
+                        else:
+                            return self._fail(
+                                400, "bad_config",
+                                "BUDGET_AUTO 只认 0 或 1（现在是 %s）" % v)
+                    elif key in ("A_MIN", "CELL_MIN", "BUDGET"):
+                        v = _cw._parse_num(body.get("value"))
+                        rng = {"A_MIN": (0.0, 0.80),
+                               "CELL_MIN": (0, 4000),
+                               "BUDGET": (_cw.BUDGET_MIN, _cw.BUDGET_MAX)}[key]
+                        if v is None or not (rng[0] <= v <= rng[1]):
+                            return self._fail(
+                                400, "bad_config",
+                                "%s 必须是 %s ~ %s 之间的数" % (key, rng[0],
+                                                               rng[1]))
+                        body["value"] = ("%d" % v) if key != "A_MIN" else ("%g" % v)
+                    else:
+                        return self._fail(
+                            400, "bad_config",
+                            "不认识的配置项：%s（可选：scene_weight:<场景名> / "
+                            "A_MIN / CELL_MIN / BUDGET / BUDGET_AUTO）" % key)
                     with m.lock:
                         rev = _cw.rc_set(m.card.db, key, body.get("value"),
                                          ts=time.time())
@@ -939,6 +1149,112 @@ class Handler(BaseHTTPRequestHandler):
                                             "rev": rev,
                                             "bad": cfg["bad"],
                                             "note": "下一轮 /context 立即生效，不用重启"})
+                if path == "/ctx_preview":
+                    # 控制台的实时预览：**只算不写**。
+                    #   为什么不能拿 /context 来预览：那会走一次真 recall、
+                    #   写 recall_event、还把 turn_count 推一格 ——
+                    #   「在控制台上试一下参数」不该改变她记得的东西。
+                    import ctxweight as _cw
+                    q = (body.get("query") or "")
+                    if len(q) > 500:
+                        q = q[:500]
+                    with m.lock:
+                        try:
+                            plan = _cw.preview(
+                                q, db=m.card.db,
+                                overrides=body.get("overrides") or None,
+                                hormones=getattr(m.card, "h", None),
+                                turns=getattr(m.card, "turn_count", None))
+                        except Exception as e:
+                            return self._fail(500, "preview_failed",
+                                              "%s: %s" % (type(e).__name__, e))
+                    return self._send(200, {"ok": True, "plan": plan})
+                if path == "/voice_config":
+                    # 语音那一栏的参数：存在 qq_state/voice/cfg.json，不在卡里。
+                    # 因为 qq_say.py 在发送前就要算"该不该发语音"，那时候
+                    # 卡可能被别的进程锁着 —— 语音参数不该跟着卡一起不可用。
+                    try:
+                        _voice_mod()
+                    except Exception as e:
+                        return self._fail(500, "voice_unavailable",
+                                          "%s: %s" % (type(e).__name__, e))
+                    try:
+                        if body is not None and isinstance(body, dict):
+                            patch = body.get("patch")
+                            if patch is None:
+                                patch = {k: v for k, v in body.items()
+                                         if k not in ("reset",)}
+                            return self._send(200, _voice_payload(
+                                patch=patch, reset=bool(body.get("reset"))))
+                        return self._send(200, _voice_payload())
+                    except Exception as e:
+                        return self._fail(400, "bad_voice_cfg",
+                                          "%s: %s" % (type(e).__name__, e))
+                if path == "/voice_say":
+                    # 试听：真合成一条，返回落在磁盘上的路径。
+                    # 不发送、不写卡 —— 只是让我先听听像不像人。
+                    try:
+                        return self._send(200, _voice_send(body.get("text")))
+                    except ValueError as e:
+                        return self._fail(400, "empty_text", str(e))
+                    except Exception as e:
+                        return self._fail(502, "synth_failed",
+                                          "%s: %s" % (type(e).__name__, e))
+                if path == "/config_all":
+                    # 一次保存整页（七个场景 + 三个标量）。少发十个请求，
+                    # 也少十次「一半成功一半失败」的机会。
+                    import ctxweight as _cw
+                    items = body.get("items") or {}
+                    if not isinstance(items, dict) or not items:
+                        return self._fail(400, "bad_config", "items 不能为空")
+                    norm = {}
+                    for k, val in items.items():
+                        k = str(k).strip()
+                        if k.startswith("scene_weight:"):
+                            name = k.split(":", 1)[1].strip()
+                            name = _cw.SCENE_ALIAS.get(name.lower(), name)
+                            if name not in _cw.SCENE_WEIGHTS:
+                                return self._fail(400, "bad_config",
+                                                  "没有这个场景：%s" % name)
+                            if isinstance(val, (list, tuple)):
+                                val = ",".join("%g" % float(x) for x in val)
+                            if _cw._parse_six(val) is None:
+                                return self._fail(
+                                    400, "bad_config",
+                                    "场景「%s」的权重必须是 6 个 0~1 的数" % name)
+                            norm["scene_weight:" + name] = val
+                        elif k in ("A_MIN", "CELL_MIN", "BUDGET"):
+                            v = _cw._parse_num(val)
+                            rng = {"A_MIN": (0.0, 0.80),
+                                   "CELL_MIN": (0, 4000),
+                                   "BUDGET": (_cw.BUDGET_MIN,
+                                              _cw.BUDGET_MAX)}[k]
+                            if v is None or not (rng[0] <= v <= rng[1]):
+                                return self._fail(
+                                    400, "bad_config",
+                                    "%s 必须是 %s ~ %s" % (k, rng[0], rng[1]))
+                            norm[k] = ("%g" % v) if k == "A_MIN" else ("%d" % v)
+                        elif k == "BUDGET_AUTO":
+                            v = str(val or "").strip().lower()
+                            if v in ("1", "true", "on", "yes"):
+                                norm[k] = "1"
+                            elif v in ("0", "false", "off", "no", ""):
+                                norm[k] = "0"
+                            else:
+                                return self._fail(
+                                    400, "bad_config",
+                                    "BUDGET_AUTO 只认 0 或 1（现在是 %s）" % v)
+                        else:
+                            return self._fail(400, "bad_config",
+                                              "不认识的配置项：%s" % k)
+                    with m.lock:
+                        for k, v in norm.items():
+                            _cw.rc_set(m.card.db, k, v, ts=time.time())
+                        cfg = _cw.load_config(m.card.db, force=True)
+                    return self._send(200, {"ok": True, "n": len(norm),
+                                            "keys": sorted(norm.keys()),
+                                            "bad": cfg["bad"],
+                                            "note": "已保存，下一轮 /context 立即生效"})
                 if path == "/identity":
                     # 改名。只允许改名字 —— 其余五条身份锚不给动，
                     # 那是「换一个人」而不是「改个称呼」。

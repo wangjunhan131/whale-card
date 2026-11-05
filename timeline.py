@@ -233,6 +233,38 @@ class Timeline(object):
         self.db.commit()
         return h
 
+    def restamp_birth(self, mid, reason=""):
+        """**重开**出生证 —— 只在「我知道原文为什么变了」的时候用。
+
+        出生证哈希锁的就是 raw，所以任何一次有序的原文修复（比如 2026-11-05
+        剥掉系统工单壳）都会让它对不上。这是它该干的事：原文不该被悄悄改。
+
+        但「不该悄悄改」不等于「不许改」—— 跟删除台账一个道理：改可以，
+        改了什么、为什么改，必须留在链上。所以重开证的时候必须给 reason，
+        它会被写进时间线（`mem_fix` 记录），事后任何一次 verify_birth 都能
+        看到「这条在什么时候被谁以什么理由重开过」。
+
+        reason 为空时**拒绝**（抛 ValueError）：没有理由的原文改动就是在抹证据。
+        """
+        reason = (reason or "").strip()
+        if not reason:
+            raise ValueError("重开出生证必须说明理由，否则等于抹掉证据")
+        r = self.db.execute(
+            "SELECT id, raw, speaker, create_ts FROM mem WHERE id=?",
+            (int(mid),)).fetchone()
+        if r is None:
+            return None
+        speaker = r["speaker"] if "speaker" in r.keys() else ""
+        create_ts = r["create_ts"] if "create_ts" in r.keys() else 0.0
+        raw = r["raw"] or ""
+        h = self._birth_hash(r["id"], raw, speaker, create_ts)
+        seq = self.append("mem_fix", "#%d 重开出生证：%s" % (int(mid), reason[:80]))
+        self.db.execute(
+            "INSERT OR REPLACE INTO mem_birth(mid,hash,seq,ts) VALUES(?,?,?,?)",
+            (int(mid), h, seq, float(create_ts or 0)))
+        self.db.commit()
+        return h
+
     def backfill_birth(self, ts=None, limit=None):
         """给老记忆盖一个总章（不逐条写时间线，那会把时间轴冲烂）。
 

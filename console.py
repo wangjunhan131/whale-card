@@ -812,6 +812,65 @@ h1{font-size:26px;margin:14px 0 6px;font-weight:600;letter-spacing:2px}
 .avprev{width:64px;height:64px;border-radius:10px;border:1px solid var(--line);
   object-fit:cover;background:#0d1218;flex:none}
 .fhint{color:var(--dim2);font-size:11.5px;margin-top:4px;line-height:1.6}
+/* 上下文组合页：七种模式 × 六维权重表（2026-11-05 加） */
+.wt{width:100%;border-collapse:collapse;font-size:12px}
+.wt th{color:var(--dim2);font-size:10.5px;letter-spacing:.6px;font-weight:600;
+  padding:0 4px 7px;text-align:center;white-space:nowrap}
+.wt th:first-child{text-align:left;padding-left:2px}
+.wt td{padding:3px 4px;text-align:center;border-top:1px solid #1a222c}
+.wt td:first-child{text-align:left;color:#c2cbd8;white-space:nowrap;
+  padding-left:2px}
+.wt input{width:62px;background:#0d1218;border:1px solid var(--line);
+  color:var(--fg);border-radius:6px;padding:4px 5px;font-size:12px;
+  font-variant-numeric:tabular-nums;text-align:center}
+.wt input:focus{outline:none;border-color:var(--cyan)}
+.wt input.chg{border-color:rgba(232,180,74,.65);color:var(--warn)}
+.wt .mrk{color:var(--warn);font-size:9px;vertical-align:super;margin-left:2px}
+.wt .pv{color:var(--dim);font-size:11px;white-space:nowrap;
+  font-variant-numeric:tabular-nums}
+.ctxrow{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.ctxrow input.n{width:96px;background:#0d1218;border:1px solid var(--line);
+  color:var(--fg);border-radius:6px;padding:6px 8px;font-size:12.5px;
+  font-variant-numeric:tabular-nums}
+.ctxrow input.n:focus{outline:none;border-color:var(--cyan)}
+.ctxrow .lb{color:var(--dim);font-size:12px;width:118px;flex:none}
+.ctxrow input.rng{flex:1;min-width:150px;max-width:420px;height:4px;appearance:none;
+  background:#1b2530;border-radius:3px;outline:none;cursor:pointer}
+.ctxrow input.rng::-webkit-slider-thumb{appearance:none;width:14px;height:14px;
+  border-radius:50%;background:var(--cyan);border:2px solid #0b1116;cursor:pointer}
+.ctxrow input.rng::-moz-range-thumb{width:12px;height:12px;border-radius:50%;
+  background:var(--cyan);border:2px solid #0b1116;cursor:pointer}
+/* 模型对照表：默认收起来，需要时点开 —— 平时不该占着一屏高度 */
+.mtab{width:100%;max-width:520px;border-collapse:collapse;font-size:12px;margin-top:2px}
+.mtab th{color:var(--dim);font-size:10.5px;letter-spacing:.6px;text-align:left;
+  padding:0 4px 6px;font-weight:600}
+.mtab td{padding:4px;border-top:1px solid #1a222c;color:#c2cbd8;
+  font-variant-numeric:tabular-nums}
+.mtab td.s{color:var(--cyan);text-align:right;padding-right:10px}
+.mtab tr.me td{color:var(--fg)}
+.mtab tr.me td:first-child::after{content:" ← 现在用的";
+  color:var(--ok);font-size:10px;margin-left:5px}
+.sw{display:inline-flex;align-items:center;gap:8px;cursor:pointer;user-select:none}
+.sw i{width:34px;height:18px;border-radius:10px;background:#1b2530;position:relative;
+  transition:background .15s;flex:none;display:inline-block}
+.sw i::after{content:"";position:absolute;top:2px;left:2px;width:14px;height:14px;
+  border-radius:50%;background:#63707f;transition:all .15s}
+.sw.on i{background:rgba(47,208,125,.28)}
+.sw.on i::after{left:18px;background:var(--ok)}
+.sw b{color:var(--dim);font-weight:400;font-size:12px}
+.sw.on b{color:var(--fg)}
+.ctxbar{display:grid;gap:6px;margin-top:2px}
+.ctxbar .r{display:grid;grid-template-columns:132px 1fr 58px;gap:9px;
+  align-items:center;font-size:12px}
+.ctxbar .r .nm{color:var(--dim);white-space:nowrap;overflow:hidden;
+  text-overflow:ellipsis}
+.ctxbar .r .nm em{color:var(--dim2);font-style:normal;font-size:10.5px}
+.ctxbar .r .tr{height:9px;background:#0e131a;border-radius:5px;overflow:hidden}
+.ctxbar .r .tr i{display:block;height:100%;border-radius:5px;
+  background:linear-gradient(90deg,#2f6e8c,var(--cyan))}
+.ctxbar .r .nu{text-align:right;color:#c9d3e0;
+  font-variant-numeric:tabular-nums}
+.ctxtrace{color:var(--dim2);font-size:11.5px;margin-top:10px;line-height:1.7}
 .fok{color:var(--ok);font-size:12px}
 .fbad{color:var(--bad);font-size:12px}
 .pill{display:flex;align-items:center;gap:8px;background:var(--panel2);
@@ -1153,6 +1212,8 @@ body{font-family:"Inter","Segoe UI","Microsoft YaHei",system-ui,sans-serif;
     <nav>
       <div class="tab on" data-t="dash">状态总览</div>
       <div class="tab" data-t="mem">记忆</div>
+      <div class="tab" data-t="ctx">上下文</div>
+      <div class="tab" data-t="voice">语音</div>
       <div class="tab" data-t="neb">星云</div>
       <div class="tab" data-t="time">时间线</div>
       <div class="tab" data-t="set">设置</div>
@@ -2668,6 +2729,380 @@ function viewTime(){
   return out;
 }
 
+/* ══════════════════════════════════════════════════════════
+   上下文页（2026-11-05 加，用户 m15228）
+   「组装上下文」这套东西本来就有一整套可调参数（七张场景权重表、
+   总预算、每格下限、A 保底），但控制台一个入口都没有 ——
+   等于建好了闸门却没把闸门露出来。这一页就是那几个闸门。
+   原则：页面只负责显示和收集输入，**四格怎么算一律问服务端**
+   （/ctx_preview），前端绝不自己复制一份公式 —— 两份公式必然分家。
+   ══════════════════════════════════════════════════════════ */
+var CTX_CELLS = [
+  {k:"identity", n:"格1 我是谁", d:"A+B"},
+  {k:"longterm", n:"格2 我一直记得的事", d:"D"},
+  {k:"recent",   n:"格3 我们最近在聊",   d:"C"},
+  {k:"recall",   n:"格4 这句话让我想起了", d:"E+F"}
+];
+var CTX_DIMS = ["身份内核","自我认知","短时记忆","陈述记忆","印象记忆","技能记忆"];
+var CTXD = null;            // 编辑中、还没保存的值：{"scene_weight:普通对话":"...","BUDGET":"8000"}
+
+function ctxQuotaBars(q, total){
+  q = q || {};
+  var mx = 0, sum = 0;
+  CTX_CELLS.forEach(function(c){
+    var v = +q[c.k] || 0;
+    sum += v;
+    mx = Math.max(mx, v);
+  });
+  return '<div class="ctxbar">'+CTX_CELLS.map(function(c){
+    var v=+q[c.k]||0;
+    var pct = mx>0 ? Math.max(1.5, v/mx*100) : 0;
+    return '<div class="r"><span class="nm">'+esc(c.n)+
+      ' <em>'+esc(c.d)+'</em></span>'+
+      '<span class="tr"><i style="width:'+pct+'%"></i></span>'+
+      '<span class="nu">'+v+'</span></div>';
+  }).join('')+'</div>'+
+  '<div class="ctxtrace">四格合计 '+sum+
+    ' / 总预算 '+(total||0)+' · 剩下的在拼装时由各格按需吃掉</div>';
+}
+
+function viewCtx(){
+  var cfg = S.cfg || {};
+  var cur = (S.data && S.data.ctx) || {};
+  var sw  = cfg.scene_weights || {};
+  var def = (cfg.defaults && cfg.defaults.scene_weights) || {};
+  var dims = cfg.dims || CTX_DIMS;
+  var scenes = cfg.scenes || Object.keys(sw);
+  var lim = cfg.limits || {};
+  var bad = cfg.bad || [];
+
+  /* ── 卡1：这一轮实际怎么分的 ── */
+  var head =
+    '<div class="ctxrow" style="margin-bottom:12px">'+
+      '<span class="lb">这一轮判成</span>'+
+      '<b style="color:var(--cyan);font-size:14px">'+esc(cur.scene||"—")+'</b>'+
+      '<span class="fhint" style="margin:0">'+esc(cur.trace||"")+'</span>'+
+    '</div>'+ ctxQuotaBars(cur.quota||{}, cur.total||cfg.budget||0);
+  var card1 = cardHTML("c12","LIVE / 这一轮的四格配额",
+    head, (cur.total||0)+" TOKENS");
+
+  /* ── 卡2：七张模式表 ── */
+  var rows = scenes.map(function(name){
+    var v = sw[name] || [];
+    var d0 = def[name] || [];
+    var cells = dims.map(function(dn,i){
+      var val = (v[i]==null? "" : v[i]);
+      var chg = (d0[i]!==undefined && Math.abs((v[i]||0)-d0[i])>1e-9);
+      return '<td><input class="we" data-s="'+esc(name)+'" data-i="'+i+'"'+
+        ' value="'+(v[i]==null?"":v[i])+'"'+(chg?' style="border-color:rgba(232,180,74,.5)"':"")+'>'+
+        '</td>';
+    }).join('');
+    return '<tr><td>'+esc(name)+'</td>'+cells+'</tr>';
+  }).join('');
+  var tbl =
+    '<div style="overflow:auto">'+
+    '<table class="wt"><thead><tr><th>模式</th>'+
+    dims.map(function(d,i){ return '<th>'+esc(d)+'</th>'; }).join('')+
+    '</tr></thead><tbody>'+rows+'</tbody></table></div>'+
+    '<div class="fhint">每一行的六个数是这张模式表的六维原始权重（0~1，服务端会归一）。'+
+    '改完点「保存全部」—— 不用重启，下一轮 /context 立即生效。'+
+    '黄色边框 = 跟代码默认值不一样。'+
+    '改坏了点「恢复默认」把它删掉就回到默认。</div>';
+  var card2 = cardHTML("c12","MODES / 七种模式 × 六维原始权重", tbl,
+    scenes.length+" 种");
+
+  /* ── 卡3：三个闸门 ── */
+  function gate(lb, key, val, hint, lo, hi, slider){
+    var h = '<div class="ctxrow" style="padding:9px 0;border-bottom:1px solid var(--line)">'+
+      '<span class="lb">'+esc(lb)+'</span>'+
+      '<input class="n ge" id="g_'+key+'" data-k="'+key+'" value="'+esc(val)+'">';
+    if(slider){
+      // 滑条只是同一个值的另一支笔：拖它 = 改上面那个数字框，
+      // 不另外存一份状态（两份状态必然分家，这条踩过）。
+      h += '<input type="range" class="rng" id="r_'+key+'" min="'+lo+'" max="'+hi+
+           '" step="'+(hi>=50000?500:50)+'" value="'+esc(val)+'">';
+    }
+    h += '<span class="fhint" style="margin:0;flex:1;min-width:180px">'+esc(hint)+
+      (lo!=null? '（'+lo+' ~ '+hi+'）':'')+'</span></div>';
+    return h;
+  }
+  var g =
+    gate("总预算 TOKENS","BUDGET", (cfg.budget||0),
+      "这一轮最多拼多少 token。调大 = 记得更多、也更容易漏掉眼前；调小 = 省钱但会丢细节。",
+      (lim.budget||[1000,200000])[0], (lim.budget||[1000,200000])[1], true)+
+    gate("每格下限","CELL_MIN", (cfg.cell_min||0),
+      "四格里每一格至少留多少 token，防止某一格被挤成 0。",
+      (lim.cell_min||[0,4000])[0], (lim.cell_min||[0,4000])[1])+
+    gate("A 身份保底","A_MIN", (cfg.a_min||0),
+      "「身份内核」这一维归一后的最低占比 —— 不管说什么，底线那三条都占得住位置。",
+      (lim.a_min||[0,0.8])[0], (lim.a_min||[0,0.8])[1]);
+  var card3 = cardHTML("c12","GATES / 三个闸门", g+
+    '<div class="ctxrow" style="margin-top:14px">'+
+      '<button class="btn" id="btnCtxSave" style="width:auto;padding:7px 18px">保存全部</button>'+
+      '<button class="btn" id="btnCtxReset" style="width:auto;padding:7px 18px">全部恢复默认</button>'+
+      '<span id="ctxMsg" class="'+(S.ctxMsgBad? "fbad":"fhint")+
+        '" style="margin:0">'+esc(S.ctxMsg||"—")+'</span></div>');
+
+  /* ── 卡4：试算 ── */
+  var card4 = cardHTML("c12","TRY / 拿一句话试算",
+    '<div class="ctxrow">'+
+      '<input class="n" id="ctxQ" style="width:auto;flex:1" '+
+        'placeholder="打一句他可能会说的话，看它会被判成哪个模式、四格怎么分">'+
+      '<button class="btn" id="btnCtxTry" style="width:auto;padding:7px 18px">试算</button></div>'+
+    '<div id="ctxResult" style="margin-top:14px"></div>'+
+    '<div class="fhint">试算**不写库、不读记忆、不动轮次** —— 它只算权重和配额，'+
+    '所以随便试，不会影响她记得的东西。'+
+    (bad.length? '<br><span class="fbad">卡里有 '+bad.length+
+      ' 条配置解析失败（已按默认值跑）：'+esc(bad.join("；"))+'</span>':"")+
+    '</div>');
+
+  /* ── 卡3b：模型适配（自动 / 手动 + 对照表） ── */
+  var an = cfg.auto_now || {};
+  var aon = (S.ctxAuto===undefined || S.ctxAuto===null)? !!cfg.auto : !!S.ctxAuto;
+  var rows = (cfg.models||[]).map(function(r){
+    var me = (an.model && r.match !== "(认不出来)" && an.model.indexOf(r.match)>=0);
+    return '<tr'+(me? ' class="me"':'')+'><td>'+esc(r.match)+'</td>'+
+      '<td>'+esc(r.label||"—")+'</td>'+
+      '<td class="s">'+(r.suggest||0).toLocaleString()+'</td></tr>';
+  }).join("");
+  var live = aon
+    ? ('自动模式：跟着 <b style="color:var(--cyan)">'+esc(an.model||"?")+'</b> · 窗口 '+
+       esc(an.label||(an.window||0))+' · 这一轮总预算 <b style="color:var(--cyan)">'+
+       (an.budget||0).toLocaleString()+'</b>（保存后生效，上面那个数字就不作数了）')
+    : ('手动模式：用上面那个总预算。当前模型 '+
+       (an.model? '<b>'+esc(an.model)+'</b>'+
+         (an.label? '（'+esc(an.label)+'，建议 '+(an.budget||0).toLocaleString()+'）':'')
+        : '<span class="fhint">认不出来</span>')+
+       '。');
+  var card3b = cardHTML("c12","ADAPT / 按模型自动定预算",
+    '<div class="ctxrow" style="padding:0 0 12px;border-bottom:none;align-items:flex-start">'+
+      '<span class="sw'+(aon? ' on':'')+'" id="swAuto" style="flex:none">'+
+        '<i></i><b>'+(aon? '自动':'手动')+'</b></span>'+
+      '<span class="fhint" style="margin:0;flex:1;min-width:200px">'+
+        '自动 = 按当前接的模型自己算一个总预算（窗口的 '+
+        Math.round((cfg.suggest_ratio||0.12)*100)+'%，夹在 6000~32000）。'+
+        '手动 = 就按上面那个数字来。</span></div>'+
+    '<div style="font-size:12px;line-height:1.9;color:var(--dim)">'+
+      '<span id="adLive">'+live+'</span>'+
+      ' <span id="btnMtab" style="color:var(--cyan);cursor:pointer;'+
+      'border-bottom:1px dashed rgba(47,208,125,.4)">'+
+      (S.mtabOpen? '收起对照表':'展开对照表')+'</span></div>'+
+    '<div id="mtabBox" style="'+(S.mtabOpen? '':'display:none')+';margin-top:10px">'+
+      '<table class="mtab"><thead><tr><th>模型关键字</th><th>窗口</th>'+
+      '<th style="text-align:right;padding-right:10px">建议总预算</th></tr></thead>'+
+      '<tbody>'+rows+'</tbody></table>'+
+      '<div class="fhint" style="margin-top:8px">窗口大小是公开资料里的常见值，'+
+      '只用来给一个起点 —— 记忆那一份不该占满整个窗口，剩下要留给对话本身和输出。'+
+      '真正准的数只有它自己知道，所以这里只是起步线，随时可以手动改。</div></div>');
+
+  return card1+card3+card3b+card2+card4;
+}
+
+function ctxCollect(){
+  /* 把页面上所有编辑框读成 {key: value}，只收"跟现在不一样"的 */
+  var out = {};
+  var cfg = S.cfg || {};
+  var sw = cfg.scene_weights || {};
+  if(S.ctxAuto===true) out["BUDGET_AUTO"] = "1";
+  else if(S.ctxAuto===false) out["BUDGET_AUTO"] = "0";
+  document.querySelectorAll(".wt input.we").forEach(function(inp){
+    var s = inp.dataset.s, i = +inp.dataset.i;
+    var old = (sw[s]||[])[i];
+    var v = (inp.value||"").trim();
+    if(v==="") return;
+    if(old!==undefined && Math.abs(parseFloat(v)-old)<1e-9) return;
+    out["scene_weight:"+s] = out["scene_weight:"+s] || (sw[s]||[]).slice();
+    out["scene_weight:"+s][i] = parseFloat(v);
+  });
+  document.querySelectorAll(".ctxrow input.ge").forEach(function(inp){
+    var k = inp.dataset.k, v = (inp.value||"").trim();
+    if(v==="") return;
+    var old = (k==="BUDGET")? cfg.budget : (k==="CELL_MIN"? cfg.cell_min : cfg.a_min);
+    if(Math.abs(parseFloat(v)-old)<1e-9) return;
+    out[k] = v;
+  });
+  return out;
+}
+function ctxApplyOverrides(ov){
+  /* 试算时把还没保存的编辑也带上 —— 这样"改之前先看一眼"才有意义 */
+  var o = {};
+  document.querySelectorAll(".wt input.we").forEach(function(inp){
+    var s = inp.dataset.s, i = +inp.dataset.i;
+    o["scene_weight:"+s] = o["scene_weight:"+s] ||
+      ((S.cfg&&S.cfg.scene_weights&&S.cfg.scene_weights[s])||[]).slice();
+    var v = parseFloat((inp.value||"").trim());
+    if(!isNaN(v)) o["scene_weight:"+s][i] = v;
+  });
+  document.querySelectorAll(".ctxrow input.ge").forEach(function(inp){
+    var v = (inp.value||"").trim();
+    if(v!=="") o[inp.dataset.k] = v;
+  });
+  /* 自动模式下"总预算"那个框是给人看的估算值，不该当成手动覆盖发出去，
+     否则试算永远等于框里那个数、自动模式等于没开。 */
+  if(S.ctxAuto===true) { o["BUDGET_AUTO"] = "1"; delete o["BUDGET"]; }
+  else if(S.ctxAuto===false) o["BUDGET_AUTO"] = "0";
+  Object.keys(ov||{}).forEach(function(k){ o[k]=ov[k]; });
+  return o;
+}
+
+function bindCtx(){
+  var msg = $("#ctxMsg");
+  /* 提示语要活在 S 上，不能只写进 DOM —— render() 一重绘就把那句话冲掉了，
+     人只看到半个"已保存"，以为没生效。（这条踩过一次。） */
+  function say(t, bad){
+    S.ctxMsg = t; S.ctxMsgBad = !!bad;
+    var m = $("#ctxMsg");
+    if(!m) return;
+    m.className = bad? "fbad":"fok";
+    m.textContent = t;
+  }
+
+  function loadCfg(){
+    return API("/config").then(function(j){
+      if(j && j.ok){ S.cfg = j; return j; }
+      return null;
+    });
+  }
+
+  function doTry(){
+    var q = ($("#ctxQ")||{}).value || "";
+    var box = $("#ctxResult");
+    if(box) box.innerHTML = '<span class="fhint">算…</span>';
+    API("/ctx_preview",{method:"POST",
+      headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({query:q, overrides:ctxApplyOverrides({})})}
+    ).then(function(j){
+      if(!j || !j.ok){
+        if(box) box.innerHTML = '<span class="fbad">'+esc((j&&(j.detail||j.error))||"失败")+'</span>';
+        return;
+      }
+      var p = j.plan || {};
+      if(box) box.innerHTML =
+        '<div class="ctxrow" style="margin-bottom:10px">'+
+          '<span class="lb">判成</span>'+
+          '<b style="color:var(--cyan);font-size:14px">'+esc(p.scene||"?")+'</b>'+
+          '<span class="fhint" style="margin:0">'+esc(p.trace||"")+'</span></div>'+
+        ctxQuotaBars(p.quota||{}, p.total||0)+
+        '<div class="ctxtrace">六维权重：'+((p.weights||[]).map(function(x,i){
+          return (CTX_DIMS[i]||("D"+i))+'='+x.toFixed(2); }).join(" · "))+'</div>';
+    }).catch(function(e){
+      if(box) box.innerHTML = '<span class="fbad">连不上：'+esc(e)+'</span>';
+    });
+  }
+
+  var bt = $("#btnCtxTry");
+  if(bt) bt.onclick = doTry;
+  var qin = $("#ctxQ");
+  if(qin) qin.onkeydown = function(e){ if(e.key==="Enter") doTry(); };
+
+  /* 自动开关：只在本地翻状态，保存时才写进去 —— 和滑条一样，
+     界面上每一处编辑都只有一份真值（draft），不两条路各写各的。 */
+  var sw = $("#swAuto");
+  if(sw) sw.onclick = function(){
+    var cfg = S.cfg || {};
+    var cur = (S.ctxAuto===undefined || S.ctxAuto===null)? !!cfg.auto : !!S.ctxAuto;
+    S.ctxAuto = !cur;
+    S.ctxDirty = true;
+    /* 就地改，不重绘：重绘会把人家正在改的七个权重框全冲掉。 */
+    var on = !!S.ctxAuto;
+    sw.className = "sw" + (on? " on":"");
+    var b = sw.querySelector("b");
+    if(b) b.textContent = on? "自动":"手动";
+    var lv = $("#adLive"), an = (S.cfg||{}).auto_now || {};
+    if(lv){
+      lv.innerHTML = on
+        ? ('自动模式：跟着 <b style="color:var(--cyan)">'+esc(an.model||"?")+'</b> · 窗口 '+
+           esc(an.label||(an.window||0))+' · 这一轮总预算 <b style="color:var(--cyan)">'+
+           (an.budget||0).toLocaleString()+'</b>（保存后生效，上面那个数字就不作数了）')
+        : ('手动模式：用上面那个总预算。当前模型 '+
+           (an.model? '<b>'+esc(an.model)+'</b>'+
+             (an.label? '（'+esc(an.label)+'，建议 '+(an.budget||0).toLocaleString()+'）':'')
+            : '<span class="fhint">认不出来</span>')+'。');
+    }
+  };
+  var mt = $("#btnMtab");
+  if(mt) mt.onclick = function(){
+    S.mtabOpen = !S.mtabOpen;
+    var box = $("#mtabBox");
+    if(box) box.style.display = S.mtabOpen? "":"none";
+    mt.textContent = S.mtabOpen? "收起对照表":"展开对照表";
+  };
+
+  /* 滑条与数字框是同一个值的两支笔：拖哪个都同步另一个。 */
+  var rng = $("#r_BUDGET"), num = $("#g_BUDGET");
+  if(rng && num){
+    rng.oninput = function(){
+      num.value = rng.value;
+      num.style.borderColor = "rgba(232,180,74,.75)";
+      S.ctxDirty = true;
+    };
+    num.addEventListener("input", function(){
+      var v = parseInt(num.value,10);
+      if(!isNaN(v)) rng.value = Math.min(+rng.max, Math.max(+rng.min, v));
+    });
+  }
+
+  /* 输入时把框标黄，提示"这个还没保存"；同时挂上"有人在改"的旗子，
+     免得 15 秒一次的自动刷新把输入框冲掉。 */
+  document.querySelectorAll(".wt input.we, .ctxrow input.ge").forEach(function(inp){
+    inp.oninput = function(){
+      inp.style.borderColor = "rgba(232,180,74,.75)";
+      S.ctxDirty = true;
+    };
+  });
+  var bs = $("#btnCtxSave");
+  if(bs) bs.onclick = function(){
+    var items = ctxCollect();
+    if(!Object.keys(items).length){ say("没有改动"); return; }
+    bs.disabled = true;
+    API("/config_all",{method:"POST",
+      headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({items:items})}
+    ).then(function(j){
+      bs.disabled = false;
+      if(j && j.ok){
+        S.ctxDirty = false;
+        S.ctxAuto = undefined;
+        say("已保存 "+(j.n||0)+" 项，下一轮立即生效");
+        loadCfg().then(function(){ render(); });
+      } else {
+        say((j&&(j.detail||j.error))||"保存失败", true);
+      }
+    }).catch(function(e){ bs.disabled=false; say("连不上："+e, true); });
+  };
+
+  var br = $("#btnCtxReset");
+  if(br) br.onclick = function(){
+    ask("全部恢复默认",
+      "会把卡里所有 runtime_config 里改过的参数删掉，回到代码里的默认值。"
+      +"（记忆一条都不会少。）确定？", function(){
+      var raw = (S.cfg&&S.cfg.raw)||{};
+      var keys = Object.keys(raw).filter(function(k){ return k!=="_rev"; });
+      if(!keys.length){ say("本来就没有改过的参数"); return; }
+      var left = keys.length, failed = [];
+      keys.forEach(function(k){
+        API("/config",{method:"POST",
+          headers:{"Content-Type":"application/json"},
+          body:JSON.stringify({key:k, reset:true})}
+        ).then(function(j){
+          if(!(j&&j.ok)) failed.push(k);
+        }).catch(function(){ failed.push(k); }).then(function(){
+          if(--left===0){
+            S.ctxDirty = false;
+            S.ctxAuto = undefined;
+            say(failed.length? ("有 "+failed.length+" 项没删掉："+failed.join(","))
+                            : "已全部恢复默认", failed.length>0);
+            loadCfg().then(function(){ render(); });
+          }
+        });
+      });
+    });
+  };
+
+  /* 进页面就拿一次完整配置（七张表 + 默认值 + 范围） */
+  if(!S.cfg) loadCfg().then(function(){ render(); });
+}
+
 function viewSet(){
   var id=(S.data&&S.data.identity)||{};
   var av = id.avatar
@@ -2809,6 +3244,199 @@ function pickAvatar(){
   inp.click();
 }
 
+/* ══════════════ 语音 ══════════════ */
+function viewVoice(){
+  var vc = S.vc || {};
+  var c = vc.cfg || {};
+  var dfs = vc.defaults || {};
+  var vs = vc.voices || [];
+  var known = vs.some(function(x){ return x[0]===c.voice; });
+
+  /* 音色：下拉框里是常用那几个；认不出的（比如自己填的）另给输入框，
+     两处写同一个值 —— 不让人猜"到底哪个算数"。 */
+  var opt = vs.map(function(x){
+    return '<option value="'+esc(x[0])+'"'+(x[0]===c.voice?' selected':'')+
+      '>'+esc(x[1])+'</option>';
+  }).join("");
+  if(!known && c.voice) opt = '<option value="'+esc(c.voice)+'" selected>'+
+    esc(c.voice)+'（不在常用表里）</option>' + opt;
+
+  var card1 = cardHTML("c12","VOICE / 声音的样子",
+    '<div class="ctxrow"><span class="lb">音色</span>'+
+      '<select class="n ge2" id="v_voice" data-k="voice" style="width:280px">'+opt+'</select>'+
+      '<span class="fhint" style="margin:0;flex:1;min-width:180px">'+
+      '下拉里是常用的十五个。想用别的，把 edge-tts 的 ShortName 直接填进右边框。</span></div>'+
+    '<div class="ctxrow"><span class="lb">自定义音色</span>'+
+      '<input class="n ge2" id="v_voice_custom" data-k="voice" '+
+        'placeholder="例如 zh-CN-XiaoyiNeural" value="'+esc(c.voice||"")+'">'+
+      '</div>'+
+    '<div class="ctxrow"><span class="lb">语速</span>'+
+      '<input class="n ge2" id="v_rate" data-k="rate" value="'+esc(c.rate||"")+'">'+
+      '<input type="range" class="rng" id="r_rate" min="-50" max="80" step="1" '+
+        'value="'+esc(parseInt(c.rate||"0",10)||0)+'">'+
+      '<span class="fhint" style="margin:0;min-width:120px">百分比，+10% 就是快一成</span></div>'+
+    '<div class="ctxrow"><span class="lb">音高</span>'+
+      '<input class="n ge2" id="v_pitch" data-k="pitch" value="'+esc(c.pitch||"")+'">'+
+      '<input type="range" class="rng" id="r_pitch" min="-50" max="60" step="1" '+
+        'value="'+esc(parseInt(c.pitch||"0",10)||0)+'">'+
+      '<span class="fhint" style="margin:0;min-width:120px">Hz，+20Hz 会年轻一点</span></div>'+
+    '<div class="ctxrow"><span class="lb">上限字数</span>'+
+      '<input class="n ge2" id="v_max" data-k="max_chars" value="'+esc(c.max_chars||40)+'">'+
+      '<input type="range" class="rng" id="r_max" min="2" max="300" step="1" '+
+        'value="'+esc(c.max_chars||40)+'">'+
+      '<span class="fhint" style="margin:0;min-width:120px">超过这个字数就打字，不发语音条'+
+      '（20 秒大约 60~70 字）</span></div>'+
+    '<div class="ctxrow" style="margin-top:14px">'+
+      '<button class="btn" id="btnVoiceSave" style="width:auto;padding:7px 18px">保存</button>'+
+      '<button class="btn" id="btnVoiceReset" style="width:auto;padding:7px 18px">恢复默认</button>'+
+      '<span id="vMsg" class="'+(S.vcMsgBad? "fbad":"fhint")+'" style="margin:0">'+
+        esc(S.vcMsg||"—")+'</span></div>');
+
+  var card2 = cardHTML("c12","TRY / 听一句",
+    '<div class="ctxrow">'+
+      '<input class="n" id="vQ" style="width:auto;flex:1" '+
+        'placeholder="打一句话，合成出来听听像不像人（用上面保存过的参数）">'+
+      '<button class="btn" id="btnVoiceTry" style="width:auto;padding:7px 18px">合成</button></div>'+
+    '<div id="vResult" style="margin-top:14px"></div>'+
+    '<div class="fhint">这里只合成、不发送 —— 不会往 QQ 上发任何东西，'+
+    '也不写进记忆。想让它真发一条语音条，得走 qq_say.py。</div>');
+
+  var card3 = cardHTML("c12","EXT / 外部语音模型（留位，还没接）",
+    '<div class="ctxrow"><span class="lb">当前引擎</span>'+
+      '<b style="color:'+(c.provider==="edge"?"var(--ok)":"var(--warn)")+'">'+
+      esc(c.provider||"edge")+'</b>'+
+      '<span class="fhint" style="margin:0;flex:1">edge = 微软 edge-tts，'+
+      '不用显卡、不花钱、现在真在跑的就是它。</span></div>'+
+    '<div class="ctxrow"><span class="lb">base_url</span>'+
+      '<input class="n gc" id="v_base" data-k="ext_base" value="'+esc(c.ext_base||"")+'" '+
+        'placeholder="https://…（留空 = 不用）">'+'</div>'+
+    '<div class="ctxrow"><span class="lb">api_key</span>'+
+      '<input class="n gc" id="v_key" data-k="ext_key" value="'+esc(c.ext_key||"")+'" '+
+        'placeholder="留空 = 不用">'+'</div>'+
+    '<div class="ctxrow"><span class="lb">model</span>'+
+      '<input class="n gc" id="v_model" data-k="ext_model" value="'+esc(c.ext_model||"")+'" '+
+        'placeholder="例如 tts-1">'+'</div>'+
+    '<div class="fhint" style="margin-top:8px">这三格现在填了也不会生效：'+
+    '`load_cfg()` 会把 provider 强行退回 edge。为什么留着：以后真想换引擎时，'+
+    '不用再动一次配置结构。宁可写清楚"还没接"，也不做那种填了没反应、'+
+    '还以为在跑的假开关。</div>');
+
+  return card1+card2+card3;
+}
+
+function bindVoice(){
+  function say(t, bad){
+    S.vcMsg = t; S.vcMsgBad = !!bad;
+    var m = $("#vMsg");
+    if(!m) return;
+    m.className = bad? "fbad":"fok";
+    m.textContent = t;
+  }
+
+  /* 下拉框和自定义框写的是同一个值：动哪个都把另一个同步过去。
+     两个独立状态的话必然分家 —— 这条在上下文页踩过一次。 */
+  var sel = $("#v_voice"), cus = $("#v_voice_custom");
+  if(sel && cus){
+    sel.onchange = function(){ cus.value = sel.value; S.vcDirty = true; };
+    cus.oninput = function(){
+      S.vcDirty = true;
+      var opts = sel.options, hit = -1;
+      for(var i=0;i<opts.length;i++){ if(opts[i].value===cus.value){ hit=i; break; } }
+      sel.selectedIndex = hit>=0? hit : -1;
+    };
+  }
+
+  /* 滑条 ↔ 数字框：滑条给的是纯数字，落到框里要带符号和单位 */
+  function link(rangeId, inputId, fmt){
+    var r = $("#"+rangeId), n = $("#"+inputId);
+    if(!r || !n) return;
+    r.oninput = function(){ n.value = fmt(+r.value); S.vcDirty = true; };
+    n.addEventListener("input", function(){
+      var v = parseInt(n.value,10);
+      if(!isNaN(v)) r.value = v;
+    });
+  }
+  link("r_rate","v_rate", function(v){ return (v>=0?"+":"")+v+"%"; });
+  link("r_pitch","v_pitch", function(v){ return (v>=0?"+":"")+v+"Hz"; });
+  link("r_max","v_max", function(v){ return String(v); });
+
+  function collect(){
+    var o = {};
+    var cur = ((S.vc||{}).cfg)||{};
+    [["#v_voice_custom","voice"],["#v_rate","rate"],["#v_pitch","pitch"],
+     ["#v_max","max_chars"],["#v_base","ext_base"],["#v_key","ext_key"],
+     ["#v_model","ext_model"]].forEach(function(p){
+      var el = $(p[0]); if(!el) return;
+      var v = String(el.value||"").trim();
+      if(v !== String(cur[p[1]]===undefined? "":cur[p[1]])) o[p[1]] = v;
+    });
+    return o;
+  }
+
+  var bs = $("#btnVoiceSave");
+  if(bs) bs.onclick = function(){
+    var patch = collect();
+    if(!Object.keys(patch).length){ say("没有改动"); return; }
+    bs.disabled = true;
+    API("/voice_config",{method:"POST",
+      headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({patch:patch})}
+    ).then(function(j){
+      bs.disabled = false;
+      if(j && j.ok){
+        S.vc = j; S.vcDirty = false;
+        say("已保存。下一条语音就按这个来");
+      } else {
+        say((j&&(j.detail||j.error))||"保存失败", true);
+      }
+    }).catch(function(e){ bs.disabled=false; say("连不上："+e, true); });
+  };
+
+  var br = $("#btnVoiceReset");
+  if(br) br.onclick = function(){
+    ask("恢复默认语音参数", "回到小艺、+10%、+20Hz、40 字。确定？", function(){
+      API("/voice_config",{method:"POST",
+        headers:{"Content-Type":"application/json"},
+        body:JSON.stringify({reset:true})}
+      ).then(function(j){
+        if(j && j.ok){ S.vc = j; S.vcDirty = false; say("已恢复默认"); render(); }
+        else say("恢复失败", true);
+      });
+    });
+  };
+
+  var bt = $("#btnVoiceTry");
+  function doTry(){
+    var t = ($("#vQ")||{}).value || "";
+    var box = $("#vResult");
+    if(!t.trim()){ if(box) box.innerHTML = '<span class="fbad">先写一句话</span>'; return; }
+    if(box) box.innerHTML = '<span class="fhint">合成中…（第一次要几秒）</span>';
+    API("/voice_say",{method:"POST",
+      headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({text:t})}
+    ).then(function(j){
+      if(!j || !j.ok){
+        if(box) box.innerHTML = '<span class="fbad">'+esc((j&&(j.detail||j.error))||"失败")+'</span>';
+        return;
+      }
+      var url = "/voice_file?n="+encodeURIComponent(j.name);
+      if(box) box.innerHTML =
+        '<audio controls autoplay src="'+url+'" style="width:100%;max-width:460px"></audio>'+
+        '<div class="ctxtrace">'+esc(j.name)+' · '+j.dur+' 秒</div>';
+    }).catch(function(e){
+      if(box) box.innerHTML = '<span class="fbad">连不上：'+esc(e)+'</span>';
+    });
+  }
+  var bt2 = $("#btnVoiceTry");
+  if(bt2) bt2.onclick = doTry;
+  var q = $("#vQ");
+  if(q) q.onkeydown = function(e){ if(e.key==="Enter") doTry(); };
+
+  document.querySelectorAll(".ctxrow input.ge2, .ctxrow input.gc").forEach(function(inp){
+    inp.oninput = function(){ S.vcDirty = true; };
+  });
+}
+
 /* ── 实时负载：CPU / 内存（0~100%）+ 磁盘读写（按峰值归一，虚线） ── */
 function drawSys(){
   var hist=(S.sys&&S.sys.hist)||((S.data&&S.data.sys&&S.data.sys.hist)||[]);
@@ -2891,12 +3519,21 @@ function render(){
   /* 状态总览改成"自然高度 + 可上下滑"（2026-11-01 用户要求）：
      参数越加越多，硬塞一屏会把内容压得看不清；宁可滚一下。 */
   g.className = "grid";
+  /* 上下文页可能正有人在那儿改数字：这时候重绘会把输入框冲掉，
+     人会以为自己没输进去。所以有未保存改动就先不重绘。 */
+  if(S.tab==="ctx" && S.ctxDirty && !S.ctxForce) { return; }
+  S.ctxForce = false;
+  if(S.tab==="voice" && S.vcDirty) { return; }
   if(S.tab==="dash") g.innerHTML=viewDash();
   else if(S.tab==="mem") g.innerHTML=viewMem();
   else if(S.tab==="neb") g.innerHTML=viewNeb();
   else if(S.tab==="time") g.innerHTML=viewTime();
+  else if(S.tab==="ctx") g.innerHTML=viewCtx();
+  else if(S.tab==="voice") g.innerHTML=viewVoice();
   else g.innerHTML=viewSet();
   if(S.tab==="set") bindSet();
+  if(S.tab==="ctx") bindCtx();
+  if(S.tab==="voice") bindVoice();
   if(S.tab==="dash") bindDiskButtons();
   draw();
   /* autoFill 关掉：现在状态总览是可滚动长页，再自动缩放会把卡片压扁 */
@@ -3079,13 +3716,22 @@ function refresh(){
     API("/console_data"),
     API("/cardslot"),
     API("/timeline"),
-    API("/disks")
+    API("/disks"),
+    /* 上下文参数面（七张模式表 + 三个闸门 + 默认值/范围）。
+       放这儿一起拉：上下文页要靠它渲染，而且它是"卡里现在怎么配的"的真值。 */
+    API("/config"),
+    /* 语音参数（音色/语速/音高/上限字数）。它不在卡里，是 qq_state 里的
+       一个 JSON —— 因为发送前要算"该不该发语音"时卡可能正被锁着。 */
+    API("/voice_config")
   ]).then(function(a){
-    var h=a[0], st=a[1], cd=a[2], cs=a[3], tl=a[4], dk=a[5];
+    var h=a[0], st=a[1], cd=a[2], cs=a[3], tl=a[4], dk=a[5], cfg=a[6], vc=a[7];
     S.alive = !!(h && h.ok);
     S.health = h || {};
     S.slot = (cs && cs.cardslot && cs.cardslot.state) || "unknown";
     S.data = cd && cd.ok ? cd : (S.data||{});
+    /* 上下文参数面：只在没人在编辑的时候覆盖，免得把人家正改的数字冲掉 */
+    if(!S.ctxDirty && cfg && cfg.ok) S.cfg = cfg;
+    if(!S.vcDirty && vc && vc.ok) S.vc = vc;
     /* 盘子/备份：单独一条接口，别塞进 /console_data（那是纯 DB 读数） */
     S.data.disks = (dk && dk.ok) ? dk : (S.data.disks || {});
     S.data.timeline = (st && st.status && st.status.timeline) || {};
@@ -3139,6 +3785,12 @@ $("#btnFull").onclick=function(){
 };
 document.querySelectorAll("nav .tab").forEach(function(t){
   t.onclick=function(){
+    /* 上下文页改到一半就跑掉 = 那些改动会丢。先问一句，
+       比"改了没生效、不知道是没保存还是没生效"强。 */
+    if(S.tab==="ctx" && S.ctxDirty && t.dataset.t!=="ctx"){
+      if(!confirm("上下文参数还有没保存的改动，离开会丢掉。继续？")) return;
+      S.ctxDirty = false;
+    }
     document.querySelectorAll("nav .tab").forEach(function(x){
       x.classList.remove("on"); }); t.classList.add("on");
     S.tab=t.dataset.t;
