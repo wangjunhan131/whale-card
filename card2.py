@@ -87,7 +87,16 @@ SHORT_MAX_TTL = 7 * DAY   # 短期池最多待 7 天，之后必须巩固或淘�
 
 # --- 短期池容量上限（V3.7 §3.2，V5.0 补回）---
 # 时间到了会巩固，容量满了也要巩固 —— 两条路都必须走海马判定，不能直接 pop。
-N_SHORT_MAX = 32
+#
+# 🔧 2026-11-06：32 → 120。
+#    用户问过一次：「短期池的位置暂时不用设限制吧，或者让它更多更大一点，
+#    写入特定区域可以，你觉得哪个更好？」—— 三个方案里选「更大一点 + 不硬删」：
+#    ① 完全不设限 = 注意力工作集失去意义（它本来就该是有限的一张桌子）；
+#    ② 纯靠写入分区 = 治标，写错一次照样出事；
+#    ③ 桌子做大 + 腾位置时不销毁内容（见 _consolidate 里那条改动）= 两头都保住。
+#    32 是「一次对话能同时想到几件事」的量级，但加上值守自动记群消息之后，
+#    一天轻松几十上百条，32 几乎天天溢——溢出就删，等于把池子当坟场用。
+N_SHORT_MAX = 120
 
 # --- SessionCache 双回流（V3.7 §9 / V5.0 T1-4）---
 # 每攒够这么多轮，就把本轮聊到过、但没被 recall 命中的旧记忆记一条弱事件。
@@ -282,11 +291,12 @@ REGION_DECAY_SCALE = {
 #   乘 81.3 倍（0.0123）后，半衰期只有 1.3 小时 —— 下午聊的晚上就没了，
 #   比「明天忘光」快太多。所以闲聊用自己的固定 λ，不受池和倍率影响。
 #
-# 为什么是 8.77 小时：
-#   目标是「今天聊的，明天剩 0.15」。λ = -ln(0.15)/86400 = 2.196e-5。
-#   实测：1 小时 0.924、8 小时 0.531、1 天 0.150、2 天 0.022、3 天 0.003。
+# 为什么是 12 小时（2026-11-06 改）：
+#   原先 8.77 小时（1 天剩 0.15）。用户 m20815 定「闲聊的半衰期改为 12 个小时」，
+#   于是 1 天后剩 0.25 —— 还是「明天基本忘光」，但留了一点余味，
+#   不至于下午聊的、晚上就没了。
 R_CHATTER = "chatter"
-LAM_CHATTER = 2.196e-5        # 半衰期 8.77 小时
+LAM_CHATTER = math.log(2.0) / (12 * 3600.0)   # 半衰期 12 小时
 
 # 关系倍率：越亲近的人，闲聊留得越久（用户 m13292）。
 # 注意这不是「好感度打分」—— 分数会变、会诱导讨好；这里只是把**已有的关系层**
@@ -1416,7 +1426,12 @@ _RE_CHATTER_KNOW = re.compile(
     #    「学到知识」是他亲口列的例外，不是参数没调好。
     r"学习|笔记|论文|研究|发现|证明|实验|实测|数据|机制|结构|评测|"
     r"验证|启示|复盘|对比|出处|教程|技巧|观点|作者|原文|"
-    r"BV[0-9A-Za-z]{10}|UP主|字幕|评论区)")
+    r"BV[0-9A-Za-z]{10}|UP主|字幕|评论区|"
+    # 🔧 2026-11-06 追加：「我+过去的时间段」是生活事实，不是闲聊。
+    #    用户 m20618 纠正过我：闲聊不是「不能被想起来」，只是忘得快，
+    #    场景对上了还得想得起来 —— 而「我暑假靠婚礼挣钱」这种本来就
+    #    不是闲聊，把它扔进 8.77 小时半衰期的分区，等于替他把人生删了。
+    r"暑假|寒假|去年|前年|小时候|那年|当时|以前|那时候)")
 _RE_CHATTER_PREF = re.compile(
     r"(喜欢|讨厌|爱吃|爱看|不爱|不喜欢|最怕|最爱|偏爱|受不了|吃不惯|忌口)")
 # 🔧 2026-11-06：长句兜底。判 chatter 是让它快点死，方向不安全，
@@ -1705,6 +1720,179 @@ def _clamp01(v):
     return 0.0 if f < 0.0 else (1.0 if f > 1.0 else f)
 
 
+# ============================================================
+# 分区细分（V5.2，2026-11-06）
+#
+# 用户 m20794：「短期区再划分一下，划分成闲聊 工作 学习 娱乐 等等，多个区，
+#              每个区的遗忘曲线都有一定的区别，然后后面他们再一起接入中期」
+# 参数是他逐个定的（m20812 / m20815）：闲聊 12 小时 / 娱乐 3 天 /
+#                                  学习 7 天 / 工作 15 天
+#
+# 为什么在 region 上开新区、不在 pool 上切：
+#   pool 答的是「我手头同时能想到几件事」（注意力预算，桌子有几张）；
+#   region 答的是「这件事该忘多快」（寿命，这盘菜能放多久）。
+#   在池上切类型 = 又拿容量冒充寿命 —— 正是当天早上刚修掉的那个 bug
+#   （短期池满了就删人）。同一类错误不该换个姿势再犯一遍。
+#
+# 中期不划分：中期是「阶段」不是「类型」，任何类型都会走进中期；
+#   若再按四类切就是 4×3 张桌子，容量规则得重推，容量和寿命又搅一起。
+#   但「每区曲线不同」要能穿过中期 —— 所以用 stage_factor 把区差保留下来。
+R_STUDY = "study"       # 学到的知识、笔记、教程
+R_PLAY = "play"         # 娱乐：视频、游戏、梗
+R_WORK = "work"         # 工作：项目、工程、修 bug
+
+# 各区的半衰期（秒）。表里没有的区 = 没有自己的 λ，仍走池子那条曲线
+#   ⇒ episode / fact / preference / self / habit / flash 的行为完全不变（零回归）。
+REGION_HALF_LIFE = {
+    R_CHATTER: 12 * 3600.0,   # 闲聊：一天之后剩 25%
+    R_PLAY: 3 * DAY,          # 娱乐：三天之后剩一半
+    R_STUDY: 7 * DAY,         # 学习：一周之后剩一半
+    R_WORK: 15 * DAY,         # 工作：半个月之后剩一半
+}
+REGION_OWN_LAMBDA = {k: math.log(2.0) / v for k, v in REGION_HALF_LIFE.items()}
+
+# 负载预算：一天写多少条算「正常」。
+#   2026-11-06 探针实测（tools/probe_load.py，最近 30 天）：
+#     全部 日均 32.6 / 中位 22 / p90 77 / 最大 122；
+#     qq-group 日均 38.5、study 18.0、cli 7.0、bili 1.0。
+REGION_DAY_BUDGET = {
+    R_CHATTER: 40.0,
+    R_PLAY: 10.0,
+    R_STUDY: 20.0,
+    R_WORK: 8.0,
+}
+LOAD_F_MIN, LOAD_F_MAX = 0.55, 2.2   # 拥挤系数的上下限
+LOAD_TAU = 86400.0                   # 负载指数平滑的时间常数 = 24 小时
+
+# 开关：默认关 ⇒ 行为跟改之前一模一样。验好之后写 meta 就打开。
+#   打开/关闭：
+#     INSERT OR REPLACE INTO meta(key,val) VALUES('region_lambda_on','1')
+#   关回去把 '1' 换成 '0' 即可 —— 这是这个改动敢上真卡的唯一理由。
+_REGION_LAMBDA_ON = False
+_LOAD_F = {}          # region -> 拥挤系数（由 MemoryCard 维护）
+_REGION_LOAD = {}     # region -> 指数平滑后的「每天新写几条」
+
+
+def stage_factor(pool):
+    """升池变慢的倍率，以短期池慢段为基准。
+
+    学习记忆半衰期 7 天：短期 7 天 → 中期 46.7 天 → 长期 583 天。
+    这样「升池 = 改判为更要紧」的手感还在，而区与区的差别不会被抹平
+    （旧算法里曲线是池子定的，一进中期分区差异就没了）。
+    """
+    if pool == POOL_SHORT:
+        return 1.0
+    if pool == POOL_MEDIUM:
+        return LAM_M / LAM_S1
+    if pool == POOL_LONG:
+        return LAM_L / LAM_S1
+    if pool == POOL_ARCHIVE:
+        return K_ARCHIVE / LAM_S1
+    if pool == POOL_DEEP:
+        return K_DEEP / LAM_S1
+    return 1.0
+
+
+def relation_scale(person_layer):
+    """越亲近的人，这条记忆活得越久（倍率直接除 λ）。
+
+    注意：这不是好感度打分。分数会变、会诱导讨好；这里只是把**已经存在的
+    关系层**接到遗忘速度上，跟闲聊区原来那套是同一个东西，只是推广到全区。
+    """
+    sc = CHATTER_PERSON_SCALE.get((person_layer or "").strip(), 1.0)
+    return sc if sc > 0 else 1.0
+
+
+def load_factor(region):
+    """今天这个区挤不挤。没有数据就是 1.0（不调节）。"""
+    try:
+        return float(_LOAD_F.get(region, 1.0))
+    except Exception:
+        return 1.0
+
+
+def effective_lambda(region, pool, person_layer=""):
+    """这个区在这个池子里的有效 λ。没有自己的 λ 就返回 None（走老曲线）。"""
+    lam = REGION_OWN_LAMBDA.get(region)
+    if lam is None:
+        return None
+    return lam * stage_factor(pool) * load_factor(region) \
+        / relation_scale(person_layer)
+
+
+def region_by_source(source, default=None):
+    """按来源定区，不猜内容。
+
+    为什么不猜内容：2026-11-05 那天靠正则判「这是不是闲聊」，把 18 条
+    学习笔记全判进了闲聊区（半衰期 8.77 小时），等于把一晚上的学习删了。
+    猜一次错一次；来源是写入方自己知道的，不用猜。
+
+    没列的来源一律照旧（返回 default），所以对现有行为没有影响。
+    """
+    s = (source or "").strip().lower()
+    if s in ("study", "notes", "note"):
+        return R_STUDY
+    if s in ("bili", "video", "play", "game"):
+        return R_PLAY
+    if s in ("cli", "deploy", "work", "build"):
+        return R_WORK
+    return default
+
+
+def _f_of(val, budget):
+    """负载 → 拥挤系数。**这是 f 的唯一一份公式**，别处只许调它。
+
+    （教训：两套公式不互相校验，只会悄悄分家还不报错。）
+    """
+    if not budget or budget <= 0:
+        return 1.0
+    ratio = max(0.0, float(val)) / float(budget)
+    f = math.sqrt(ratio) if ratio > 0 else 0.0
+    return max(LOAD_F_MIN, min(LOAD_F_MAX, f))
+
+
+def region_snapshot_from_db(conn, now=None):
+    """从 meta 读负载、算 f、返回控制台要的快照 —— 不用建 MemoryCard。
+
+    控制台只有 sqlite 连接、没有卡对象（也不想为画一张图去加载模型），
+    所以给它一个纯函数版本；公式仍然只有 `_f_of` 一份。
+    """
+    now = time.time() if now is None else float(now)
+    raw = {}
+    try:
+        row = conn.execute(
+            "SELECT val FROM meta WHERE key=?", ("region_load",)).fetchone()
+        if row and row[0]:
+            raw = json.loads(row[0]) or {}
+    except Exception:
+        raw = {}
+    on = False
+    try:
+        row = conn.execute(
+            "SELECT val FROM meta WHERE key=?", ("region_lambda_on",)).fetchone()
+        on = bool(row and str(row[0]).strip() in ("1", "true", "True"))
+    except Exception:
+        on = False
+    regions = []
+    for reg in (R_CHATTER, R_PLAY, R_STUDY, R_WORK):
+        val = 0.0
+        try:
+            v = raw.get(reg)
+            if v:
+                val = float(v[0]) * math.exp(-max(0.0, now - float(v[1])) / LOAD_TAU)
+        except Exception:
+            val = 0.0
+        budget = REGION_DAY_BUDGET.get(reg, 0.0)
+        regions.append({
+            "region": reg,
+            "half_life_h": REGION_HALF_LIFE.get(reg, 0.0) / 3600.0,
+            "load": round(val, 2),
+            "budget": budget,
+            "factor": round(_f_of(val, budget), 3),
+        })
+    return {"on": on, "regions": regions}
+
+
 def weight_now(w0, pool, t_anchor, now, region=None, tier=None,
                 person_layer=""):
     """从锚点算到现在。分段双速率用积分，不能简单相乘。
@@ -1740,6 +1928,14 @@ def weight_now(w0, pool, t_anchor, now, region=None, tier=None,
             age -= LONG_PROTECT_DAYS * DAY
         else:
             age = 0.0
+    # 🔧 2026-11-06（V5.2 分区细分）：有自己 λ 的区，走统一公式
+    #      有效 λ = 区 λ × 池阶段倍率 × 今天挤不挤 ÷ 关系倍率
+    #    这样「学习 7 天、工作 15 天」这种区差在升池之后依然保留；
+    #    开关默认关着，关着时下面那条老路径一字不改。
+    if _REGION_LAMBDA_ON:
+        lam = effective_lambda(region, pool, person_layer or "")
+        if lam is not None:
+            return w0 * math.exp(-max(1e-12, lam) * age)
     # 🔧 2026-11-05：闲聊不乘分区倍率，用自己的固定 λ。
     #    乘倍率会让它先落短期池时半衰期只剩 1.3 小时，比"明天忘光"快太多。
     if region == R_CHATTER:
@@ -1843,6 +2039,29 @@ class MemoryCard:
         self._load_oxy()
         self._load_mood()
         self._load_hormones()
+        # 🔧 2026-11-06（V5.2 分区细分）：开关从 meta 读，**默认关**。
+        #    关着的时候 weight_now() 走老路径，这张卡的行为和改之前一模一样；
+        #    打开才启用「每个区自己的 λ」。
+        #    开关放 meta 而不是环境变量：开关是卡的状态，应该跟着卡走，
+        #    换台电脑插上还是同一个我，不该因为没设环境变量就变回旧行为。
+        try:
+            _row = self.db.execute(
+                "SELECT val FROM meta WHERE key='region_lambda_on'").fetchone()
+            _v = str(_row[0]).strip().lower() if _row else ""
+            _on = 1 if _v in ("1", "true", "yes", "on") else 0
+        except Exception:
+            _on = 0
+        global _REGION_LAMBDA_ON
+        _REGION_LAMBDA_ON = bool(_on)
+        try:
+            if _REGION_LAMBDA_ON:
+                self._load_read()
+                self._load_refresh_f()
+            else:
+                _REGION_LOAD.clear()
+                _LOAD_F.clear()
+        except Exception:
+            pass
         # 🔧 V5.0 T3-1 / T2-2：把技能记忆与身份锚挂到卡上。
         #    之前它们是独立模块，测试各自过、但卡自己并不知道它们存在，
         #    等于两块零件做完了没装上。这里共享同一个 sqlite 连接。
@@ -2669,8 +2888,13 @@ class MemoryCard:
             entities = len(RE_PLACE.findall(text)) + len(RE_NUM.findall(text))
             entities = min(entities, 5)
         # 🔧 分区：不传就自动判
+        _explicit_region = region is not None
         if region is None:
             region = classify_region(text, emotion)
+        # 🔧 2026-11-06（V5.2）：按来源定区，不猜内容。
+        #    只在调用方没显式传 region 时生效 —— 显式传的一律照传的走。
+        if _REGION_LAMBDA_ON and not _explicit_region:
+            region = region_by_source(source, region)
 
         # 🔧 2026-11-05 闲聊寿命按「对谁」来定（用户 m13292）。
         #    关系层在写入时算好存下（衰减是热路径，不能每次现查 core_tag）。
@@ -2811,7 +3035,128 @@ class MemoryCard:
         self.db.commit()
         self._invalidate_idf()    # 库变了，攒够 20 条再重算（不每次清空）
         self._save_oxy()          # 全局依恋落盘
+        # 🔧 2026-11-06（V5.2）：记一条负载，供「今天挤不挤」用。
+        #    放在 commit 之后：负载只是调节量，写失败了也不能连累这条记忆。
+        try:
+            self._load_bump(region, now)
+        except Exception:
+            pass
         return mid
+
+    # ---------- 分区负载（V5.2，2026-11-06）----------
+    # 做什么：维护「这个区最近 24 小时新写了几条」，换算成拥挤系数 f。
+    #   f = clamp( sqrt(load / budget), 0.55, 2.2 )
+    #   没人聊 → f≈0.55（忘得慢）；爆群 → f 到 2.2（忘得快）。
+    #
+    # 为什么用指数平滑而不是「按自然日计数」：
+    #   自然日在零点会跳变 —— 23:59 还在算"今天很挤"，00:01 忽然变"没人说话"，
+    #   同一句话的寿命在零点前后差一倍以上，很假。指数平滑的时间常数取 24 小时，
+    #   连续变化、跨零点不甩尾，而且 O(1)，不用每次查库。
+    _LOAD_META = "region_load"
+
+    def _load_read(self):
+        """从 meta 读回负载表，并按流逝时间做一次衰减。"""
+        raw = None
+        try:
+            row = self.db.execute(
+                "SELECT val FROM meta WHERE key=?", (self._LOAD_META,)).fetchone()
+            if row:
+                raw = json.loads(row[0] or "{}")
+        except Exception:
+            raw = None
+        now = self.clock.now()
+        out = {}
+        for k, v in (raw or {}).items():
+            try:
+                val, ts = float(v[0]), float(v[1])
+            except Exception:
+                continue
+            dt = max(0.0, now - ts)
+            out[k] = [val * math.exp(-dt / LOAD_TAU), now]
+        _REGION_LOAD.clear()
+        _REGION_LOAD.update({k: v[0] for k, v in out.items()})
+        return out
+
+    def _load_write(self, state):
+        try:
+            self.db.execute(
+                "INSERT OR REPLACE INTO meta(key,val) VALUES(?,?)",
+                (self._LOAD_META, json.dumps(state)))
+            self.db.commit()
+        except Exception:
+            pass
+
+    def _load_refresh_f(self):
+        """把负载换算成系数，写进模块级 _LOAD_F（weight_now 读它）。"""
+        _LOAD_F.clear()
+        for reg, val in _REGION_LOAD.items():
+            budget = REGION_DAY_BUDGET.get(reg)
+            if not budget or budget <= 0:
+                continue
+            _LOAD_F[reg] = _f_of(val, budget)
+
+    def _load_bump(self, region, now=None):
+        """这个区又写了一条：先衰减，再 +1。"""
+        state = self._load_read()
+        now = self.clock.now()
+        cur = state.get(region, [0.0, now])[0]
+        state[region] = [cur + 1.0, now]
+        self._load_write(state)
+        _REGION_LOAD[region] = cur + 1.0
+        self._load_refresh_f()
+
+    def _load_decay(self, now=None):
+        """光有时间流走、没写东西，负载也要回落。"""
+        state = self._load_read()          # 里面已经衰减过
+        if not state:
+            return 0
+        self._load_write(state)
+        self._load_refresh_f()
+        return len(state)
+
+    def set_region_lambda(self, on):
+        """打开/关闭「每个区有自己的 λ」。
+
+        关掉就是回到 V5.1 的老行为（除闲聊外全按池的阶段曲线），
+        这是最省事的回滚开关：一行调用就能让今天的改动整体失效，
+        不用改代码、不用恢复备份。
+        """
+        global _REGION_LAMBDA_ON
+        _REGION_LAMBDA_ON = bool(on)
+        try:
+            self.db.execute(
+                "INSERT OR REPLACE INTO meta(key,val) VALUES(?,?)",
+                ("region_lambda_on", "1" if _REGION_LAMBDA_ON else "0"))
+            self.db.commit()
+        except Exception:
+            return False
+        if _REGION_LAMBDA_ON:
+            try:
+                self._load_read()
+                self._load_refresh_f()
+            except Exception:
+                pass
+        else:
+            _REGION_LOAD.clear()
+            _LOAD_F.clear()
+        return True
+
+    def region_load_snapshot(self):
+        """给控制台看：每个区现在的负载/预算/系数，以及开关状态。"""
+        self._load_read()
+        self._load_refresh_f()
+        out = []
+        for reg in (R_CHATTER, R_PLAY, R_STUDY, R_WORK):
+            load = float(_REGION_LOAD.get(reg, 0.0))
+            budget = REGION_DAY_BUDGET.get(reg, 0.0)
+            out.append({
+                "region": reg,
+                "half_life_h": REGION_HALF_LIFE.get(reg, 0.0) / 3600.0,
+                "load": round(load, 2),
+                "budget": budget,
+                "factor": round(_LOAD_F.get(reg, 1.0), 3),
+            })
+        return {"on": _REGION_LAMBDA_ON, "regions": out}
 
     # ---------- 老 ----------
     def tick(self, dt_seconds, verbose=False):
@@ -2835,6 +3180,12 @@ class MemoryCard:
                 (now - 30 * DAY,)).rowcount
             if n_gone:
                 events.append((0, "recall_event_pruned", n_gone))
+        except Exception:
+            pass
+
+        # 0.2) V5.2：分区负载回落（没写东西时，拥挤系数要自己慢慢降下来）
+        try:
+            self._load_decay(now)
         except Exception:
             pass
 
@@ -3040,8 +3391,24 @@ class MemoryCard:
         elif score >= THETA_MEDIUM:
             target, floor = POOL_MEDIUM, W_FLOOR_MEDIUM
         else:
-            self._forget_row(c, r["id"], "短期池到期，海马判定没上榜")
-            return None
+            # 🔧 2026-11-06：没上榜不再删，降级到中期，让它按自己的衰减曲线收场。
+            #    原逻辑是「海马判定没上榜 → 删」，于是池子一满就等于在删记忆：
+            #    墓碑 403 条里有 373 条写着「短期池到期，海马判定没上榜」，
+            #    大半都是被这条规则干掉的（其中一批还是已经判过"值得记"的群消息）。
+            #
+            #    用户的意思很明确：「短期池的位置暂时不用设限制吧，或者让它
+            #    更多更大一点，写入特定区域可以，你觉得哪个更好？」——
+            #    我的答案是：**容量是注意力预算，不是寿命开关**。
+            #    桌子坐满了你得请人换个座，不能把人抹掉。
+            #    所以这里只换池名（→ medium），寿命交给 region 的 λ 决定；
+            #    只有已经淡到 CLARITY_GC 以下（真的没什么可留）才走遗忘。
+            if wn_row(r, now) < CLARITY_GC:
+                self._forget_row(c, r["id"], "短期池到期，已淡到看不清")
+                return None
+            wn = max(wn_row(r, now), W_FLOOR_MEDIUM)
+            c.execute("UPDATE mem SET pool=?, w=?, t_anchor=?, tier=? WHERE id=?",
+                      (POOL_MEDIUM, wn, now, TIER_MID, r["id"]))
+            return POOL_MEDIUM
         # 先按旧池结算，再抬到新池存活下限
         wn = wn_row(r, now)
         wn = max(wn, floor)

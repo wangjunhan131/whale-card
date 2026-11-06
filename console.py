@@ -212,7 +212,8 @@ def card_metrics(db_path=DEFAULT_DB):
     out = {
         "mem": 0, "detail": 0, "skill": 0, "dialogue": 0, "tomb": 0, "birth": 0,
         "created_24h": 0, "created_7d": 0,
-        "pools": [], "weight_hist": [], "emb_dims": [], "usable_emb": 0,
+        "pools": [], "short_regions": [], "region_load": {"on": False, "regions": []},
+        "weight_hist": [], "emb_dims": [], "usable_emb": 0,
         "recall_24h": 0, "recall_sources": [], "recall_top": [],
         "recall_series": [], "synapse": {}, "syn_kinds": [],
         "timeline_series": [], "ticks": 0,
@@ -245,6 +246,25 @@ def card_metrics(db_path=DEFAULT_DB):
                                " GROUP BY pool ORDER BY n DESC"):
                 out["pools"].append({"k": r["pool"] or "long", "n": int(r["n"]),
                                      "aw": round(_f(r["aw"]), 3)})
+        except Exception:
+            pass
+
+        # 短期池按区拆开（2026-11-06 V5.2）：光看「短期 4 条」没用，
+        # 得看出这 4 条是闲聊、是学习、还是工作 —— 它们的寿命差 30 倍。
+        try:
+            for r in c.execute(
+                    "SELECT COALESCE(NULLIF(region,''),'episode') rg,"
+                    " COUNT(*) n, AVG(w) aw FROM mem WHERE pool='short'"
+                    " GROUP BY rg ORDER BY n DESC"):
+                out["short_regions"].append({
+                    "k": r["rg"], "n": int(r["n"]), "aw": round(_f(r["aw"]), 3)})
+        except Exception:
+            pass
+
+        # 每个区自己的遗忘曲线开没开 + 今天这个区挤不挤
+        try:
+            import card2 as _c2
+            out["region_load"] = _c2.region_snapshot_from_db(c, now)
         except Exception:
             pass
 
@@ -1242,6 +1262,13 @@ var RC = {episode:"#5b7fa6",fact:"#4f9d69",self:"#c9a227",habit:"#3fa8a0",
 var RN = {episode:"事件",fact:"事实",self:"自我",habit:"习惯",
           preference:"偏好",flash:"闪光"};
 var POOLN = {short:"短期",medium:"中期",long:"长期",archive:"归档",deep:"深眠"};
+/* 分区名（2026-11-06 起短期池下面按区拆开看） */
+var REGIONN = {chatter:"闲聊",play:"娱乐",study:"学习",work:"工作",
+               episode:"事件",flash:"闪光",fact:"事实",preference:"偏好",
+               self:"自我",habit:"习惯"};
+var REGIONC = {chatter:"#e8b44a",play:"#b07bff",study:"#57c8f0",work:"#2fd07d",
+               episode:"#6f7b8a",flash:"#9d8bff",fact:"#7ad1a0",
+               preference:"#d0a35f",self:"#ff8fa3",habit:"#5fb0d0"};
 
 function esc(s){ return String(s==null?"":s).replace(/[&<>"]/g,function(c){
   return {"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;"}[c]; }); }
@@ -2347,9 +2374,32 @@ function viewDash(){
             color:(p.k==="short"?"#e8b44a":p.k==="long"?"#57c8f0":"#2fd07d")};
   });
   var poolTot=0; pools.forEach(function(p){ poolTot+=p.n; });
+  /* 短期池下面按区拆开：这 4 条是闲聊还是学习，寿命差 30 倍，得分开看 */
+  var sregs=(m.short_regions||[]);
+  var rload=(m.region_load||{on:false,regions:[]});
+  var poolSub="";
+  if(sregs.length){
+    poolSub += '<div class="legend" style="margin-top:10px">SHORT / 短期池按区</div>'+
+      hbars(sregs.map(function(x){
+        return {k:x.k, label:REGIONN[x.k]||x.k, n:x.n,
+                color:(REGIONC[x.k]||"#6f7b8a")}; }),
+        {fmt:function(it){ return it.n+"<em>条</em>"; }});
+  }
+  if(rload.regions && rload.regions.length){
+    poolSub += '<div class="legend" style="margin-top:8px">REGION LAMBDA / 分区曲线 '+
+      (rload.on?'<b style="color:#2fd07d">ON</b>':'<b style="color:#6f7b8a">OFF</b>')+
+      '</div><div class="legend" style="margin-top:2px">'+
+      rload.regions.map(function(r){
+        return '<span><i style="background:'+(REGIONC[r.region]||"#6f7b8a")+'"></i>'+
+          esc(REGIONN[r.region]||r.region)+' '+r.half_life_h.toFixed(0)+'h'+
+          ' · 负载 '+r.load.toFixed(1)+'/'+r.budget+
+          ' · f '+r.factor.toFixed(2)+'</span>';
+      }).join('')+'</div>';
+  }
   out += cardHTML("c4","MEMORY POOLS / 五池",
     hbars(pools, {fmt:function(it){
       return it.n+"<em>"+(poolTot?Math.round(it.n/poolTot*100):0)+"%</em>"; }})+
+    poolSub+
     '<div class="legend" style="margin-top:6px">AVG_W '+
       esc((m.pools||[]).map(function(p){
         return (POOLN[p.k]||p.k)+" "+(p.aw||0).toFixed(2); }).join(" · ")||"—")+

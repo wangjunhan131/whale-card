@@ -54,8 +54,10 @@ try:
 
     # ---------- [1] 衰减曲线 ----------
     print("\n[1] 衰减曲线：今天聊的，明天剩多少")
-    for lay, want in (("", 0.150), ("known", 0.042), ("friend", 0.422),
-                      ("close", 0.729), ("core", 0.924)):
+    # 2026-11-06：闲聊半衰期由 8.77h 改成 12h（用户定稿），
+    # 所以「一天后剩多少」整体上调一档：0.150 → 0.250 等。
+    for lay, want in (("", 0.250), ("known", 0.099), ("friend", 0.533),
+                      ("close", 0.794), ("core", 0.944)):
         got = card2.weight_now(1.0, "short", now - DAY, now,
                                region="chatter", person_layer=lay)
         check("1 天后 %-6s = %.3f" % (lay or "默认", got),
@@ -108,7 +110,7 @@ try:
                               region="chatter", person_layer="core")
     w_other = card2.weight_now(1.0, "short", now - DAY, now,
                                region="chatter", person_layer="known")
-    check("核心的人 1 天后 0.924 > 群友 0.042", w_them > w_other,
+    check("核心的人 1 天后 0.944 > 群友 0.099", w_them > w_other,
           "%.3f vs %.3f" % (w_them, w_other))
 
     # ---------- [5] 兜底 ----------
