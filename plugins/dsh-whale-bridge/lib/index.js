@@ -369,7 +369,7 @@ export function apply(ctx, config = {}) {
     name: 'mind_seal',
     description: '给卡盖章（封存人格与身份）。values 是 {key: value}，不传就按当前身份重新盖。盖章后 is_sealed 为真。',
     parameters: {
-        values: { type: 'object', description: '要封存的键值对，可不传' },
+        values: { type: 'object', additionalProperties: true, description: '要封存的键值对，可不传' },
       },
     output: { schema: OK_SCHEMA, render: (_a, v) => textOut(v) },
     timeoutMs: 60_000,
@@ -405,7 +405,7 @@ export function apply(ctx, config = {}) {
     description: '预览某一句话会召回哪些记忆、分配多少权重（只读，不写卡、不推进计数器）。调参数前后对比用它。',
     parameters: {
         query: { type: 'string', description: '要预览的那句话', required: true },
-        overrides: { type: 'object', description: '临时覆盖参数（可选）' },
+        overrides: { type: 'object', additionalProperties: true, description: '临时覆盖参数（可选）' },
       },
     output: { schema: OK_SCHEMA, render: (_a, v) => textOut(v) },
     timeoutMs: 120_000,

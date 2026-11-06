@@ -183,16 +183,17 @@ export class CardClient {
     if (!hits.length) {
       return { ok: true, hits: [], note: '卡里没翻到相关的 —— 这是「没有」，不是「忘了」' };
     }
+    // 只带上真的有值的字段：undeclared 字段（region/pool 有时服务端不给）会让
+    // 输出里出现 undefined，宿主校验「lossless JSON」时直接判工具失败。
     return {
       ok: true,
-      hits: hits.map((x) => ({
-        id: x.id,
-        text: x.text,
-        score: x.score,
-        w_now: x.w_now,
-        region: x.region,
-        pool: x.pool,
-      })),
+      hits: hits.map((x) => {
+        const r = { id: x.id, text: x.text, score: x.score };
+        if (typeof x.w_now === 'number') r.w_now = x.w_now;
+        if (typeof x.region === 'string' && x.region) r.region = x.region;
+        if (typeof x.pool === 'string' && x.pool) r.pool = x.pool;
+        return r;
+      }),
     };
   }
 
