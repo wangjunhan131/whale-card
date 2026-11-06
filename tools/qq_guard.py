@@ -188,17 +188,26 @@ def call(action, **params):
 
 
 def remember(text, source, speaker="other", region="episode", salience=0.5,
-             about_uid=""):
+             about_uid="", pool="long"):
     """把一条消息写进卡。失败不抛 —— 值守不能因为卡忙就停。
 
     about_uid：这条是关于谁的。卡里按这个人的关系层决定闲聊能活多久
     （用户 m13292：越重要的人，闲聊留得越久）。
+
+    pool：2026-11-06 修。原来这里根本不传 pool，/remember 就按默认落
+    pool='short'（32 个位置）。后果是真卡里 qq-group 写进去 100 条、
+    long 池 0 条，短期池一溢出就被 _forget_row 删，墓碑里 373 条
+    「短期池到期，海马判定没上榜」大半是这么来的 —— 判断为「值得记住」
+    的消息反而被扔进了注意力临时区等死。能走到这个函数的消息都已经
+    过了 decide() 的判据，它该进 long 池；要不要淡出由 region 的衰减
+    曲线管，不该由池子的容量管。
     """
     try:
         req = urllib.request.Request(
             MIND + "/remember",
             data=json.dumps({"text": text, "source": source,
                              "speaker": speaker, "region": region,
+                             "pool": pool,
                              "salience": salience,
                              "about_uid": str(about_uid or "")}).encode("utf-8"),
             headers={"Content-Type": "application/json"})

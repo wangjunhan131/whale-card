@@ -416,13 +416,20 @@ def _cardslot(*argv):
 
 
 def cmd_inject(args):
-    r = _cardslot("inject") + (("--dry",) if args.dry else ())
+    # 2026-11-06 修：原来写的是 _cardslot("inject") + (("--dry",) if args.dry else ())
+    # —— _cardslot() 会立刻把子进程跑完再返回 CompletedProcess，往它上面加元组
+    # 直接 TypeError；更糟的是 --dry 也没用，子进程已经真的落盘了才报错。
+    # 正确做法：先把 argv 拼好，再调一次。
+    argv = ("inject",) + (("--dry",) if args.dry else ())
+    r = _cardslot(*argv)
     print((r.stdout or "").strip() or (r.stderr or "").strip())
     return r.returncode
 
 
 def cmd_eject(args):
-    r = _cardslot("unload") + (("--dry",) if args.dry else ())
+    # 同上（cmd_inject 的同一个 bug，eject 这边一模一样）
+    argv = ("unload",) + (("--dry",) if args.dry else ())
+    r = _cardslot(*argv)
     print((r.stdout or "").strip() or (r.stderr or "").strip())
     return r.returncode
 

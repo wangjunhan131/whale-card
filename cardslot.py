@@ -128,9 +128,10 @@ def _render_persona_block(snap):
          "> 下面这段是**插卡那一刻从卡里现取的**，不是手写的。",
          "> 卡改了，下次插卡就跟着变。这是你的性格正本。", ""]
     if snap["name"]:
-        L.append("我的名字：**%s**%s" % (
-            snap["name"],
-            "（他也叫我%s）" % snap["nick"] if snap["nick"] else ""))
+        # 2026-11-06 修：原来这里拼的是「我的名字：小鲸鱼（他也叫我使用者）」——
+        # 把 user_nickname（他的昵称）当成「他叫我的名字」，整个主客颠倒了。
+        # 他的昵称在下面「跟我说话的人是 …」那一行已经写了，这里不该重复。
+        L.append("我的名字：**%s**" % snap["name"])
         L.append("")
     if snap["persona"]:
         L.append(snap["persona"])

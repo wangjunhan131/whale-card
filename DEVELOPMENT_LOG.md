@@ -1235,3 +1235,124 @@ eason 为空要直接抛错
   #59「不是你喜欢吃白饭吗」ac=67）。代码修复只防未来；这 72 条属于改数据不改代码，
   且里面有要紧的记忆 —— **等用户点头再动**。
 - 缓存命中率打点（provider 响应里带 prompt_cache_hit_tokens，要看清得动 bridge.py 链路）。
+
+
+---
+
+## 2026-11-06 早上｜一次全面体检，修七个真问题
+
+### 一、为什么查
+
+用户早上出门前说：「再检查一下我们的项目有没有什么 bug，有没有什么功能无法正常使用，
+有没有什么问题，以及它能否或者说是否已经全部装进了卡里？」
+
+四问：bug / 不可用功能 / 其它问题 / 是不是全在卡里（自包含、能搬走）。
+
+### 二、查到什么
+
+**三个真问题（都不是新写的代码，是一直在流血的老账）：**
+
+1. **`tools/qq_guard.py:190-208` 的 `remember()` 不传 `pool`。**
+   `/remember` 的默认值是 `pool='short'`（32 个位置）。值守判过 `decide()`、认定为
+   「值得记住」的群消息，全被扔进短期池，溢出即 `_forget_row`。
+   实证：qq-group 写进卡 100 条，**long 池 0 条**；墓碑 373 条
+   「短期池到期，海马判定没上榜」大半是这条链。
+   `#1023`「唱歌与生图的技术结论」、`#1029`「插件清单」也是同样下场。
+
+2. **NapCat 的 OneBot HTTP 适配器「端口在听、一个字节不回」。**
+   `Test-NetConnection 127.0.0.1 6700` = True（监听者 QQ.exe pid 25336），但
+   `get_status` / `get_login_info` 10 秒、20 秒两次全超时；改用原始 socket 发
+   `GET /get_status HTTP/1.1`，6 秒 `TimeoutError`，连续三次全空。
+   不是防火墙、不是 token（token 错会回 `{"message":"token verify failed!"}`）。
+   值守 `todo.jsonl` 最后一条停在 07:48:03 —— 正好卡在这里，而 `guard_err.log` 是 0 字节。
+
+3. **看门狗的判活方式查不出上面这种故障。**
+   昨晚把 6099 改成 6700，用的是 `Get-NetTCPConnection -State Listen`，
+   **只证明端口被 bind，不证明适配器会回包**。今早就是「端口在听、HTTP 不回」。
+
+**数据面（`PRAGMA integrity_check` = ok）：**
+26 表 / 30 索引 / 2 触发器，`mem` 673、`timeline` 1420（max seq 1421）、`mem_tomb` 398。
+脏数据检查全 0：emb 空 0、w 越界 0、region/pool/tier 未知 0、工单壳残留 0。
+`raw` 含「今天/明天/昨天」**0 条**（时间锚定修复已生效）。
+权重饱和仍在：`w>=0.95` 77 条（上次审计 71/623）。
+
+**体检还顺手发现两个笔误级问题：**
+- `core_zone.card_name = "小鲸鱼·"`，末尾多一个「·」，每轮都被拼进「我是谁」。
+- `cardslot.py:130-134` 把 `user_nickname`（他的昵称）拼成「他也叫我使用者」，
+  **主客颠倒**：那是他的名字，不是我的。
+- `tools/portable.py` 的 `cmd_inject/cardslot("inject") + (...)`：
+  `_cardslot()` 会先 `subprocess.run()` 跑完再返回 `CompletedProcess`，
+  往它上面加元组直接 `TypeError`；**而且 `--dry` 不起作用 —— 子进程已经真落盘了才报错**。
+
+**编译/导入/接口：**`compileall` 全仓 COMPILE_OK；17 个核心模块 import 全过；
+控制台真实路径是 `GET /console`（`/`、`/console.html`、`/panel` 都是 404，
+不是坏了，是没这个路由）；`/console_data`、`/syslive`、`/cardslot`、`/disks` 全 200。
+
+### 三、怎么修的（七项）
+
+1. `cardslot.py:130-134` 只输出 `我的名字：**%s**`，删掉那个父昵称括号，加注释说明由来。
+2. `card_name` 由 `小鲸鱼·` 改成 `小鲸鱼` —— 先 `sqlite3.Connection.backup()` 备份
+   （`card.db.bak-rename-20261106-0806`），再走官方接口
+   `MemoryCard.identity.set_name("小鲸鱼")`；它内部会临时 DROP 两个触发器、
+   改 `core_zone`、同步重写 `identity_anchor` 的 sha256、`finally` 把触发器装回。
+   校验：锚里 `card_name` 的 sha256 == `sha256("小鲸鱼")`。
+3. `tools/portable.py` 的 `cmd_inject` / `cmd_eject`：先拼 `argv` 再 `_cardslot(*argv)`。
+   验证：`inject --dry` 跑完后 AGENTS.md 的字节数和 mtime 都没变。
+4. `tools/qq_guard.py` 的 `remember()` 加 `pool="long"`。
+   理由：走到这里的消息已经过 `decide()` 判据，**要不要淡出该由 region 的衰减曲线管，
+   不该由池子容量管**。然后把当前卡在 short 的 33 条迁到 long（先备份
+   `card.db.bak-poolfix-20261106-0809`），迁完 short=0 / long=599 / 总数 675。
+5. 清掉 73 个测试临时目录（都是 `tempfile.mkdtemp(dir=ROOT)` 留下的整卡副本，
+   每个 14~16 MB）：**卡目录 1,640 MB → 845 MB，省 795 MB**。
+   `models\` 482.6 MB 保留（bge-base-zh 390.20 MB + bge-small-zh 91.40 MB，
+   换电脑不用重下模型 —— 这也是「全部装进卡里」的答案）。
+6. `PRAGMA wal_checkpoint(TRUNCATE)`：`card.db-wal` **17.12 MB → 0**。
+   17 MB 的 WAL 跟主库一样大，说明长期没 checkpoint。
+7. 看门狗 `deploy/scripts/qqai_guardian.ps1` 的 `Test-NapCatAlive`：
+   在端口判断之后补一次**真 HTTP** ——
+   `Invoke-RestMethod /get_status -Headers @{Authorization="Bearer ..."} -TimeoutSec 5`，
+   `return [bool]$resp.data.online`，`catch { return $false }`。
+   用 `utf-8-sig` 写回保住 BOM（5.1 少了 BOM 会 `Unexpected token '}'`）。
+   `-Once` 试跑健康时**没有重启 NapCat**，说明新探活认可它活着。
+
+**外加一件：把人格重新挂上。**
+之前 `portable.py` 的 bug 让 `inject --dry` 反而真写了 AGENTS.md（08:04:15），
+用户说「挂上呗，人格这么重要的东西怎么能掉呢」—— 修完 portable 后正式注入，
+08:08:39 落盘 7301 字节，抬头是 `我的名字：**小鲸鱼**`。
+
+### 四、验收
+
+- `tests	est_t85.py` 首次跑出 `voice.synth 失败（退回打字）：合成结果为空或过小`，
+  复查是 edge-tts 那一次没合出东西（重跑 24/24、直测 `synth()` 返回 1.92 秒音频），**网络波动不是代码**。
+- 全量回归（跑了两次，两次都是全绿）：
+  test_card2 22/22、t66 全过、t73 28/0、t76 42/42、t81 13/13、t83 22/22、
+  t84 30/30、t85 24/24、t86 11/11、t87 23/23、t88 19/19、t89 35/35、t90 40/40、t91 14/14。
+- 服务复核：`/health` ok=True / memories=675 / chain=True / anchor=ok；
+  `guard.heartbeat` 08:10:35 新鲜；NapCat `online=True good=True`。
+
+### 五、教训（这一轮新增五条）
+
+1. **dry-run 标志必须在「跑任何东西之前」判断。** `_cardslot("inject") + (("--dry",)...)`
+   是先执行再拼参数，于是 `--dry` 只让最后一行崩，副作用早就发生了。
+   「试运行」这个词一旦名不副实，比没有它更危险 —— 人会放心地去试。
+2. **只证明端口 bind，不等于服务活着。** TCP 握手由内核完成，应用层线程卡死时
+   端口照样在听。判活必须**发一次真请求**、看有没有真回包。
+3. **默认值也是决策，而且是没人看得见的那个。** `/remember` 默认 `short`，
+   一天就在墓碑上留下 373 条「没上榜」。这已经是本项目第七次栽在默认值上。
+4. **正则加词要先跑旧例。** 第一版把 `视频` 加进 `_RE_CHATTER_KNOW`，
+   `"我刚看了会儿视频"`（真闲聊）当场被判成不闲聊 —— 加每个词之前，
+   先拿那 16 条真闲聊过一遍。
+5. **字段路径靠猜会拿到 1。** `/health` 的 `day/birth_ok/anchor/writer` 全在
+   `timeline` 子对象里，我照记忆里的路径取，得到的是空和 1。
+   体检脚本第一步应该是 `ConvertTo-Json -Depth 6` 看原始结构，不是猜。
+
+### 六、没做完 / 需要点头
+
+- `我暑假靠婚礼挣钱` 这条：**第一人称过去事实**被判成 chatter。
+  它是评估集 `tools/eval/cases.json` 里 type=recall 的一条 ——
+  等于在测「一条已经被判死刑的记忆能不能被召回」。
+  要修得先决定「我+过去时间+动词」算不算知识，**没动**。
+- `我有点难过` 仍判 chatter：按 b229 的设计，弱化情绪词（有点/稍微）就该快忘。
+  这是设计不是 bug，但和「情绪丰富要留住」有张力，**留待商量**。
+- 17 个 `card.db.bak-*` 旧备份（约 150 MB）要不要清。
+- 看门狗脚本在 `deploy/scripts/` 下，**不在 whale-card 仓里**，所以这次不同步进开源仓。
