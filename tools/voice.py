@@ -80,6 +80,14 @@ _RE_NO_VOICE = re.compile(
 _RE_EMPTY = re.compile(r"^[\s\W_]*$", re.UNICODE)
 
 
+
+def _max_chars():
+    # 语音最长几个字：从控制台那张表读（voice.max_chars），读不到用常量。
+    try:
+        import chatcfg as _cc
+        return int(_cc.load_cfg().get("voice.max_chars", VOICE_MAX_CHARS))
+    except Exception:
+        return VOICE_MAX_CHARS
 def speakable(text, max_chars=None):
     """这句话值不值得变成语音条。返回 (bool, 理由)。
 
@@ -93,7 +101,7 @@ def speakable(text, max_chars=None):
         return False, "只有标点或表情"
     if len(t) < VOICE_MIN_CHARS:
         return False, "太短（%d 字）" % len(t)
-    _max = VOICE_MAX_CHARS if max_chars is None else int(max_chars)
+    _max = _max_chars() if max_chars is None else int(max_chars)
     if len(t) > _max:
         return False, "太长（%d 字 > %d）" % (len(t), _max)
     if _RE_NO_VOICE.search(t):

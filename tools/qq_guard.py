@@ -42,6 +42,36 @@ sys.path.insert(0, ROOT)
 BASE = "http://127.0.0.1:6700"
 TOKEN = "qqai-dsh-http-2026"
 MIND = os.environ.get("WHALE_MIND", "http://127.0.0.1:8848")
+
+
+
+# 2026-11-06：让值守也读控制台那本账（chatcfg）。
+
+# 脚本模式下 sys.path[0] 是 tools/，卡根目录不在里面 —— 不插的话 import chatcfg
+
+# 会失败、被 except 吞掉，设置就静默退回常量（今天在 proactive 上踩过一次）。
+
+if ROOT not in sys.path:
+
+    sys.path.insert(0, ROOT)
+
+
+
+
+
+def cfg_get(key, default=None):
+
+    # 从 chatcfg 读一个参数；读不到/读坏了就用默认值（永不抛）。
+
+    try:
+
+        import chatcfg as _C
+
+        return _C.load_cfg().get(key, default)
+
+    except Exception:
+
+        return default
 STATE = os.path.join(ROOT, "qq_state")
 INBOX = os.path.join(STATE, "inbox.jsonl")
 TODO = os.path.join(STATE, "todo.jsonl")
@@ -127,7 +157,7 @@ def decide(text, at_me=False):
     n = len(t)
 
     # 1) 有人点我的名 / @ 我 —— 这是"事"，记得住
-    if at_me:
+    if at_me and bool(cfg_get("reply.at_me", True)):
         return True, KEEP_AT_ME, 0.72, "被点名"
 
     # 2) 关于人的稳定陈述 —— 先于情绪判，因为"我喜欢吃白米饭"里
@@ -155,6 +185,16 @@ def decide(text, at_me=False):
     if n <= 6:
         return False, "", 0.0, "太短"
     return False, "", 0.0, "闲聊"
+
+
+def quiet_hint(text, pinged):
+    """不每句都回：给这条消息标「先别接」的建议。只做建议，不改 can_say。"""
+    try:
+        import quiet_policy as Q
+        rows = read_todo(only_unreplied=False, limit=40)
+        return Q.should_quiet(rows, time.time(), at_me=bool(pinged), text=text)
+    except Exception as e:
+        return False, "policy-error:%s" % e
 
 
 def at_me(msg):
@@ -185,6 +225,24 @@ def call(action, **params):
                  "Authorization": "Bearer " + TOKEN})
     with urllib.request.urlopen(req, timeout=20) as r:
         return json.loads(r.read().decode("utf-8"))
+
+
+
+
+
+
+def mem_floor():
+
+    # 多重要才进卡：低于这个重要度，就算判了「值得记」也不写。
+
+    try:
+
+        return float(cfg_get("mem.salience_floor", 0.45))
+
+    except Exception:
+
+        return 0.45
+
 
 
 def remember(text, source, speaker="other", region="episode", salience=0.5,
@@ -252,10 +310,22 @@ def quota_tick(q):
     return q
 
 
-def quota_allow(q, group_id=None):
-    """还能不能说。返回 (ok, 原因)。"""
+def quota_allow(q, group_id=None, group_hour_soft=None):
+    """还能不能说。返回 (ok, 原因)。
+
+    group_hour_soft 显式传入时优先用它 —— 测试要测「软上限真的会拦」，
+    不该被控制台里当前那份 freq.group_hour 影响。
+    """
     cfg = dict(QUOTA)
     cfg.update(q.get("cfg") or {})
+    if group_hour_soft is not None:
+        cfg["group_hour_soft"] = int(group_hour_soft)
+    else:
+        try:
+            cfg["group_hour_soft"] = int(cfg_get("freq.group_hour",
+                                                cfg["group_hour_soft"]))
+        except Exception:
+            pass
     quota_tick(q)
     if q["hour"]["n"] >= cfg["hour_hard"]:
         return False, "小时硬顶 %d 已到" % cfg["hour_hard"]
@@ -556,7 +626,9 @@ def poll_once(seen, verbose=True):
             keep, region, sal, why = decide(text, at_me(m))
             pinged = at_me(m)
             mem_id = None
-            if keep:
+            if keep and sal < mem_floor():
+                keep, why = False, "重要度 %.2f 低于门槛" % sal
+            if keep and bool(cfg_get("mem.write_group", True)):
                 r = remember("[%s] %s：%s" % (gname, name, text),
                              source="qq-group", speaker="other",
                              region=region, salience=sal,
@@ -564,6 +636,15 @@ def poll_once(seen, verbose=True):
                 mem_id = (r or {}).get("mem_id")
             # 进待回队列（素材也留着，但那是"待回"，不是"记忆"）
             ok, why_q = quota_allow(q, gid)
+            _quiet, _quiet_why = quiet_hint(text, pinged)
+            if not pinged and not _quiet:
+                try:
+                    _p = float(cfg_get("reply.p_group", 0.35))
+                except Exception:
+                    _p = 0.35
+                if random.random() > _p:
+                    _quiet, _quiet_why = True, "群里随机接话的概率没抽中"
+            _engage = not _quiet
             _append(TODO, {"ts": ts, "kind": "group", "group_id": gid,
                            "group_name": gname, "sender": name,
                            "sender_id": int(sender.get("user_id") or 0),
@@ -571,7 +652,9 @@ def poll_once(seen, verbose=True):
                            "can_say": ok, "why": why_q,
                            "keep": keep, "region": region,
                            "mem_id": mem_id, "screen": why,
-                           "pinged": pinged})
+                           "pinged": pinged,
+                           "quiet": _quiet, "quiet_why": _quiet_why,
+                           "engage": _engage})
             # 点我名的才算"要回"；其余是背景素材
             _mark_if_new(m.get("message_id"),
                          ST_UNREPLIED if pinged else ST_BACKGROUND)
@@ -616,20 +699,29 @@ def poll_once(seen, verbose=True):
             if not keep and len(text) > 6:
                 keep, region, sal, why = True, "episode", 0.6, "私聊"
             mem_id = None
-            if keep:
+            if keep and sal < mem_floor():
+                keep, why = False, "重要度 %.2f 低于门槛" % sal
+            if keep and bool(cfg_get("mem.write_private", True)):
                 r = remember("[私聊] %s：%s" % (name, text),
                              source="qq", speaker="other",
                              region=region, salience=sal,
                              about_uid=str(uid or ""))
                 mem_id = (r or {}).get("mem_id")
             ok, why_q = quota_allow(q, None)
+            if bool(cfg_get("reply.private", True)):
+                _pquiet, _pwhy, _pengage = False, "", True
+            else:
+                _pquiet, _pwhy, _pengage = True, "私聊不接（设置里关了）", False
             _append(TODO, {"ts": ts, "kind": "private", "user_id": uid,
                            "sender": name, "text": text,
                            "message_id": m.get("message_id"),
                            "can_say": ok, "why": why_q,
                            "keep": keep, "region": region,
-                           "mem_id": mem_id, "screen": why})
-            _mark_if_new(m.get("message_id"))
+                           "mem_id": mem_id, "screen": why,
+                           "quiet": _pquiet, "quiet_why": _pwhy,
+                           "engage": _pengage, "pinged": True})
+            _mark_if_new(m.get("message_id"),
+                         ST_UNREPLIED if _pengage else ST_BACKGROUND)
             n_new += 1
             if keep:
                 n_kept += 1

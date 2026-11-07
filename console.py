@@ -742,6 +742,64 @@ def card_integrity(db_path=DEFAULT_DB):
     return out
 
 
+import chatcfg as _chatcfg
+
+def talk_state(db_path=DEFAULT_DB):
+    """接话这件事实况：主动开口的次数/配额，以及「不每句都回」最近的判断。
+    只读 qq_state，不碰卡、不写任何东西。"""
+    import json as _json
+    card_root = os.path.dirname(os.path.abspath(db_path))
+    qs = os.path.join(card_root, "qq_state")
+    st = {}
+    try:
+        with open(os.path.join(qs, "proactive.json"), "r", encoding="utf-8") as f:
+            st = _json.load(f)
+    except Exception:
+        st = {}
+    cap, cool = 8, 20
+    try:
+        with open(os.path.join(qs, "proactive_cfg.json"), "r", encoding="utf-8") as f:
+            cf = _json.load(f)
+        cap = int(cf.get("cap", cap))
+        cool = int(cf.get("cooldown_min", cool))
+    except Exception:
+        pass
+    rows = []
+    try:
+        with open(os.path.join(qs, "todo.jsonl"), "r", encoding="utf-8") as f:
+            for ln in f.readlines()[-80:]:
+                try:
+                    rows.append(_json.loads(ln))
+                except Exception:
+                    pass
+    except Exception:
+        pass
+    now = time.time()
+    last = float(st.get("last_open_ts") or 0)
+    quiet_n = sum(1 for r in rows if r.get("quiet"))
+    pinged_n = sum(1 for r in rows if r.get("pinged"))
+    grp = {}
+    for r in rows:
+        k = r.get("group_name") or ("私聊" if r.get("kind") == "private" else "群")
+        grp[k] = grp.get(k, 0) + 1
+    grp = sorted(grp.items(), key=lambda kv: -kv[1])[:6]
+    return {
+        "ok": True,
+        "cap": cap,
+        "cooldown_min": cool,
+        "day": st.get("day") or "",
+        "count": int(st.get("count") or 0),
+        "used": st.get("used") or [],
+        "last_open_ts": round(last, 0),
+        "last_open_age_min": (round((now - last) / 60.0, 1) if last else None),
+        "recent_n": len(rows),
+        "quiet_n": quiet_n,
+        "pinged_n": pinged_n,
+        "groups": grp,
+        "open_window": "07:30 - 23:30",
+    }
+
+
 def overview(db_path=DEFAULT_DB):
     """一整页要的数据，一次给齐 —— 前端只发一个请求。"""
     try:
@@ -773,6 +831,8 @@ def overview(db_path=DEFAULT_DB):
         "hormones": live_hormones(db_path),
         "forget": forget_curve(db_path),
         "sys": sys_sample(),
+        "talk": talk_state(db_path),
+        "chat": {"cfg": _chatcfg.load_cfg(), "spec": _chatcfg.spec_json()},
         "generated": round(time.time(), 1),
     }
 
@@ -1231,11 +1291,12 @@ body{font-family:"Inter","Segoe UI","Microsoft YaHei",system-ui,sans-serif;
   <main>
     <nav>
       <div class="tab on" data-t="dash">状态总览</div>
-      <div class="tab" data-t="mem">记忆</div>
+<div class="tab" data-t="mem">记忆</div>
       <div class="tab" data-t="ctx">上下文</div>
       <div class="tab" data-t="voice">语音</div>
       <div class="tab" data-t="neb">星云</div>
       <div class="tab" data-t="time">时间线</div>
+      <div class="tab" data-t="talk">接话</div>
       <div class="tab" data-t="set">设置</div>
       <div class="sp"></div>
       <span class="stamp" id="stamp">—</span>
@@ -2513,6 +2574,10 @@ function viewDash(){
     return '<div class="lamp '+(on?(isMain?"lm":"lb"):"loff")+'">'+
              '<i></i><b>'+txt+'</b><span>'+esc(sub)+'</span></div>';
   }).join("");
+  var retired = !!dkd.retired;
+  var retBanner = retired ? ('<div class="diskrow" style="border:1px solid #e8b44a;'+
+      'border-radius:6px;padding:6px 10px;margin:6px 0;color:#e8b44a">'+
+      '● 这张卡已被「带卡出门」——本机只读。要把它接回来，跑一次「一键落地」。</div>') : '';
   var sel = '<select id="diskSel">'+
     (dkd.volumes || []).map(function(v){
        var p = v.card_dir || v.root;
@@ -2520,12 +2585,15 @@ function viewDash(){
                  (v.free_gb!=null ? (v.free_gb+" GB 空") : "空间未知");
        return '<option value="'+esc(p)+'">'+esc(txt)+'</option>';
      }).join("")+'</select>';
-  out += cardHTML("c12","DISKS / 盘子与备份 · 灯、备份、同步、换主备",
+  out += cardHTML("c12","DISKS / 盘子与备份 · 灯、备份、同步、带卡出门",
+    retBanner +
     '<div class="lamps">'+(lamps||'<span class="muted">一块都没认出来</span>')+'</div>'+
     '<div class="diskrow">'+sel+
       '<button id="btnBk">备份到这块盘</button>'+
       '<button id="btnSy">一键同步</button>'+
       '<button id="btnSw">主备互换</button>'+
+      '<button id="btnRetire" style="border-color:#e8b44a;color:#e8b44a">带卡出门</button>'+
+      '<button id="btnUnretire">解除退役</button>'+
       '<span id="diskMsg" class="muted"></span></div>',
     "备份盘不设上限；同步只补落后、分叉一律拒绝；换主备要求条数·链头序号·链头哈希三条全中");
   return out;
@@ -2578,8 +2646,21 @@ function diskPost2(path){
     })
     .catch(function(e){ msg.textContent = "请求失败：" + e; });
 }
+function retirePost(on){
+  var msg = $("#diskMsg");
+  if(msg) msg.textContent = on ? "正在把这张卡标记成退役…" : "正在解除退役…";
+  fetch("/disks/retire", {method:"POST", headers:{"Content-Type":"application/json"},
+        body: JSON.stringify({on:!!on})})
+    .then(function(r){ return r.json(); })
+    .then(function(j){
+      if(msg) msg.textContent = (j && (j.how || j.why)) || (on ? "已退役" : "已解除");
+      setTimeout(function(){ location.reload(); }, 1200);
+    })
+    .catch(function(e){ if(msg) msg.textContent = "失败：" + e; });
+}
 function bindDiskButtons(){
   var b1 = $("#btnBk"), b2 = $("#btnSy"), b3 = $("#btnSw"), s = $("#diskSel");
+  var bR = $("#btnRetire"), bU = $("#btnUnretire");
   if(!b1 || b1._bd) return;
   b1._bd = b2._bd = b3._bd = true;
   function pick(){ return s ? s.value : ""; }
@@ -2589,6 +2670,13 @@ function bindDiskButtons(){
     if(!confirm("真要把主备换过来吗？换完下次要从新主盘打开。")) return;
     diskPost("switch", pick());
   };
+  if(bR) bR.onclick = function(){
+    if(!confirm("带卡出门？\n\n做完之后【本机这份只读】，等于我在这儿暂时不在线。\n"+
+                "然后把 U 盘插到新电脑，双击一次「一键落地」就接手。"+
+                "\n\n回来时再双击一次，就交接回来。")) return;
+    retirePost(true);
+  };
+  if(bU) bU.onclick = function(){ retirePost(false); };
 }
 function fmtBps(v){
   v=v||0;
@@ -3153,6 +3241,98 @@ function bindCtx(){
   if(!S.cfg) loadCfg().then(function(){ render(); });
 }
 
+function viewTalk(){
+  var t=(S.data&&S.data.talk)||{};
+  var ch=(S.data&&S.data.chat)||{cfg:{},spec:[]};
+  var cfg=ch.cfg||{}, spec=ch.spec||[];
+  var grow=(t.groups||[]).map(function(g){
+    return '<div class="row"><span class="k">'+esc(g[0])+'</span><span class="v">'+g[1]+' 条</span></div>';
+  }).join('');
+  var out="";
+  out+=cardHTML("c4","NOW / 现在什么样",
+    '<div class="kv">'+
+    '<div class="row"><span class="k">今天主动开口</span><span class="v">'+(t.count||0)+' / '+(cfg["freq.daily_cap"]||8)+'</span></div>'+
+    '<div class="row"><span class="k">上次开口</span><span class="v">'+(t.last_open_age_min==null?'还没开过':t.last_open_age_min+' 分钟前')+'</span></div>'+
+    '<div class="row"><span class="k">最近看了</span><span class="v">'+(t.recent_n||0)+' 条</span></div>'+
+    '<div class="row"><span class="k">判定先别接</span><span class="v">'+(t.quiet_n||0)+' 条</span></div>'+
+    '</div>', "实时");
+  out+=cardHTML("c4","WHO TALKS / 最近在看哪些群",
+    '<div class="kv">'+(grow||'<div class="row"><span class="k">还没有记录</span><span class="v">—</span></div>')+'</div>',
+    (t.recent_n||0)+" 条");
+  out+=cardHTML("c4","HOW OFTEN / 频率快照",
+    '<div class="kv">'+
+    '<div class="row"><span class="k">有人叫我</span><span class="v">'+(t.pinged_n||0)+' 条</span></div>'+
+    '<div class="row"><span class="k">可开口时段</span><span class="v">'+esc(cfg["reply.hours"]||"")+'</span></div>'+
+    '<div class="row"><span class="k">主动开口间隔</span><span class="v">'+(cfg["freq.cooldown_min"]||0)+' 分钟</span></div>'+
+    '</div>', "回话不受这些限制");
+
+  // ── 参数表：按 spec 分组渲染 ──
+  var groups=[], order=[];
+  spec.forEach(function(it){
+    if(order.indexOf(it.group)<0){ order.push(it.group); }
+  });
+  order.forEach(function(gname){
+    var rows=spec.filter(function(it){ return it.group===gname; }).map(function(it){
+      var id='cf_'+it.key.replace(/\./g,'_');
+      var ctl;
+      if(it.kind==="bool"){
+        ctl='<input type="checkbox" id="'+id+'" data-key="'+it.key+'"'+(cfg[it.key]?' checked':'')+'>';
+      }else if(it.kind==="int"){
+        ctl='<input type="number" id="'+id+'" data-key="'+it.key+'" data-kind="int" value="'+esc(String(cfg[it.key]))+'" min="'+(it.min==null?0:it.min)+'" max="'+(it.max==null?999:it.max)+'" style="width:78px">';
+      }else if(it.kind==="float"){
+        ctl='<input type="number" step="0.05" id="'+id+'" data-key="'+it.key+'" data-kind="float" value="'+esc(String(cfg[it.key]))+'" min="'+(it.min==null?0:it.min)+'" max="'+(it.max==null?1:it.max)+'" style="width:78px">';
+      }else{
+        ctl='<input type="text" id="'+id+'" data-key="'+it.key+'" data-kind="str" value="'+esc(String(cfg[it.key]))+'" style="width:150px">';
+      }
+      // 还没接进运行逻辑的项标「待接」，别让人以为改了立刻生效
+      var LIVE=["reply.at_me","reply.private","reply.p_group","reply.hours",
+                "freq.daily_cap","freq.cooldown_min","freq.group_hour",
+                "quiet.silent_run","quiet.self_max","quiet.window_s","quiet.burst_n","quiet.burst_cool_s","quiet.allow_emotion","quiet.allow_question",
+                "talk.max_chars","talk.split","talk.no_period","talk.no_wave",
+                "open.enabled","open.meal","open.night","open.school","open.school_hours","open.mode",
+                "mem.write_private","mem.write_group","mem.salience_floor",
+                "voice.enabled","voice.max_chars",
+                "diary.enabled","diary.at"];
+      var live=(LIVE.indexOf(it.key)>=0);
+      var tag=live?'':'<span style="color:#6b7683;font-size:11px"> ·待接</span>';
+      return '<div class="row" title="'+esc(it.hint||'')+'">'+
+             '<span class="k">'+esc(it.label)+tag+'</span>'+
+             '<span class="v">'+ctl+'</span></div>';
+    }).join('');
+    rows='<div class="row" style="margin-top:10px"><span class="k" style="color:#4cd0ff;font-weight:600">'+esc(gname)+'</span><span class="v"></span></div>'+rows;
+    groups.push(rows);
+  });
+  out+=cardHTML("c12","TUNING / 对话参数（鼠标停在标签上看说明）",
+    '<div class="kv" id="cfBox">'+groups.join('')+
+    '<div class="row" style="margin-top:14px"><button id="cfSave" style="background:#12202e;color:#4cd0ff;border:1px solid #2a3644;border-radius:8px;padding:7px 18px;cursor:pointer">保存全部</button><span class="v" id="cfMsg" style="color:var(--dim)"></span></div>'+
+    '</div>', spec.length+" 项");
+  return out;
+}
+function bindTalk(){
+  var btn=document.getElementById("cfSave");
+  if(!btn) return;
+  btn.onclick=function(){
+    var patch={};
+    var nodes=document.querySelectorAll('#cfBox [data-key]');
+    for(var i=0;i<nodes.length;i++){
+      var el=nodes[i], k=el.getAttribute('data-key');
+      if(el.type==="checkbox"){ patch[k]=!!el.checked; }
+      else if(el.getAttribute('data-kind')==="int"){ patch[k]=parseInt(el.value||"0",10); }
+      else if(el.getAttribute('data-kind')==="float"){ patch[k]=parseFloat(el.value||"0"); }
+      else { patch[k]=el.value; }
+    }
+    var msg=document.getElementById("cfMsg");
+    if(msg) msg.textContent="保存中…";
+    btn.disabled=true;
+    API("/chat/config",{method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({patch:patch})})
+      .then(function(r){
+        btn.disabled=false;
+        if(msg) msg.textContent=(r&&r.ok)?"已保存，下一轮生效":"没保存上";
+      })
+      .catch(function(e){ btn.disabled=false; if(msg) msg.textContent="保存失败"; });
+  };
+}
 function viewSet(){
   var id=(S.data&&S.data.identity)||{};
   var av = id.avatar
@@ -3579,10 +3759,12 @@ function render(){
   else if(S.tab==="neb") g.innerHTML=viewNeb();
   else if(S.tab==="time") g.innerHTML=viewTime();
   else if(S.tab==="ctx") g.innerHTML=viewCtx();
+  else if(S.tab==="talk") g.innerHTML=viewTalk();
   else if(S.tab==="voice") g.innerHTML=viewVoice();
   else g.innerHTML=viewSet();
   if(S.tab==="set") bindSet();
   if(S.tab==="ctx") bindCtx();
+  if(S.tab==="talk") bindTalk();
   if(S.tab==="voice") bindVoice();
   if(S.tab==="dash") bindDiskButtons();
   draw();

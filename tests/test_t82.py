@@ -107,8 +107,8 @@ try:
     G.quota_tick(q2)
     for _ in range(3):
         G.quota_spend(q2, 222)
-    ok3, why3 = G.quota_allow(q2, 222)
-    ok4, _ = G.quota_allow(q2, 333)
+    ok3, why3 = G.quota_allow(q2, 222, group_hour_soft=3)
+    ok4, _ = G.quota_allow(q2, 333, group_hour_soft=3)
     t("本群软上限到了不许说", not ok3 and "软上限" in why3, why3)
     t("别的群还能说", ok4)
 

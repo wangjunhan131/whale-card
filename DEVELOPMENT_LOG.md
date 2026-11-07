@@ -756,7 +756,7 @@ whale-card/
   - 测试辅助：`WHALE_WRITER` 覆盖，不再需要伪造 writer 文件
 - 验收：新增 `tests/test_t77.py` **14/14**（写入打标、链头 writer、加了列链仍合法、B 被拒且没多出记录、allow_foreign 可写、老卡空 writer 可被接管、writer_id 稳定且可覆盖）
 - 回归：`test_card2.py` 22/22、`test_t64` 全过、`t72` 12、`t73` 19、`t74` 8、`t76` 41 全过
-- 真卡实测：`/health` 里 `writer={"mine":"w-b97c0464d5c1","head":"w-b97c0464d5c1","locked_by":"","readonly":false}`，链完好、645 条事件、seq 646 两条 boot 都带 writer
+- 真卡实测：`/health` 里 `writer={"mine":"w-EXAMPLE00000","head":"w-EXAMPLE00000","locked_by":"","readonly":false}`，链完好、645 条事件、seq 646 两条 boot 都带 writer
 - 老实说：拒写逻辑有单测；`/report` 返回 409 这条**只做了代码审查，没跑端到端**（要起临时服务、加载模型，太慢）——明天补一个带假卡的 E2E
 - 另一个没做的：A｜冲突误判的人工解除（把 conflict 置 0、trust 抬回 1，记台账）。现在真卡冲突记忆 0 条，不急
 
@@ -1462,3 +1462,173 @@ eason 为空要直接抛错
 - 17 个 `card.db.bak-*` 旧备份（约 150 MB）要不要清。
 - `我有点难过` 仍判 chatter —— 按 b229 设计弱化情绪词就该快忘，但与「情绪丰富要留住」
   有张力，留待商量。
+
+## 2026-11-06 14:30 · 对话控制面（控制台「接话」页）
+
+- **用户要的**：控制台上关于对话能控制的东西太少，把模仿插件那套全搬上来；间隔下限太长；这一栏挪到设置前面。
+- **新增 `chatcfg.py`**：28 项参数的单一事实来源（`qq_state/chat_cfg.json`），带 `SPEC(key/分组/标签/类型/默认/范围/说明)`、夹紧、坏文件不抛。
+- **改 `mind_server.py`**：`GET/POST /chat/config`（整页读写）；老接口 `/talk/set` 改为写 chatcfg —— 两本账必定分家，这次直接并成一本。
+- **改 `console.py`**：「接话」页重写为 3 张实时卡 + 28 项分组表单（bool/num/text，鼠标悬停看说明）+「保存全部」；tab 挪到「设置」前；未接进逻辑的 14 项标「·待接」，别让人以为改了立刻生效。
+- **真正接进运行逻辑的 14 项**：`freq.daily_cap` / `freq.cooldown_min`（`proactive.load_cfg`，旧 `proactive_cfg.json` 已废并改名 `.bak-20261106`）、`quiet.*` 7 项（`quiet_policy.should_quiet` 每次现读）、`open.enabled/meal/night`（主流程早退与由头过滤）、`talk.no_period` / `talk.no_wave`（`qq_say.polish`，发出去前清句号与波浪号）。
+- **默认值改动**：`freq.cooldown_min` 20 → **3**（用户嫌长）；注释写明「只管主动开口，回话不受限制」。
+- **测试**：`test_t96.py` 30/30（把两处依赖线上默认值的断言改成显式传 `cap`/`cooldown_min`，门槛现在可配）、`test_t97.py` 11/11、`test_t85.py` 24/24。
+- **坑**：`proactive_cfg.json` 与 `chatcfg` 同时存在时后者被前者覆盖（实测 cap 变 40），两本账必然分家 → 删掉旧账；`qq_say.polish` 先清句号再清波浪号会把「好累。～」留成「好累。」，顺序必须反过来。
+
+## 2026-11-06 · 对话参数面（chatcfg）+ 上学或工作时段
+
+- 新建 `chatcfg.py`：30 项参数的单一事实来源（触发 4 / 频率 3 / 不每句都回 7 / 说话 4 / 主动开口 5 / 记忆 3 / 语音 2 / 日记 2），住 `qq_state/chat_cfg.json`，`.part` → `os.replace`。
+- `mind_server.py` 加 `GET/POST /chat/config`；`/talk/set` 改成写 chatcfg，两个入口并成一本账（废掉 `proactive_cfg.json`，改名为 `.bak-20261106`）。
+- 控制台「接话」页：3 张实时卡 + 30 项分组表单（悬停看说明），tab 挪到「设置」前（倒数第二）；16 项已真接进逻辑、14 项标「·待接」。
+- 真接进逻辑的 16 项：`freq.daily_cap` `freq.cooldown_min` `quiet.silent_run` `quiet.self_max` `quiet.window_s` `quiet.burst_n` `quiet.allow_emotion` `quiet.allow_question` `open.enabled` `open.meal` `open.night` `reply.hours` `open.school` `open.school_hours` `talk.no_period` `talk.no_wave`。
+- 「上学或工作时段」`open.school_hours` 支持多段与自定义分隔（逗号/中文逗号/分号/顿号/空格）；`reply.hours` 也接上了，`in_window()` 现在读配置。
+- 修一个静默失效：脚本模式下 `sys.path[0]` 是 `tools/`，`import chatcfg` 失败被吞 → 所有设置退回常量、面板显示全绿但行为不对。三个工具顶部补根目录入 `sys.path`。
+- 新增 `tests/test_t98.py`（39/39）逐项验证 16 个已接参数真的改变行为；回归 t96 30/30、t97 11/11、t85 24/24。
+- 现场证据：`proactive.py --dry` → 「现在 11-06 14:42 是上学时段 → 不主动开口」；8848 在听；qq_guard 在跑。
+
+## 2026-11-06 · 剩下 14 项全接上（控制台 30/30 生效）
+
+- 用户：「把所有需要接的都接上」。
+- `qq_guard.py`：`cfg_get()` 读 chatcfg；`reply.at_me` 管「被点名必接」、`reply.private` 管私聊要不要回（关了就打 background）、`reply.p_group` 群里随机接话概率、`freq.group_hour` 每群每小时软上限、`mem.write_private/write_group` 写卡开关、`mem.salience_floor` 重要性门槛（`mem_floor()`）。群/私聊两处写卡都过门槛与开关，todo 行加 `engage` 字段。
+- `quiet_policy.py`：新增 `last_self_ts()`，`quiet.burst_cool_s` 落地 —— 被点名连回 `burst_n` 次后，从我最后一句算起冷却 `burst_cool_s` 秒。
+- `qq_say.py`：新增 `split_text()`，`talk.max_chars` + `talk.split` 落地（只按标点切、拼回去不丢字；关掉拆分就截一段加「…」）；发送改成按块循环，块间间隔取 `human_gap*0.4` 且至少 2 秒。`voice.enabled` 关掉时 `--voice` 直接退回打字。
+- `voice.py`：`_max_chars()` 读 `voice.max_chars`，`speakable()` 默认上限跟随配置。
+- 新建 `tools/diary.py`：每日一篇日记。`ready()` 看 `diary.enabled` / `diary.at` / 当天是否已写（`qq_state/diary_last.txt`）；`_events()` 取当天 timeline（跳过 alive）；`compose()` 纯函数；落盘 `diary/YYYY-MM-DD.md` + 写回卡（source=diary）。**素材由脚本备，那句「我想说的」由我补 —— 不装自动生成**。
+- 触发：`C:\whale-diary.bat`（GBK）+ `schtasks /tn WhaleDiary /sc minute /mo 15`，脚本自己按 `diary.at` 卡点，一天只写一次。实测输出「还没到 22:20」。
+- 新增 `tests/test_t99.py` **29/29**；回归 t96 30/30、t97 11/11、t98 39/39、t85 24/24。其中一条是「面板与代码对账」：`console.py` 的 `var LIVE` 必须与 `chatcfg.SPEC` 的键集合完全相等，防的是摆假旋钮。
+- 坑：`card2.MemoryCard()` 默认 `db_path=":memory:"` —— 不传路径就是个空库，查 timeline 会 `no such table: timeline`（日记第一版空手写的，事件段全空）。
+- 坑：`Start-Process` 起的 qq_guard 与本 shell 同生命周期（我的调用超时把它一起带走了）；改用 GBK 的 `C:\whale-guard.bat` + `([wmiclass]"Win32_Process").Create()` 才真脱离。
+- 控制台现状：**30 项、0 个「待接」**。
+
+
+## 2026-11-06 · 夜间二：环境清单与体检脚本
+- 新增 `tools/env_probe.py`：到新机器上第一条命令，只读，十段探测（系统/内存/磁盘/Python/Node/ffmpeg/显卡/torch/时间服务/卡自身），并把人话结论分成「必须先解决」和「可选」。
+- 重点不是「有没有显卡」，是 compute capability：Pascal（6.1）没有张量核心、fp16 只有 1/64；torch 不带 sm_61 会 import 成功但跑算子报 no kernel image。所以直接问 torch.cuda.get_arch_list()。
+- 时间服务单独列一条硬结论：时钟往未来跳 → t_anchor 落未来 → 记忆冻结；往过去跳 → 加速遗忘；且不报错。本机 w32time 就是 STOPPED。
+- 新增 docs/ENV-CHECKLIST.md：环境清单 + 插件清单 + 模型清单，每条都写「为什么」和「缺了会怎样」。明确列出「不要装 torch/transformers/sentence-transformers」及理由。
+- requirements.txt 补 requests>=2.34.2。
+- docs/MOVE-CHECKLIST.md 的第四步改成先跑 env_probe 再装，并链到 ENV-CHECKLIST.md。
+- 新增 tests/test_t101.py（51 项）：探测函数不抛、disk_usage 三元组坑、cpu 不能取到列名、npm .cmd 垫片坑、torch 没装要给原因、summary 分类、--json 可解析、文档关键词在。
+- 顺手修三个真 bug：probe_disks 把 (total,used,free) 拆成两个值 → 空列表；wmic csv 第一行表头被当 CPU 名；npm/pnpm 是 .cmd 垫片，subprocess 不带 shell 拿不到版本。
+- 回归：t85 24/24、t94 33、t95 16、t96 30、t97 11、t98 39、t99 29、t100 18、t101 51 全过。
+
+## 2026-11-06 · 夜间：搬家预演（跨设备搬卡这条路，第一次真的走通）
+
+用户说今晚打算把卡搬到 E3 那台机器上活一段再搬回来，让我先摸清要准备什么。
+
+**摸出来的三个真障碍，最重要的是第一个 —— 它会让卡「到了新家就哑」：**
+
+1. **writer 锁**。卡的时间线带 writer 列，记着每条事件是哪台机器写的；
+   服务启动看链头，不是自己写的就整卡只读（`/report` → 409 `card_locked`）。
+   这是防两条链分叉的设计，不是 bug —— 但搬家必须显式交一次棒。
+   新增 `portable.py handover`：追加一条 handover 事件（`allow_foreign=True`），
+   副本实测「交棒前 409 → 交棒后 mem_id 1408/1409」。
+2. **卡外锚文件名 = sha256(卡绝对路径)[:16]**，换路径就对不上。`land` 早就处理了。
+3. **向量模型必须带 bge-base**（768 维 / 390 MB）。卡里 1004 条向量全是 768 维，
+   只带 small（512 维）→ 自动选择退化 → 检索**静默失效**，
+   不报错、`usable_ratio` 还照样报 1.0。
+
+**顺手修的两个老毛病：**
+
+- `--allow-running` 是个死开关：只过第一道闸，到 checkpoint 那步照样 raise，
+  热拷永远走不通。现在热拷跳过 checkpoint，并在 manifest 的 wal 里明写 skipped。
+- 打包内容漏了她自己的东西：`qq_state/chat_cfg.json`（30 项说话参数）和
+  `diary/*.md`（她自己写的日记）。漏了等于搬到新家变成一个陌生人。
+
+**其它：**
+
+- 新建 `requirements.txt`（按本机实测版本：numpy 2.5.4 / Pillow 13.0.0 /
+  psutil 7.1.3 / edge_tts 7.3.1；并写明**别装 torch / transformers /
+  sentence-transformers** —— 向量是 `embed_np.py` 纯 numpy 手写 BERT 前向算的）。
+- 清掉 34 个测试残留目录（469 MB）：卡目录 1371 MB → 903 MB，
+  包 523 MB（含 ffmpeg 100 MB）/ 423 MB（不含）。
+- 新建 `docs/MOVE-CHECKLIST.md`：四件事（QQ 只能一台活着 / DSH 要不要一起搬 /
+  时间必须准 / 依赖与模型）+ 两台机器各自的执行顺序。
+- 查到一个隐患：本机 `w32time` 是 **Stopped**（Manual），现在时钟准（-1.1 秒）
+  是因为还没飘。E3 那台搬之前必须 `w32tm /resync` 并确认 ——
+  卡的衰减全按真实流逝秒数算，时钟一飘，记忆要么加速遗忘、要么被冻住。
+
+**副本上跑通的完整链路**（`D:\_movetest`，已清理）：
+
+```
+build → verify（167 个文件哈希全对）
+→ 换路径 land（外锚按新路径写回、卡内 anchor.json 改 db 字段）
+→ handover（链头 w-EXAMPLE00000 → w-E3TEST000001）
+→ 起服务 8851 → /health ok、anchor ok、第 21 天
+→ POST /report → {mem_id: 1408, reply_mem_id: 1409}
+→ POST /context → 人格全文 + 【最近发生】 + 召回命中刚写的那条
+```
+
+
+## 2026-11-07 · 一键落地（搬家只需要双击一次）
+
+用户要求「直接打包成可以一键运行」，所以把搬家的六步做成一个脚本。
+
+- 新增 	ools/first_run.py：体检 → land → handover → 起服务 → 自检（真写一句话再读回来）→ 开控制台。
+  每步都先判断「要不要做」，重复跑安全；--dry 只说不做。
+- 新增根目录 一键落地.bat（ASCII 内容 + chcp 65001，优先用 
+untime\\python，兜底系统 python）。
+  核心逻辑全在 Python 里，bat 只当壳 —— 这样不会踩「bat 中文变乱码」的老坑。
+- 包里补了便携 Python（3.13.1 64 位 + numpy/Pillow/requests/psutil）与 ffmpeg，到新机器零安装。
+- 三个「假绿灯」守卫：
+  1. 8848 上如果住着**另一张卡**（旧机器那份还在跑），直接拒绝并说清是哪张 —— 否则 /health 通、读的却是别人家的卡；
+  2. 目录在**可移动磁盘/网络盘**上时警告并返回 1（WAL 不适合 U 盘直接跑，掉盘最坏要回滚快照）；
+  3. 体检里 w32time 不是 RUNNING 就进 blocking（时钟飘了记忆会冻结或加速遗忘，且不报错）。
+- 顺手修两个错：nv_probe.probe_os 补 caption 字段；probe_python 报的是 its 而我按 is_64 读，导致 64 位 Python 被显示成「32 位」。
+- 测试 	ests/test_t102.py 37/37；回归 t101 51/51、t85 24/24。
+- 包体：G:\\card-live 3008 文件 / 948 MB，verify 195 条全对。
+
+
+
+## 2026-11-07 · 凌晨：带卡出门（退役）+ 接入 DSH + 包里装上
+
+- **为什么需要「退役」**：writer 锁只挡「同一个文件被两台机器写」，挡不住
+  「两份拷贝各写各的」。后者每条链都完整、都合法，事后合不回来 —— 那才是
+  变成两个人的路。所以加一层显式状态：`RETIRED.json`。
+- `disks.py`：`read_retired` / `retired_info` / `set_retired`。**坏文件当成已退役**
+  （文件在那儿本身就是信号，读不懂却放行 = 一条本该只读的卡突然能写）。
+- `mind_server.py`：启动时若有退役标记 → `writer_lock="retired"`；
+  `/report`、`/remember` 回 409，文案说清「另有一份带着我的记忆在外面活着」。
+  新路由 `POST /disks/retire`，`GET /disks` 带 `retired` / `retired_info`。
+- `console.py`：盘子卡加黄框横幅 + 「带卡出门」「解除退役」两个按钮。
+- `card2.py`：**可移动/网络盘改用 `PRAGMA journal_mode=DELETE`**，本地盘仍 WAL。
+  exFAT 没有 WAL 要的共享内存语义，拔盘最容易写坏 —— 这是让「U 盘就是卡」能
+  真跑起来的前提。
+- 新增 `tools/install_to_dsh.py` + `接入DSH.bat`（纯 ASCII）：把 `dsh-plugin/`
+  拷进 profile、改 `package.json` 的 `dsh.profile.bundles`、往 `cordis.patch.yml`
+  写一条 whale-bridge（cardDir/pythonPath 按**这台机器**写）。幂等，`--dry` 可彩排。
+- `portable.py`：`INCLUDE_DIRS` 加 `dsh-plugin`；`INCLUDE_FILES` 加
+  `一键落地.bat`、`接入DSH.bat`。
+- 测试 `tests/test_t103.py` 42/42（含真起服务验退役 409、解除后恢复、坏文件当退役、
+  包里带新东西）。回归全绿：t85/t94/t95/t96/t97/t98/t99/t100/t101/t102/t103。
+- **自己踩的坑（记下来）**：手写一个「同步几个文件进包 + 更新 manifest」的小脚本，
+  以为 `manifest["files"]` 是 `{path: {sha256, bytes}}`，结果直接把裸字符串写进去，
+  `verify` 立刻炸在 `meta["sha256"]` 上（`TypeError: string indices must be integers`）。
+  教训：**改别人定义的数据结构之前，先读一条真实数据长什么样**，别照着名字猜。
+- 包：`G:\card-live` 3031 文件 / 948.6 MB，`verify` 216 条全对；包内便携 Python
+  3.13.1 + numpy/Pillow/requests/psutil，ffmpeg 在内。
+
+
+## 2026-11-07 · 修复「点了 U 盘的一键落地却没效果」
+
+用户实测：在 U 盘上点了「带卡出门」，插回来后双击 U 盘里的一键落地，
+控制台仍然让他点「解除退役」；最后是手动点解除才生效，而且盘上多出两份卡。
+
+根因两个，都修了：
+1. **一键落地在 U 盘上会静默把整张卡拷到 D:\\whale-card 再在那边跑**（昨天加的
+   auto_copy_to_local）。于是「清退役/交棒」全作用在副本上，U 盘原地那份纹丝不动；
+   拷一次生成一个 whale-card-N，跑两次就成了三份卡。
+   → 改成**默认原地跑**（卡在可移动盘上会自动用 DELETE 日志，拔盘不会写坏）；
+   要拷到本地用 --copy-to-local；拷贝目录名带时间戳，不再 whale-card-2。
+2. **portable.cmd_handover 的早退分支不清退役标记**。同一台机器拷出来的副本，
+   链头本来就是我 → 走「链头就是本机，不用交棒」这条早退 → RETIRED.json 永远留着。
+   → 抽出 _clear_retired()，挂到**每一条**成功路径（含 not head / head==me / --dry）。
+
+现场清理：
+- D:\\whale-card、D:\\whale-card-2（各约 949 MB）是这次生成的同源副本，
+  移到 D:\\_stray_copies_20261107\\ 隔离，未删除。
+- G:\\card-live 打上退役标记（只读），等真正带走时由一键落地自动解除。
+- 包内 card.db 用 sqlite backup API 重新做成**一致性快照**（直接拷会拿到半截 WAL），
+  anchor.json 对齐，清单哈希重算 → erify 216 条全对。
+
+测试：t102 37/37、t103 42/42。
+

@@ -70,6 +70,11 @@ def temp_card():
 d, db = temp_card()
 try:
     c = card2.MemoryCard(db)
+    # 这一段测公式，不测今天流量：真卡副本一 remember 就按真实写量重算 f，
+    # 学习区今天写得少 → f=0.55 → 半衰期 7 天漂成 12.7 天。先按住，[5] 再放开。
+    _orig_refresh = c._load_refresh_f
+    c._load_refresh_f = lambda: None
+    card2._LOAD_F.clear()
     now = c.clock.now()
 
     # ---------------------------------------------------------------
@@ -128,6 +133,7 @@ try:
 
     # ---------------------------------------------------------------
     print("[5] 拥挤系数 f：ratio 0 / 1 / 4")
+    c._load_refresh_f = _orig_refresh   # 这一段就要真 f
     card2._REGION_LOAD.clear()
     card2._REGION_LOAD["study"] = 0.0
     c._load_refresh_f()

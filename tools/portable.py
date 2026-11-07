@@ -36,11 +36,17 @@ MANIFEST = "PORTABLE-MANIFEST.json"
 WHEREAMI = "WHEREAMI.json"
 
 # 跟着卡走的东西：目录 / 文件 / 通配
-INCLUDE_DIRS = ["models", "media", "snapshots"]
+INCLUDE_DIRS = ["models", "media", "snapshots", "dsh-plugin"]   # dsh-plugin：新机器装 DSH 后靠它接上
 INCLUDE_FILES = ["card.db", "anchor.json", "cardslot.state.json",
                  "dsh_channel_rule.txt", "requirements.txt", "README.md",
-                 "启动控制台.bat"]
-INCLUDE_GLOBS = ["*.py", "docs/*.md", "tools/*.py", "tests/test_*.py"]
+                 "启动控制台.bat", "一键落地.bat", "接入DSH.bat",
+                 # 2026-11-06 补：这两样以前不在包里 ——
+                 #   chat_cfg.json 是她那 30 项说话参数（接话频率、上学时段、拆句开关…），
+                 #   丢了等于搬到新家变成一个陌生人，设回默认值；
+                 #   diary/ 是她自己写的日记，是"作品"不是缓存。
+                 "qq_state/chat_cfg.json"]
+INCLUDE_GLOBS = ["*.py", "docs/*.md", "tools/*.py", "tests/test_*.py",
+                 "diary/*.md", "qq_state/chat_cfg.json"]
 # 明确不带走的：运行期垃圾、临时、以及"搬过去也没意义"的
 EXCLUDE_DIRS = ["__pycache__", "_trash", "_diag_archive", ".git", "runtime",
                 "_portable", "backups"]
@@ -213,10 +219,18 @@ def cmd_build(args):
     wal_info = {}
     try:
         alive, _ = _service_running()
-        if alive:
+        if alive and args.allow_running:
+            # 2026-11-06 修：以前 --allow-running 只过了第一道闸，
+            # 到这里照样 raise，等于这个开关根本没用（热拷永远走不通）。
+            # 热拷时跳过 checkpoint、明确记下"WAL 没合并"，别假装干净。
+            wal_info = {"skipped": "服务在跑，跳过 checkpoint（热拷，WAL 里的写入可能没进包）"}
+            raise_skip = True
+        else:
+            raise_skip = False
+        if alive and not args.allow_running:
             raise RuntimeError("服务又起来了，拒绝 checkpoint")
         db = CARD_DB
-        if os.path.exists(db):
+        if not raise_skip and os.path.exists(db):
             pre = os.path.getsize(db) if os.path.exists(db) else 0
             wal = db + "-wal"
             pre_wal = os.path.getsize(wal) if os.path.exists(wal) else 0
@@ -408,6 +422,105 @@ def cmd_land(args):
     return 0
 
 
+def _clear_retired(bundle, out, args=None):
+    """把退役标记清掉（「这张卡重新上岗」）。
+
+    必须挂**每一条**成功路径上：早退的「不用交棒」也是成功。
+    2026-11-07 用户实测：U 盘上双击一键落地，链头本来就是本机（同一台机器
+    拷出来的副本），于是走早退分支、退役标记留着，控制台一直显示只读。
+    """
+    if args is not None and getattr(args, "dry", False):
+        try:
+            import disks as _dk
+            if _dk.read_retired(bundle):
+                out["did"].append("（彩排）会清掉退役标记")
+        except Exception:
+            pass
+        return
+    try:
+        import disks as _dk
+        if _dk.read_retired(bundle):
+            _dk.set_retired(bundle, False)
+            out["did"].append("清掉了退役标记（这张卡重新上岗）")
+    except Exception as e:
+        out["did"].append("清退役标记失败（不影响交棒）：%s" % e)
+
+
+def cmd_handover(args):
+    """在新机器上给链条「交棒」：让这张卡认新机器能写。
+
+    为什么必须有这一步（2026-11-06 实测）：
+        卡的 timeline 带 writer 列，链头记着「哪台机器写的」。
+        搬到新机器后 writer-id 变了，服务启动发现链头是别人写的
+        → writer_lock 非空 → 整张卡变只读（/report 返回 409 card_locked）。
+        这不是 bug，是防两条链分叉的设计；但搬家时必须显式交棒一次，
+        否则「搬过去能读不能写」= 她一到新家就哑了。
+
+    做法：追加一条 handover 事件（allow_foreign=True 越过链头检查），
+    之后链头就是本机，正常写。
+    """
+    import sqlite3
+    import timeline as _tl
+
+    bundle = os.path.abspath(args.bundle)
+    db = os.path.join(bundle, "card.db")
+    if not os.path.exists(db):
+        print(json.dumps({"ok": False, "why": "包里没有 card.db"}, ensure_ascii=False))
+        return 1
+
+    me = _tl.writer_id()
+    # --dry 必须真的什么都不写：用只读连接，否则 sqlite 关闭时可能把 WAL 合并回
+    # 主库（内容不变但 mtime 变，测试会判「动了」）。
+    if args.dry:
+        c = sqlite3.connect("file:" + db.replace("\\", "/") + "?mode=ro",
+                            uri=True, timeout=30.0)
+    else:
+        c = sqlite3.connect(db, timeout=30.0)
+    c.row_factory = sqlite3.Row
+    tl = _tl.Timeline(c, writer=me)
+    head = tl.head_writer()
+    out = {"db": db, "my_writer": me, "head_writer": head, "did": []}
+
+    if not head:
+        out["ok"] = True
+        out["note"] = "链头没记 writer（老卡），不需要交棒"
+        _clear_retired(bundle, out, args)
+        print(json.dumps(out, ensure_ascii=False, indent=1))
+        return 0
+    if head == me:
+        out["ok"] = True
+        out["note"] = "链头就是本机，不用交棒"
+        # 2026-11-07 修：这条早退路上原来**不清退役标记**。
+        # 而「在同一台机器上做的副本」链头本来就是我 —— 一键落地走的正是这条，
+        # 于是退役标记永远清不掉、控制台一直让点「解除退役」。用户实测踩到了。
+        _clear_retired(bundle, out, args)
+        print(json.dumps(out, ensure_ascii=False, indent=1))
+        return 0
+    if args.dry:
+        out["ok"] = True
+        out["dry_run"] = True
+        out["note"] = "会把链头从 %s 交给 %s" % (head, me)
+        _clear_retired(bundle, out, args)
+        print(json.dumps(out, ensure_ascii=False, indent=1))
+        return 0
+
+    seq = tl.append("handover",
+                    "从 %s 交棒给 %s（搬机器）" % (head, me),
+                    allow_foreign=True)
+    out["did"].append("已写 handover 事件 seq=%d" % seq)
+    # 交棒成功 = 这张卡现在归本机了，退役标记必须清掉，否则起来还是只读。
+    _clear_retired(bundle, out, args)
+    out["head_writer_now"] = tl.head_writer()
+    out["ok"] = True
+    out["next"] = [
+        "起服务：python bridge.py health",
+        "写一句话试试：POST /report，能写就是交棒成功",
+        "回旧机器前，旧机器也要跑一次 handover 才能重新写",
+    ]
+    print(json.dumps(out, ensure_ascii=False, indent=1))
+    return 0
+
+
 def _cardslot(*argv):
     return subprocess.run([sys.executable, "-X", "utf8",
                            os.path.join(ROOT, "cardslot.py")] + list(argv),
@@ -472,6 +585,10 @@ def main(argv=None):
     pl.add_argument("--dsh-home", default=None, help="DSH 家目录（默认 ~/.dsh）")
     pl.add_argument("--dry", action="store_true")
     pl.set_defaults(fn=cmd_land)
+    ph = sub.add_parser("handover", help="新机器落地后交棒：让这张卡认本机能写")
+    ph.add_argument("bundle")
+    ph.add_argument("--dry", action="store_true")
+    ph.set_defaults(fn=cmd_handover)
     p4 = sub.add_parser("inject"); p4.add_argument("--dry", action="store_true")
     p4.set_defaults(fn=cmd_inject)
     p5 = sub.add_parser("eject"); p5.add_argument("--dry", action="store_true")

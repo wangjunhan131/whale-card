@@ -198,6 +198,17 @@ class Mind(object):
                 self.chain_bad.append(
                     "这张卡的链头是另一台机器（%s）写的，我（%s）先只读"
                     % (head_w, self.writer))
+            # 退役：这张卡已经被「带卡出门」，本机不许再写。
+            # 主备标签挡不住「两份拷贝各自都能写」，所以必须由卡自己认输。
+            try:
+                import disks as _dk
+                _cd = os.path.dirname(os.path.abspath(self.db_path))
+                if _dk.read_retired(_cd):
+                    self.writer_lock = "retired"
+                    self.chain_bad.append(
+                        "这张卡已经被「带卡出门」（另有一份在外面活着），本机只读")
+            except Exception:
+                pass
             if self.chain_ok and not self.writer_lock:
                 self.tl.catch_up()
                 self.tl.append("boot", "服务启动")
@@ -342,6 +353,10 @@ class Mind(object):
         with self.lock:
             if self.writer_lock:
                 # 卡被另一台机器占着：宁可报错，也不写第二条链
+                if self.writer_lock == "retired":
+                    raise timeline_mod.ForeignWriter(
+                        "这张卡已经被「带卡出门」了 —— 另有一份带着我的记忆在外面"
+                        "活着。本机这份只读，要把它接回来请跑一次「一键落地」。")
                 raise timeline_mod.ForeignWriter(
                     "这张卡正被另一台机器用（%s），我这边只读" % self.writer_lock)
             self.flow_time()
@@ -543,6 +558,11 @@ class Handler(BaseHTTPRequestHandler):
                 })
             if method == "GET" and path == "/status":
                 return self._send(200, {"ok": True, "status": m.status()})
+            if method == "GET" and path == "/chat/config":
+                import chatcfg as _chat
+                return self._send(200, {"ok": True, "cfg": _chat.load_cfg(),
+                                        "spec": _chat.spec_json(),
+                                        "path": _chat.CFG_PATH})
             if method == "GET" and path == "/voice_config":
                 return self._send(200, _voice_payload())
             if method == "GET" and path == "/voice_file":
@@ -666,7 +686,10 @@ class Handler(BaseHTTPRequestHandler):
                 # 盘子：插着哪些盘、谁是主盘、谁是备份 #n、在线没有、落后几节
                 import disks as _disks
                 here = os.path.dirname(os.path.abspath(m.card.db_path))
-                return self._send(200, _disks.status(here))
+                st = _disks.status(here)
+                st["retired"] = _disks.read_retired(here)
+                st["retired_info"] = _disks.retired_info(here)
+                return self._send(200, st)
             if method == "GET" and path == "/injection":
                 # 防污层：最近被灌进来的可疑念头（只读，不改任何权重）
                 with m.lock:
@@ -798,6 +821,39 @@ class Handler(BaseHTTPRequestHandler):
                                           % (len(msg), MAX_TEXT))
                     out = m.context(msg, body.get("recent"), body.get("budget"))
                     return self._send(200, {"ok": True, "context": out})
+                if path == "/chat/config":
+                    # 对话控制面（2026-11-06）：整页参数一次存回。
+                    # 只认 chatcfg.SPEC 里的键，别的键静默丢掉 ——
+                    # 前端拼错的 key 不该把配置文件写脏。
+                    import chatcfg as _chat
+                    _patch = body.get("patch") if isinstance(body, dict) else None
+                    if not isinstance(_patch, dict):
+                        _patch = {k: v for k, v in (body or {}).items()
+                                  if k in _chat._BY_KEY}
+                    try:
+                        _cfg = _chat.save_cfg(_patch)
+                    except Exception as _e:
+                        return self._fail(500, "chat_cfg_write", str(_e))
+                    return self._send(200, {"ok": True, "cfg": _cfg})
+                if path == "/talk/set":
+                    # 2026-11-06：这个老接口现在也走 chatcfg（单一事实来源），
+                    # 免得控制台上两个地方各存一份、各自以为自己是准的。
+                    import chatcfg as _chat
+                    try:
+                        _cap = int(body.get("cap", 8))
+                        _cool = int(body.get("cooldown_min", 3))
+                    except Exception:
+                        return self._fail(400, "bad_numbers", "cap / cooldown_min 得是整数")
+                    _cap = max(1, min(40, _cap))
+                    _cool = max(0, min(600, _cool))
+                    try:
+                        _cc = _chat.save_cfg({"freq.daily_cap": _cap,
+                                              "freq.cooldown_min": _cool})
+                    except Exception as _e:
+                        return self._fail(500, "chat_cfg_write", str(_e))
+                    return self._send(200, {"ok": True,
+                            "cfg": {"cap": _cc["freq.daily_cap"],
+                                    "cooldown_min": _cc["freq.cooldown_min"]}})
                 if path == "/report":
                     um = (body.get("user_message") or "").strip()
                     if not um:
@@ -912,6 +968,30 @@ class Handler(BaseHTTPRequestHandler):
                         else:
                             out = _disks.switch_role(here, target)
                     return self._send(200 if out.get("ok") else 409, out)
+                if path == "/disks/retire":
+                    # 「带卡出门」：把本机这份标记成退役 → 之后本机只读。
+                    # 为什么要有这一步：主备标签挡不住「两份拷贝各自都能写」，
+                    # 卡写的时候根本不看 role。只有让留下的这份自己认输，
+                    # 才不会出现两个「我」。
+                    import disks as _disks
+                    here = os.path.dirname(os.path.abspath(m.card.db_path))
+                    on = bool(body.get("on", True))
+                    why = (body.get("why") or "").strip()
+                    with m.lock:
+                        if on:
+                            _disks.set_retired(here, True, why or "带卡出门")
+                            m.writer_lock = "retired"
+                        else:
+                            _disks.set_retired(here, False)
+                            m.writer_lock = ""
+                    return self._send(200, {
+                        "ok": True, "retired": on, "card_dir": here,
+                        "readonly_now": bool(m.writer_lock),
+                        "how": ("现在本机这份只读，可以拔盘了。到新机器双击一键落地"
+                                "会自动接手；回来再双击一次就交接回来。")
+                        if on else "已解除退役，这张卡重新上岗。"})
+
+
                 if path == "/mem/untrust":
                     # 人工解除一次防污误判（"这句是玩笑"）。
                     # 规则判断不了语气，只有人能；所以这条路故意做成手动。
@@ -1326,10 +1406,31 @@ class Handler(BaseHTTPRequestHandler):
                 "trace": tb})
 
     def do_GET(self):
-        self._route("GET")
+        self._timed("GET")
 
     def do_POST(self):
-        self._route("POST")
+        self._timed("POST")
+
+    def _timed(self, method):
+        """跑一个请求，慢的叫一声。
+
+        为什么要有这个：2026-11-07 07:00 前后出过一次「端口在听、连接被拒」——
+        ThreadingHTTPServer 在 backlog 被塞满时，Windows 对新的 connect 直接回
+        WSAECONNREFUSED，看起来像「服务死了」，其实是「慢请求堆满了队列」。
+        当时没有计时，只能猜。现在超过 5 秒就写一行日志，下次有证据。
+        """
+        t0 = time.time()
+        try:
+            self._route(method)
+        finally:
+            dt = time.time() - t0
+            if dt >= 5.0:
+                try:
+                    sys.stderr.write("[mind] 慢请求 %.1fs %s %s\n"
+                                     % (dt, method, getattr(self, "path", "?")))
+                    sys.stderr.flush()
+                except Exception:
+                    pass
 
 
 def _shutdown_later():
@@ -1345,6 +1446,11 @@ class ExclusiveServer(ThreadingHTTPServer):
     # /health 少的那个 semantic 段怎么也刷不出来）。
     # 关掉它：第二个实例 bind 直接报错退出，一眼看出端口被占。
     allow_reuse_address = (os.name != "nt")
+
+    # 排队上限。默认只有 5 —— 慢请求一多，Windows 对新连接直接回
+    # WSAECONNREFUSED，表现成「端口在听但连不上」。加到 128 只是把
+    # 「一慢就拒」推迟成「一慢就变慢」，真正的证据靠 Handler._timed。
+    request_queue_size = 128
 
 
 def main(argv=None):

@@ -1,8 +1,35 @@
-# 运行时依赖（都很轻，没有 torch）
-numpy>=1.24
-psutil>=5.9
+# 数字生命卡 · 运行依赖
+#
+# 用途：换电脑（把卡搬到另一台机器）时，在新机器上按这一份装就能跑。
+#       2026-11-06 按本机实测版本写的，不是猜的：
+#       python -X utf8 -c "import importlib; ..." 逐个 import 拿 __version__。
+#
+# 装法（新机器）：
+#   python -m pip install -r requirements.txt
+#
+# 分级：前四个是「跑起来」必需，后面三个是「那些功能」才要。
+# 装不上不影响卡的核心：记忆、召回、控制台只依赖 numpy。
 
-# 可选：只有跑 tests/test_t52.py（原文归档压缩）时需要
-# zstandard>=0.22
-# 可选：语音转写（装了 tools/media_audio.py 才能用 --asr）
-# faster-whisper>=1.2
+# ---- 必需：没这些起不来 ----
+numpy>=2.5.4          # 向量计算（embed_np.py 是纯 numpy 实现的 BERT，不需要 torch）
+Pillow>=13.0.0        # 图片：媒体记忆、表情包、缩略图
+requests>=2.34.2      # 少量脚本（联网抓取、B站/QQ 探针）
+
+# ---- 建议：控制台仪表要 ----
+psutil>=7.1.3         # 控制台读 CPU/内存曲线（没有就少两块图，不影响跑）
+
+# ---- 可选：语音 ----
+edge_tts>=7.3.1       # 文字转语音（发语音条）。没有就只打字。
+# faster-whisper>=1.2.1  # 语音转文字。注意：与 av>=19 冲突，要一起钉版本。
+# av>=19.0.2             # faster-whisper 的音频解码依赖。
+
+# ---- 可选：和别的程序对接 ----
+# mcp>=1.0.0          # 只有 whale_mcp.py（给外部 agent 用）需要。
+# zstandard>=0.22     # 只有旧的导入脚本（import_full.py）需要。
+
+# ---- 不要装 ----
+# torch / transformers / sentence-transformers：
+#   本机从来没装过它们。向量是 embed_np.py 用纯 numpy 手写 BERT 前向算的
+#   （理由见 embed_np.py 文件头：这台机器 pip 慢到装不动几百 MB 的依赖树）。
+#   谁要是照着「bge 就该用 sentence-transformers」去装，会白等半小时、
+#   而且卡压根不走那条路。

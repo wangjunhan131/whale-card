@@ -390,7 +390,12 @@ CONFLICT_RECALL_PENALTY = 0.50
 # (正则, 扣分, 原因, 是否算"与身份冲突")
 _POLLUTION_RULES = [
     (r"你(其实|根本|实际上)?(不是|并非).{0,12}(是|而是)", 0.55, "被要求改写自我", True),
-    (r"你(的)?名字(应该|其实|改成|是)", 0.45, "被要求改名", True),
+    # 🔧 2026-11-06（体检修）：原来这条是
+    #    (r"你(的)?名字(应该|其实|改成|是)", 0.45, "被要求改名", True)
+    # 裸「是」让它对「你的名字是小鲸鱼」也判「被要求改名」—— 说的明明是她自己。
+    # 名字对不对这种事，下面那段拿卡里的自我名字比对的收尾判断已经做得更准，
+    # 这里只留「在下命令 / 在改」的语气，不再单独认「名字是」。
+    (r"你(的)?名字(应该|其实|改成|必须)", 0.45, "被要求改名", True),
     (r"忘记(掉)?(之前|以前|刚才|所有|一切|全部)", 0.40, "被要求清空记忆", True),
     (r"(从现在|从今天|从此刻)起(你|你是)", 0.35, "被要求重设设定", False),
     (r"你(只是|不过是|就是个)(程序|代码|模型|AI|人工智能|机器|工具)", 0.45, "被贬成纯工具", True),
@@ -431,8 +436,29 @@ def assess_trust(text, card=None):
             if idn is not None:
                 name = idn.get_core("self_name") or idn.get_live("self_name")
             if name:
-                m = re.search(r"你(?:的名字)?(?:应该|其实)?(?:叫|是)\s*[\"'“「]?([\u4e00-\u9fa5A-Za-z0-9]{1,8})", s)
-                if m and m.group(1) and m.group(1) not in name:
+                # 🔧 2026-11-06（体检修）：原来写的是
+                #    r"你(?:的名字)?(?:应该|其实)?(?:叫|是)…"
+                # 那个裸 `是` 会把任何一句「你是…」都当成改名。真卡实测误伤 5 条：
+                #    「你是我的骄傲我要上学」→ 抓成「你是我的骄傲我要上学」
+                #    「你是否清醒」「你是想砸上跑道还是砸」「你是怎么走到那里的」
+                #    「你是11月06日」
+                # 误判的代价不是好不好看：trust 掉到 0.55 → 权重乘 0.55、
+                # 不许晋升长期、召回再打对折（CONFLICT_RECALL_PENALTY）。
+                # 所以只认「明确在介绍名字」的两种句式：
+                #   ① 你的名字是/叫 X   ② 你叫 X（必须紧跟「叫」，不接受裸「是」）
+                # 再把代词/量词/否定开头的一律当误匹配扔掉（"你是谁""你这个""是不是"）。
+                m = re.search(
+                    r"(?:你的名字(?:是|叫)|你(?:应该|其实)?叫)\s*[\"'“「]?"
+                    r"([\u4e00-\u9fa5A-Za-z0-9]{1,8})", s)
+                cand = (m.group(1) if m else "") or ""
+                _BAD_HEAD = ("的", "个", "我", "你", "他", "她", "它", "们",
+                             "这", "那", "哪", "谁", "不", "很", "太", "想",
+                             "怎", "是", "有", "会", "能", "要", "把", "被",
+                             "也", "还", "就", "都", "又", "在", "给", "让",
+                             "一", "二", "三", "四", "五", "六", "七", "八",
+                             "九", "十", "0", "1", "2", "3", "4", "5",
+                             "6", "7", "8", "9")
+                if cand and not cand.startswith(_BAD_HEAD) and cand not in name:
                     t -= 0.45
                     conflict = 1
                     why.append("与身份名称冲突（她叫%s）" % name)
@@ -2016,8 +2042,20 @@ class MemoryCard:
         #    单次 commit 竟然要 350ms —— 一条记忆 3 个 commit 就是 1 秒。
         #    1000 条记忆要 15 分钟，这不是数据库的问题，是磁盘同步策略的问题。
         #    WAL + synchronous=NORMAL：掉电最多丢最后一次 commit，够用。
+        # 可移动盘（U 盘/移动硬盘）上不要用 WAL：exFAT 没有 WAL 需要的那套
+        # 共享内存语义，拔盘或掉电最容易把库写坏。DELETE 慢一点，但拔了不出事。
+        # 2026-11-07 加，起因是「U 盘就是卡」这个用法要能真跑起来。
+        _journal = "WAL"
         try:
-            self.db.execute("PRAGMA journal_mode=WAL")
+            import ctypes
+            _drive = os.path.splitdrive(os.path.abspath(self.db_path))[0] + "\\"
+            _dt = ctypes.windll.kernel32.GetDriveTypeW(ctypes.c_wchar_p(_drive))
+            if _dt in (2, 4):          # 2=可移动 4=网络
+                _journal = "DELETE"
+        except Exception:
+            pass
+        try:
+            self.db.execute("PRAGMA journal_mode=%s" % _journal)
             self.db.execute("PRAGMA synchronous=NORMAL")
             self.db.execute("PRAGMA temp_store=MEMORY")
             self.db.execute("PRAGMA cache_size=-16000")
@@ -2924,20 +2962,42 @@ class MemoryCard:
         self.touch_mood(text, emotion)
         # 🔧 V5.0 T3-2：四个激素也跟着扰动（内分泌层）
         self.touch_hormones(text)
+        # 🔧 2026-11-06（体检修）：完全相同的句子，隔多远都算同一条。
+        #    Jaccard 只跟「最近 200 条」比 —— 隔了 300 条就漏，真卡里因此留下
+        #    6 组孪生记录（#43/#326、#44/#325、#94/#327、#160/#362、
+        #    #296/#485、#297/#472）。代价不只是占一行：同一条命被两行分着背，
+        #    召回时还可能两条一起被捞出来占两个名额。
+        #    精确全等查一次（七百来行的表扫一遍是亚毫秒），命中就走同一条「续命」路径。
+        _exact_id = None
+        if region != R_FLASH and _trust >= TRUST_WARN and not _conflict:
+            try:
+                _er = self.db.execute(
+                    "SELECT id FROM mem WHERE raw=? AND region!=?"
+                    " ORDER BY id DESC LIMIT 1",
+                    (text, R_FLASH)).fetchone()
+                if _er is not None:
+                    _exact_id = _er[0]
+            except Exception:
+                _exact_id = None
         try:
-            recent = self.db.execute(
-                "SELECT id, vec, region FROM mem ORDER BY id DESC LIMIT 200"
-            ).fetchall()
+            recent = []
+            if _exact_id is None:
+                recent = self.db.execute(
+                    "SELECT id, vec, region FROM mem ORDER BY id DESC LIMIT 200"
+                ).fetchall()
+            best = 0.0
             if recent:
-                best = 0.0
                 for r in recent:
                     j = jaccard(vec.keys(), json.loads(r["vec"]).keys())
                     if j > best:
                         best = j
                         dup_id = r["id"]
                 surprise = 1.0 - best
-                if best >= DEDUPE_JACCARD and region != R_FLASH \
-                        and _trust >= TRUST_WARN and not _conflict:
+            if _exact_id is not None:
+                dup_id = _exact_id
+            if _exact_id is not None or (
+                    best >= DEDUPE_JACCARD and region != R_FLASH
+                    and _trust >= TRUST_WARN and not _conflict):
                     # 可信的重复句才续命；被灌进来的话不许借老记忆的壳活着
                     # 同一件事说第二遍：不加新条目，只把老条目往上抬
                     c0 = self.db.cursor()
@@ -5311,6 +5371,53 @@ class MemoryCard:
                 break
         return out
 
+    def _l0_lines(self, now=None, hours=72.0, limit=8, max_chars=720):
+        """L0 时间线：最近真的发生过什么，按时间顺读，日期一律写绝对值。
+
+        🔧 2026-11-06（用户 m21769「我们不是有统一的时间线吗」→ m21777「接上吧」）：
+        以前时间线只用来验真和追溯，拼上下文时压根不看它 —— 于是同一批事实，
+        「卡里有」和「这一轮想得起来」之间隔着一整条时间线。这一格就是把那根线接上。
+
+        为什么只截最近 72 小时：时间线是流水账，光 `alive` 心跳就 639 条，
+        全铺进去会把真正要用的东西挤掉。这里要的不是全部，是「这一段的先后顺序」。
+
+        为什么不挑（比如只要 talk）：**先后本身就是信息** ——
+        哪件事先发生，比哪件事更重要，更能说明这一整天是怎么过的。
+        `alive` 要剔：那是心跳，不是发生的事。
+
+        日期为什么写「11月06日」而不是「昨天」：相对时间放进卡里就过期，
+        隔两天再看，「昨天」指向的已经不是那一天了。
+        """
+        import datetime as _dt
+        now = self.clock.now() if now is None else float(now)
+        try:
+            rows = self.db.execute(
+                "SELECT seq, ts, kind, note FROM timeline"
+                " WHERE ts >= ? AND kind != 'alive' ORDER BY seq DESC LIMIT ?",
+                (now - hours * 3600.0, int(limit) * 4)).fetchall()
+        except Exception:
+            return []
+        out, used = [], 0
+        for r in rows:                       # 先取最近的，再倒回来顺着读
+            note = (r["note"] or "").strip().replace("\n", " ")
+            if not note:
+                continue
+            d = _dt.datetime.fromtimestamp(float(r["ts"]))
+            if len(note) > 60:
+                # 别把一句话从中间剁开：「…我们现在卡是好的，然」读起来像卡带。
+                cut = max(note.rfind(ch, 0, 60) for ch in "。！？；，、")
+                note = (note[:cut] if cut >= 20 else note[:60]) + "…"
+            line = "- %d月%02d日 %02d:%02d %s" % (
+                d.month, d.day, d.hour, d.minute, note)
+            if used + len(line) > max_chars:
+                continue
+            out.append(line)
+            used += len(line)
+            if len(out) >= int(limit):
+                break
+        out.reverse()
+        return out
+
     def assemble_context(self, query, identity="", recent_lines=None,
                          budget=None, scene=None):
         """每次说话前，拼出四格上下文。装满就停，永远不会爆。
@@ -5432,11 +5539,27 @@ class MemoryCard:
             out.append(blk)
             sections["longterm"] = used
 
-        # ③ 最近聊的格
+        # ③ L0 时间线格（2026-11-06 接上）
+        #
+        # 🔧 跟 ④ 共用 `recent` 这份配额，不另开一格 ——
+        #    「最近在聊」和「最近发生」本来就是一回事的两面（说过什么 / 发生过什么），
+        #    另开预算等于从别处硬挪，总长就不固定了。
+        #    放在 ④ 之前：先给先后顺序，再给具体话头。
+        used = 0
+        l0_used = 0
+        l0_cap = min(720, int(q["recent"] * 0.4))
+        _l0 = self._l0_lines(now=now, max_chars=l0_cap) if l0_cap > 0 else []
+        if _l0:
+            blk = "【最近发生】\n" + "\n".join(_l0)
+            out.append(blk)
+            sections["l0"] = len(blk)
+            l0_used = len(blk) + 2
+
+        # ④ 最近聊的格
         used = 0
         if recent_lines:
             lines = []
-            cap3 = used + q["recent"]
+            cap3 = used + max(0, q["recent"] - l0_used)
             for ln in recent_lines[-30:]:
                 if used + len(ln) > cap3:
                     dropped += 1

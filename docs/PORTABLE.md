@@ -13,7 +13,7 @@
 | 卡外锚 `~/.dsh/anchors/<哈希>.json` | 文件名 = sha256(**卡的绝对路径**)[:16] | 换路径 → 文件名对不上 → 程序认为没有锚 → 按卡内容重建一份 → 「锚 ok」但只是自己跟自己一致 |
 | `cardslot.state.json` 里的 `dsh_home` | 旧机器的家目录 | 显示骗人（功能不受影响，注入走当前 `DSH_HOME`） |
 
-## 四步
+## 步骤
 
 ```bash
 # 1) 体检（只读，不碰任何东西）
@@ -23,13 +23,45 @@ python tools/portable.py plan "E:\whale-card"
 python tools/portable.py build "E:\whale-card" --confirm \
        --with-ffmpeg "D:\...\ffmpeg.exe"
 
-# 3) 验包（120 个文件的 sha256 逐个对）
+# 3) 验包（每个文件的 sha256 逐个对）
 python tools/portable.py verify "E:\whale-card"
 
 # 4) 到了新机器再落地：写回卡外锚 + 改写卡槽状态
 python tools/portable.py land "E:\whale-card"
-python tools/portable.py inject          # 人格注入
+
+# 5) 【必须】交棒 —— 不做这步，她一到新家就是哑的（只能读不能写）
+python tools/portable.py handover "E:\whale-card"
+
+# 6) 起服务，试写一句话
+python bridge.py health
+# 然后 POST /report，返回 ok 且没有 409 card_locked，才算真的搬到了
+
+# 7) 人格注入（要不要让她住进 DSH）
+python tools/portable.py inject
 ```
+
+## 第五步为什么不能省：writer 锁
+
+卡的时间线（`timeline` 表）带一列 `writer`，记着**每条事件是哪台机器写的**。
+`writer_id()` 按机器生成，存在 `~/.dsh/writer-id.txt`。
+
+服务启动时会看链头是谁写的：
+
+```
+head_writer != 我的 writer  →  writer_lock = head_writer  →  整张卡只读
+/report    → 409 card_locked
+/remember  → 同样拒绝
+```
+
+这不是 bug，是**故意**的：防止两台机器同时写，把哈希链分叉成两条再也合不回来的链。
+代价就是搬家时必须显式交一次棒。
+
+`handover` 做的事：往链上追加一条 `handover` 事件（用它自己的 `allow_foreign=True`
+越过链头检查），之后链头就是新机器，正常写。
+
+**搬回去那次也要在旧机器上跑一次 handover**，否则旧机器会因为「链头怎么变成别人了」
+变成只读。这条在 2026-11-06 的临时副本上实测过：交棒前 `WRITE BLOCKED`，
+交棒后 `POST /report` 正常返回 `{mem_id, reply_mem_id}`。
 
 `build` 会在包里留三样凭据：`PORTABLE-MANIFEST.json`（全部文件哈希）、
 `anchor.carried.json`（卡内锚）、`anchor.external.json`（卡外锚）。
@@ -65,7 +97,16 @@ python tools/portable.py inject          # 人格注入
 
 - **新机器没有 Python**：`启动控制台.bat` 直接调 `python`，会挂。要么自带嵌入式
   Python + numpy/psutil（图片还要 Pillow），要么先手动装。
+  依赖版本见 `requirements.txt`（2026-11-06 按本机实测写的：numpy 2.5.4 / Pillow 13.0.0 /
+  psutil 7.1.3 / edge_tts 7.3.1）。**别装 torch / transformers / sentence-transformers** ——
+  向量是 `embed_np.py` 用纯 numpy 手写 BERT 前向算的，本机从来没装过那三个。
+- **向量模型必须带对**：卡里是 768 维（`bge-base-zh-v1.5`，`pytorch_model.bin` 390 MB）。
+  只带 small（512 维）过去，`card2.py` 的自动选择会退回 small，长度对不上 → 检索**静默失效**
+  （不报错，`usable_ratio` 还照样报覆盖率）。
 - **ffmpeg 不在卡里**：视频抽帧、语音转写靠它，`--with-ffmpeg` 会一起打包（约 100 MB）。
 - **U 盘上跑 SQLite（WAL）有掉盘风险**：建议"U 盘当仓库、跑的时候拷到本地"，
   或者每次结束时做一次 checkpoint。
 - `whale_mcp.py` 里还写死了一条绝对路径（MCP 插件用），搬家后要改。
+- **`--allow-running` 以前是个死开关**（2026-11-06 修）：它只过了第一道闸，
+  到 checkpoint 那步照样 raise，热拷永远走不通。现在热拷会跳过 checkpoint 并
+  在 manifest 的 `wal` 里明写 `skipped` —— 宁可写明"WAL 没合并"，也不假装干净。

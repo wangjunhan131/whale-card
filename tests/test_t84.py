@@ -50,6 +50,10 @@ print("=" * 60)
 d, db = temp_card()
 try:
     c = card2.MemoryCard(db)
+    # 这一段测的是「公式」，不是「今天这个区写了多少」：
+    # MemoryCard 初始化会按真实流量算拥挤系数（各区间不同），
+    # 留着它会让半衰期跟着今天的聊天量漂。
+    card2._LOAD_F.clear()
     now = time.time()
 
     # ---------- [1] 衰减曲线 ----------

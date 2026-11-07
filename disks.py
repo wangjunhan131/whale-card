@@ -187,6 +187,69 @@ def write_role(card_dir, role, number=None, main_instance=None, head_seq=None,
 
 
 # ---------------------------------------------------------------- 注册表
+# ── 退役（带卡出门） ────────────────────────────────────────────────
+# 主备标签管不住「两份拷贝各自都能写」这件事：卡写的时候根本不看 role。
+# 所以搬走时必须有一步，让留在家里的这一份自己认输。
+# 存在单独的文件里，因为 write_role() 每次都会整份重写 DISK-ROLE.json。
+RETIRED_NAME = "RETIRED.json"
+
+
+def _retired_path(card_dir):
+    return os.path.join(os.path.abspath(card_dir), RETIRED_NAME)
+
+
+def read_retired(card_dir):
+    """这张卡是不是已经被「带卡出门」了。
+
+    三种情况要分清（2026-11-07 修）：
+      · 文件不存在       → 没退役（False），最常见
+      · 文件在且读得出来 → 看 retired 字段
+      · 文件在但读不出来 → **当成已退役**（True）
+
+    第三种为什么是 True：RETIRED.json 只在「这份卡被钉成只读」时才写，
+    它在那儿本身就是个信号。文件坏了却回 False，等于「读不懂就不管了」，
+    结果是一条本该只读的卡突然能写 —— 那正是两份拷贝分叉的开局。
+    宁可让人手动删掉这个文件，也不能自作主张放行。
+    """
+    p = _retired_path(card_dir)
+    if not os.path.exists(p):
+        return False
+    try:
+        with open(p, encoding="utf-8") as f:
+            d = json.load(f)
+        return bool(d.get("retired"))
+    except FileNotFoundError:
+        return False
+    except Exception:
+        return True
+
+
+def retired_info(card_dir):
+    p = _retired_path(card_dir)
+    try:
+        with open(p, encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def set_retired(card_dir, on=True, why=""):
+    """打上 / 清掉 retired 标记。清掉时直接删文件，不留残渣。"""
+    p = _retired_path(card_dir)
+    if not on:
+        try:
+            os.remove(p)
+        except OSError:
+            pass
+        return {"retired": False}
+    d = {"retired": True, "why": why or "带卡出门：这张卡已经被带到别处",
+         "at": time.strftime("%Y-%m-%d %H:%M:%S"),
+         "card_dir": os.path.abspath(card_dir)}
+    with open(p, "w", encoding="utf-8") as f:
+        json.dump(d, f, ensure_ascii=False, indent=1)
+    return d
+
+
 def reg_path(card_dir):
     return os.path.join(card_dir, REG_NAME)
 

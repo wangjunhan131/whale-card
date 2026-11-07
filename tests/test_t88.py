@@ -86,6 +86,9 @@ try:
     DAY = 86400
     t = 1_700_000_000
     card = card2.MemoryCard(dst, card2.Clock(start=t))
+    # 测公式，不测今天流量（拥挤系数按真实写量重算会把半衰期整体拖慢）
+    card._load_refresh_f = lambda: None
+    card2._LOAD_F.clear()
     m1 = card.remember("我有点难过", emotion=1.0, ts=t)
     m2 = card.remember("我很难过", emotion=1.0, ts=t)
     rows = {r["id"]: r for r in card.db.execute(
