@@ -19,6 +19,8 @@
 """
 
 import json
+
+_json = json
 import hashlib
 import math
 import os
@@ -2026,6 +2028,18 @@ def pool_of_k(k):
 # ============================================================
 # 主体
 # ============================================================
+
+def _safe_json(txt):
+    """存进去的是 JSON 文本；读坏了就当没有，别让一条脏行毁掉整张图。"""
+    if not txt:
+        return {}
+    try:
+        v = _json.loads(txt)
+        return v if isinstance(v, dict) else {}
+    except Exception:
+        return {}
+
+
 class MemoryCard:
     def __init__(self, db_path=":memory:", clock=None, card_dir=None):
         self.clock = clock or Clock()
@@ -2089,6 +2103,10 @@ class MemoryCard:
         self._load_mood()
         self._load_hormones()
         self._load_viscera()
+        try:
+            self._ensure_hist_cols()
+        except Exception:
+            pass
         # 🔧 2026-11-06（V5.2 分区细分）：开关从 meta 读，**默认关**。
         #    关着的时候 weight_now() 走老路径，这张卡的行为和改之前一模一样；
         #    打开才启用「每个区自己的 λ」。
@@ -2267,6 +2285,22 @@ class MemoryCard:
         except Exception:
             return ""
 
+    def _ensure_hist_cols(self):
+        """给 viscera_hist 补列。老卡里那张表是窄的，只加不删。"""
+        want = {"temp": "REAL NOT NULL DEFAULT 0",
+                "tension": "REAL NOT NULL DEFAULT 0",
+                "h": "TEXT", "p": "TEXT", "pulse": "TEXT"}
+        try:
+            have = {r["name"] for r in self.db.execute(
+                "PRAGMA table_info(viscera_hist)").fetchall()}
+            for k, decl in want.items():
+                if k not in have:
+                    self.db.execute(
+                        "ALTER TABLE viscera_hist ADD COLUMN %s %s" % (k, decl))
+            self.db.commit()
+        except Exception:
+            pass
+
     def _hist_viscera(self, res=None, now=None):
         """给控制台留一格曲线。同一分钟里不重复写。
 
@@ -2300,16 +2334,55 @@ class MemoryCard:
                     label = str(link.label(res) or "")
                 except Exception:
                     pass
+            # 24 种激素全记：对话里不出现，后台要能一格一格看见
+            _hj = {k: round(float(x), 2) for k, x in (h or {}).items()}
+            # 动态参数：这一轮引擎内部到底算了什么
+            _pj = {"rpe": round(float(rpe), 3)}
+            try:
+                for _k in ("v_actual", "v_expect", "gate", "fatigue",
+                           "safety", "turn"):
+                    _x = getattr(res, _k, None) if res is not None else None
+                    if _x is not None:
+                        _pj[_k] = round(float(_x), 3)
+                _pj["dominant"] = str(getattr(res, "dominant", "") or "") \
+                    if res is not None else ""
+                _pj["scenario"] = str(getattr(res, "scenario", "") or "") \
+                    if res is not None else ""
+                _st = getattr(res, "state", None) if res is not None else None
+                if isinstance(_st, dict):
+                    _pj["mods"] = {k: round(float(x), 3)
+                                   for k, x in _st.items()}
+                _pl = getattr(res, "pulsed", None) if res is not None else None
+                if isinstance(_pl, dict):
+                    _pj["pulse"] = {k: round(float(x), 4)
+                                    for k, x in _pl.items()}
+            except Exception:
+                pass
+            _link2 = self._emotion()
+            if _link2 and getattr(_link2, "eng", None):
+                try:
+                    _sn = _link2.eng.snapshot()
+                    _pj["mood"] = _sn.get("mood")
+                    _pj["expect_global"] = _sn.get("expect_global")
+                    _pj["expect"] = _sn.get("expect")
+                    _pj["base"] = _sn.get("base")
+                except Exception:
+                    pass
             c = self.db.cursor()
             c.execute(
                 "INSERT INTO viscera_hist(ts,hr,resp,face,sym,para,dopa,nora,sero,"
-                "cort,oxy,rpe,safety,label) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "cort,oxy,rpe,safety,label,temp,tension,h,p,pulse) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (now, float(b.get("hr", 0)), float(b.get("resp", 0)),
                  float(b.get("face", 0)), float(v.get("symp", 0)),
                  float(v.get("para", 0)), float(h.get("dopa", 0)),
                  float(h.get("nora", 0)), float(h.get("sero", 0)),
                  float(h.get("cort", 0)), float(h.get("oxy", 0)),
-                 rpe, safety, label))
+                 rpe, safety, label,
+                 float(b.get("temp", 0)), float(b.get("tension", 0)),
+                 _json.dumps(_hj, ensure_ascii=False) if _hj else None,
+                 _json.dumps(_pj, ensure_ascii=False) if _pj else None,
+                 _json.dumps(_pj.get("pulse") or {}, ensure_ascii=False)))
             # 只留 7 天，老点删掉（曲线画不了那么长，账也不想无限长）
             c.execute("DELETE FROM viscera_hist WHERE ts < ?", (now - 7 * 86400.0,))
             self.db.commit()
@@ -2322,10 +2395,12 @@ class MemoryCard:
         out = []
         try:
             since = float(time.time()) - float(hours) * 3600.0
+            self._ensure_hist_cols()
             rows = self.db.execute(
                 "SELECT ts,hr,resp,face,sym,para,dopa,nora,sero,cort,oxy,"
-                "rpe,safety,label FROM viscera_hist WHERE ts >= ?"
-                " ORDER BY ts ASC LIMIT ?", (since, int(limit))).fetchall()
+                "rpe,safety,label,temp,tension,h,p,pulse FROM viscera_hist "
+                "WHERE ts >= ? ORDER BY ts ASC LIMIT ?",
+                (since, int(limit))).fetchall()
             for r in rows:
                 out.append({
                     "ts": round(float(r["ts"]), 1),
@@ -2342,6 +2417,11 @@ class MemoryCard:
                     "rpe": round(float(r["rpe"]), 3),
                     "safety": round(float(r["safety"]), 3),
                     "label": str(r["label"] or ""),
+                    "temp": round(float(r["temp"] or 0), 2),
+                    "tension": round(float(r["tension"] or 0), 3),
+                    "hormones": _safe_json(r["h"]),
+                    "params": _safe_json(r["p"]),
+                    "pulse": _safe_json(r["pulse"]),
                 })
         except Exception:
             return []
@@ -2898,6 +2978,11 @@ class MemoryCard:
         # 曲线要能分开画，混在一张表里以后改哪个都得动历史数据。
         c.execute("""CREATE TABLE IF NOT EXISTS viscera_hist (
             id    INTEGER PRIMARY KEY AUTOINCREMENT,
+            temp   REAL NOT NULL DEFAULT 0,
+            tension REAL NOT NULL DEFAULT 0,
+            h      TEXT,
+            p      TEXT,
+            pulse  TEXT,
             ts    REAL NOT NULL,
             hr    REAL NOT NULL DEFAULT 0,
             resp  REAL NOT NULL DEFAULT 0,

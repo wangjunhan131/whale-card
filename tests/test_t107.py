@@ -175,11 +175,18 @@ if HAVE:
     chk("OT>0 → oxy 增量为正", d["oxy"] > 0, str(d["oxy"]))
     chk("唤醒起来 → 交感为正", sym > 0, "%.2f" % sym)
     chk("催产素抬副交感", para > 0, "%.2f" % para)
-    st = V.inject(s_zero, {"dopa": 0.5, "oxy": 0.5}, 0.0, 0.0)
+    # 用 0.10 这种小脉冲测「权重」—— 0.50 会撞上单轮 15% 的限速，
+    # 那时测到的就是限速而不是权重了。
+    st = V.inject(s_zero, {"dopa": 0.10, "oxy": 0.10}, 0.0, 0.0)
     dd = st["h"]["dopa"] - s_zero["h"]["dopa"]
     do = st["h"]["oxy"] - s_zero["h"]["oxy"]
-    chk("快变量吃满（dopa 涨 %.2f）" % dd, dd > 5.0)
-    chk("慢变量只吃四成（oxy %.2f ≈ 0.4×dopa %.2f）" % (do, dd), abs(do - dd * 0.4) < 0.01)
+    chk("快变量吃满（dopa 涨 %.2f）" % dd, dd > 1.0)
+    # 现在增量还按「各自基线」缩放（k_scale = base/30，夹 0.40~2.20），
+    # 所以期望值要跟代码用同一套系数算，不能还写死 0.4。
+    _ks = lambda k: max(0.40, min(2.20, V.H_BASE.get(k, 20.0) / 30.0))
+    _exp = dd / _ks("dopa") * 0.4 * _ks("oxy")
+    chk("慢变量只吃四成（oxy %.2f ≈ %.2f，已含基线缩放）" % (do, _exp),
+        abs(do - _exp) < 0.02)
     chk("注入不越上限", st["h"]["gonad"] <= 45.0)
     chk("脏增量不抛", isinstance(V.inject(s_zero, {"不存在": 1.0, "dopa": None}), dict))
 

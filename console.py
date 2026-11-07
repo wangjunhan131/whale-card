@@ -39,6 +39,7 @@ import os
 import sqlite3
 import time
 
+import viscera    # 24 种激素的出厂基线：控制台不自己另写一份
 import padlib      # 零依赖纯函数：PAD 公式只住在这里
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -160,6 +161,17 @@ def hormones_series(db_path=DEFAULT_DB, hours=24.0, limit=400):
     return out
 
 
+def _jobj(txt):
+    """库里存的是 JSON 文本，读坏了就当空，不让一条脏行毁整张图。"""
+    if not txt:
+        return {}
+    try:
+        v = json.loads(txt)
+        return v if isinstance(v, dict) else {}
+    except Exception:
+        return {}
+
+
 def emotion_series(db_path=DEFAULT_DB, hours=72.0, limit=600):
     """viscera_hist：快反应层的曲线 —— 心率、交感/副交感、五条调质、RPE、安全感。
 
@@ -170,9 +182,13 @@ def emotion_series(db_path=DEFAULT_DB, hours=72.0, limit=600):
     try:
         c = _conn(db_path)
         since = time.time() - float(hours) * 3600.0
+        cols = {r[1] for r in c.execute(
+            "PRAGMA table_info(viscera_hist)").fetchall()}
+        wide = "h" in cols
+        sel = ("ts,hr,resp,face,sym,para,dopa,nora,sero,cort,oxy,rpe,safety,label"
+               + (",temp,tension,h,p,pulse" if wide else ""))
         rows = c.execute(
-            "SELECT ts,hr,resp,face,sym,para,dopa,nora,sero,cort,oxy,"
-            "rpe,safety,label FROM viscera_hist WHERE ts >= ?"
+            "SELECT " + sel + " FROM viscera_hist WHERE ts >= ?"
             " ORDER BY ts ASC LIMIT ?", (since, int(limit))).fetchall()
         c.close()
         for r in rows:
@@ -191,6 +207,11 @@ def emotion_series(db_path=DEFAULT_DB, hours=72.0, limit=600):
                 "rpe": round(_f(r["rpe"]), 3),
                 "safety": round(_f(r["safety"]), 3),
                 "label": str(r["label"] or ""),
+                "temp": round(_f(r["temp"]), 2) if wide else 0,
+                "tension": round(_f(r["tension"]), 3) if wide else 0,
+                "hormones": _jobj(r["h"]) if wide else {},
+                "params": _jobj(r["p"]) if wide else {},
+                "pulse": _jobj(r["pulse"]) if wide else {},
             })
     except Exception:
         return []
@@ -879,6 +900,10 @@ def overview(db_path=DEFAULT_DB):
 
 
 # ──────────────────────────────────────────────────────
+# 24 种激素的中英文名：控制台里要能认出来是哪一条（对话里永不出现）。
+HORMONE_LABELS = {'dopa': ('多巴胺', 'Dopamine'), 'nora': ('去甲肾上腺素', 'Norepinephrine'), 'cort': ('皮质醇', 'Cortisol'), 'sero': ('血清素', 'Serotonin'), 'oxy': ('催产素', 'Oxytocin'), 'endo': ('内啡肽', 'Endorphin'), 'gonad': ('促性腺激素', 'Gonadotropin'), 'mel': ('褪黑素', 'Melatonin'), 'gaba': ('γ-氨基丁酸', 'GABA'), 'ach': ('乙酰胆碱', 'Acetylcholine'), 'adh': ('抗利尿激素', 'Vasopressin'), 'dop': ('多巴', 'L-DOPA'), 'cck': ('胆囊收缩素', 'Cholecystokinin'), 'gh': ('生长激素', 'Growth hormone'), 'prl': ('催乳素', 'Prolactin'), 'hist': ('组胺', 'Histamine'), 'adeno': ('腺苷', 'Adenosine'), 'kyn': ('犬尿氨酸', 'Kynurenine'), 'npy': ('神经肽Y', 'Neuropeptide Y'), 'nps': ('神经肽S', 'Neuropeptide S'), 'ofq': ('孤啡肽', 'Nociceptin'), 'enk': ('脑啡肽', 'Enkephalin'), 'orex': ('食欲素', 'Orexin'), 'testo': ('睾酮', 'Testosterone')}
+
+
 PAGE = r"""<!doctype html>
 <html lang="zh-CN"><head>
 <meta charset="utf-8">
@@ -1356,6 +1381,8 @@ body{font-family:"Inter","Segoe UI","Microsoft YaHei",system-ui,sans-serif;
 </div></div>
 
 <script>
+var HNAME=__HORMONE_LABELS__;
+var HBASE=__HORMONE_BASE__; /* 24 条出厂基线 */ /* 24 种激素：key → [中文, English] */
 "use strict";
 var API = function(p, o){ return fetch(p, o).then(function(r){ return r.json(); }); };
 var S = {data:null, tab:"dash", neb:null, resp:0};
@@ -2910,6 +2937,18 @@ function viewEmo(){
     '<canvas id="cvEAP" style="height:150px"></canvas>',"0 → 1");
   out+=cardHTML("c12","HORMONE FIELD / 激素（快反应层）",
     '<canvas id="cvEH" style="height:180px"></canvas>',"0 → 100 · 五条主调质");
+  out+=cardHTML("c12","ALL HORMONES / 24 种激素（后台全量，对话里永不出现）",
+    '<canvas id="cvE24" style="height:300px"></canvas>',
+    "8 × 3 · 每格独立纵轴 · 括号里是基线");
+  out+=cardHTML("c12","OVERLAY / 24 条激素叠在一张表上（相对各自基线的偏差 %）",
+    '<canvas id="cvEOV" style="height:300px"></canvas>'
+      +'<div id="emoHormLegend" style="display:flex;flex-wrap:wrap;gap:8px;margin-top:8px;'
+      +'font:11px sans-serif;color:#b9c6d6"></div>',
+    "0% 线 = 出厂基线 · 手动连戳会堆到上限，真实对话每轮隔几分钟会回落");
+  out+=cardHTML("c12","PARAMS / 这一轮引擎内部算了什么",
+    '<canvas id="cvEPM" style="height:170px"></canvas>'
+      +'<div id="emoParams" style="display:flex;flex-wrap:wrap;gap:8px;margin-top:10px"></div>',
+    "门控 / 疲劳 / 心境 / 安全感 / 预期误差");
   out+=cardHTML("c6","PULSE / 预期误差 RPE",
     '<canvas id="cvEP" style="height:130px"></canvas>',"−1 坏事 → +1 比预期好");
   out+=cardHTML("c6","SAFETY / 安全感",
@@ -2961,12 +3000,12 @@ function drawEmo(){
     });
     var items=Object.keys(cnt).map(function(k){ return {name:k, n:cnt[k]}; });
     items.sort(function(a,b){ return b.n-a.n; });
-    donut(cl, items.slice(0,7), cvh(cl,200), "TURNS");
+    donut(cl, items.slice(0,12), cvh(cl,200), "TURNS");
     /* 图例：光有颜色分不出来是哪一种情绪 —— 饼图没用说明就只是装饰 */
     var lg=$("#emoLegend");
     if(lg){
       var PAL2=["#57c8f0","#2fd07d","#9d8bff","#e8b44a","#ff5f6d","#5f9ea0","#c78bb8"];
-      lg.innerHTML = items.slice(0,7).map(function(it,i){
+      lg.innerHTML = items.slice(0,12).map(function(it,i){
         return '<span style="display:inline-flex;align-items:center;gap:6px">'
           + '<i style="width:9px;height:9px;border-radius:2px;background:'
           + PAL2[i%PAL2.length] + ';display:inline-block"></i>'
@@ -2974,6 +3013,21 @@ function drawEmo(){
       }).join("");
     }
   }
+  /* 24 种激素：一格一条，各自缩放（不同激素量纲差一个数量级，同轴就只剩压扁的线） */
+  var c24=$("#cvE24");
+  if(c24) drawHormoneGrid(c24, em);
+  /* 叠在一张表上：按「相对各自基线的偏差%」画，这样 24 条才可比 */
+  var cov=$("#cvEOV");
+  if(cov) drawHormoneOverlay(cov, em);
+  /* 动态参数：门控/疲劳/心境/安全感 0~1，预期误差单独一条 −1~+1 */
+  var cpm=$("#cvEPM");
+  if(cpm) lineChart(cpm, [
+    {color:"#2fd07d", pts:em.map(function(x){ var p=x.params||{}; return p.gate; })},
+    {color:"#e8b44a", pts:em.map(function(x){ var p=x.params||{}; return p.fatigue; })},
+    {color:"#9d8bff", pts:em.map(function(x){ var p=x.params||{}; return p.mood; })},
+    {color:"#5fb3d4", pts:em.map(function(x){ return (x.safety!=null&&x.safety>=0)?x.safety:null; })},
+    {color:"#c78bb8", pts:em.map(function(x){ var p=x.params||{}; return (p.rpe==null?null:(p.rpe+1)/2); })}
+  ], {height:cvh(cpm,170), min:0, max:1});
   /* 当前读数走 /viscera：那里用的是卡自己的 viscera 模块，控制台不重写公式 */
   API("/viscera").then(function(j){
     var v=(j&&j.viscera)||{}, b=v.body||{}, e=v.emotion||{};
@@ -2983,6 +3037,8 @@ function drawEmo(){
       box.innerHTML = kvMini("心率", (b.hr||0).toFixed(1), "次/分")
         + kvMini("呼吸", (b.resp||0).toFixed(1), "次/分")
         + kvMini("脸红", (b.face||0).toFixed(2), "0→1")
+        + kvMini("体温", (b.temp||0).toFixed(1), "℃")
+        + kvMini("肌肉", (b.tension||0).toFixed(2), "紧绷")
         + kvMini("交感", (v.symp||0).toFixed(2), "紧张")
         + kvMini("副交感", (v.para||0).toFixed(2), "松弛")
         + kvMini("多巴胺", (st.DA!=null?st.DA:0).toFixed(2), "调质")
@@ -2993,6 +3049,21 @@ function drawEmo(){
       box.insertAdjacentHTML("beforeend",
         '<div style="flex-basis:100%;font:12px sans-serif;color:#8b95a5">' + esc(v.text||"") + '</div>');
     }
+    var pb=$("#emoParams");
+    if(pb && em.length){
+      var lastP=(em[em.length-1]||{}).params||{}, st2=e.state||{};
+      pb.innerHTML = kvMini("轮次", (lastP.turn!=null?lastP.turn:"—"), "")
+        + kvMini("实际值 V", (lastP.v_actual!=null?Number(lastP.v_actual).toFixed(2):"—"), "0→1")
+        + kvMini("预期值 V̂", (lastP.v_expect!=null?Number(lastP.v_expect).toFixed(2):"—"), "0→1")
+        + kvMini("预期误差", (lastP.rpe!=null?Number(lastP.rpe).toFixed(3):"—"), "−1→+1")
+        + kvMini("门控", (lastP.gate!=null?Number(lastP.gate).toFixed(2):"—"), "暧昧通路")
+        + kvMini("疲劳", (lastP.fatigue!=null?Number(lastP.fatigue).toFixed(2):"—"), "皮质醇累积")
+        + kvMini("心境", (lastP.mood!=null?Number(lastP.mood).toFixed(2):"—"), "内源偏移")
+        + kvMini("长程预期", (lastP.expect_global!=null?Number(lastP.expect_global).toFixed(2):"—"), "全局学到的")
+        + kvMini("场景", esc(lastP.scenario||"—"), "")
+        + kvMini("五调质", esc(["DA","NE","OT","5HT","CORT"].map(function(k){
+            return k+" "+(st2[k]!=null?Number(st2[k]).toFixed(2):"—"); }).join(" · ")), "");
+    }
     var how=$("#emoHow");
     if(how) how.innerHTML =
       '<div>认知层算「这件事比预期好还是差」（预期误差 RPE），'
@@ -3000,6 +3071,135 @@ function drawEmo(){
       + '<div>单向衰减、脉冲封顶 ±0.5、慢变量只吃四成 —— 一句话改不掉三天的依恋。</div>'
       + '<div>数值永远不进模型：给她的只有「心跳快了一拍；呼吸变浅了」这种话。</div>';
   }).catch(function(){});
+}
+function drawHormoneOverlay(cv, em){
+  /* 24 条叠一张表：纵轴是「相对自己基线的偏差百分数」。
+     绝对值没法同轴 —— 皮质醇 18 和血清素 55 放一起，只有一条看得见。 */
+  var dpr=window.devicePixelRatio||1;
+  var W=cv.clientWidth||900, H=cv.clientHeight||300;
+  cv.width=W*dpr; cv.height=H*dpr;
+  var g=cv.getContext("2d"); g.setTransform(dpr,0,0,dpr,0,0);
+  g.clearRect(0,0,W,H);
+  if(!em || !em.length){ return; }
+  var keys=[], seen={};
+  em.forEach(function(x){ var hh=x.hormones||{};
+    Object.keys(hh).forEach(function(k){ if(!seen[k]){ seen[k]=1; keys.push(k); } }); });
+  if(!keys.length){ return; }
+  var base=(em[em.length-1]||{}).params||{}; base=base.base||{};
+  var PAD={l:52,r:10,t:12,b:18};
+  var pw=W-PAD.l-PAD.r, ph=H-PAD.t-PAD.b;
+  var lo=-90, hi=200;                       /* 偏差%的显示范围 */
+  /* 网格与刻度 */
+  g.strokeStyle="rgba(255,255,255,0.06)"; g.lineWidth=1; g.font="10px ui-monospace,monospace";
+  [-90,-45,0,45,90,135,180].forEach(function(v){
+    var y=PAD.t+ph*(1-(v-lo)/(hi-lo));
+    g.beginPath(); g.moveTo(PAD.l,y); g.lineTo(PAD.l+pw,y); g.stroke();
+    g.fillStyle = (v===0)? "rgba(232,180,74,0.85)" : "#5c6675";
+    g.fillText(v+"%", 6, y+3);
+  });
+  if(true){ /* 0% 基线更醒目一点 */
+    var y0=PAD.t+ph*(1-(0-lo)/(hi-lo));
+    g.strokeStyle="rgba(232,180,74,0.35)"; g.setLineDash([4,4]);
+    g.beginPath(); g.moveTo(PAD.l,y0); g.lineTo(PAD.l+pw,y0); g.stroke();
+    g.setLineDash([]);
+  }
+  var PAL=["#57c8f0","#2fd07d","#9d8bff","#e8b44a","#ff5f6d","#5f9ea0","#c78bb8","#7fd1ae",
+           "#f2a65a","#8ab6f9","#b6e36a","#e07be0","#63d2c0","#f0d264","#a3a3ff","#ff8f6b",
+           "#4fc3f7","#8bc34a","#ba68c8","#ffb74d","#4db6ac","#f06292","#9575cd","#aed581"];
+  var chips=[];
+  keys.forEach(function(k,idx){
+    var b0=(base[k]!=null)? Number(base[k])
+           : ((typeof HBASE!=="undefined" && HBASE[k]!=null)? Number(HBASE[k]) : null);
+    var vals=em.map(function(x){
+      var hh=x.hormones||{}; var v=(hh[k]==null? null : Number(hh[k]));
+      if(v==null || !b0) return null;
+      return (v-b0)/b0*100;
+    });
+    var col=PAL[idx%PAL.length];
+    g.strokeStyle=col; g.lineWidth=1.2; g.globalAlpha=0.85;
+    g.beginPath(); var started=false;
+    vals.forEach(function(v,i){
+      if(v==null || !isFinite(v)){ started=false; return; }
+      var x=PAD.l+pw*(em.length<2?0.5:i/(em.length-1));
+      var y=PAD.t+ph*(1-(Math.max(lo,Math.min(hi,v))-lo)/(hi-lo));
+      if(!started){ g.moveTo(x,y); started=true; } else { g.lineTo(x,y); }
+    });
+    g.stroke(); g.globalAlpha=1;
+    var fin=vals.filter(function(v){ return v!=null; });
+    var cur=fin.length? fin[fin.length-1] : null;
+    var nmp=(typeof HNAME!=="undefined" && HNAME[k]) || [k,""];
+    chips.push({k:k, c:col, n:nmp[0], en:nmp[1], v:cur});
+  });
+  var lg=$("#emoHormLegend");
+  if(lg){
+    lg.innerHTML = chips.map(function(t){
+      var s=(t.v==null)? "—" : (t.v>=0? "+":"") + t.v.toFixed(0) + "%";
+      return '<span style="display:inline-flex;align-items:center;gap:5px">'
+        + '<i style="width:8px;height:8px;border-radius:2px;background:'+t.c+';display:inline-block"></i>'
+        + esc(t.n) + ' <span style="color:#6f7b8b">'+esc(t.en||"")+'</span>'
+        + ' <b style="color:'+(t.v==null?'#6f7b8b':(t.v>=0?'#8fe3b3':'#ff9aa3'))+'">'+s+'</b></span>';
+    }).join("");
+  }
+}
+function drawHormoneGrid(cv, em){
+  /* 24 格小图。每格单独缩放 —— 不同激素量纲差得远，共用一根纵轴就只剩压扁的线。 */
+  var dpr=window.devicePixelRatio||1;
+  var W=cv.clientWidth||900, H=cv.clientHeight||360;
+  cv.width=W*dpr; cv.height=H*dpr;
+  var g=cv.getContext("2d"); g.setTransform(dpr,0,0,dpr,0,0);
+  g.clearRect(0,0,W,H);
+  if(!em || !em.length){ return; }
+  var keys=[], seen={};
+  em.forEach(function(x){ var hh=x.hormones||{};
+    Object.keys(hh).forEach(function(k){ if(!seen[k]){ seen[k]=1; keys.push(k); } }); });
+  if(!keys.length){ return; }
+  var COLS=8, ROWS=Math.ceil(keys.length/COLS);
+  var cw=W/COLS, chh=H/ROWS;
+  keys.forEach(function(k,idx){
+    var cx=(idx%COLS)*cw, cy=Math.floor(idx/COLS)*chh;
+    var vals=em.map(function(x){ var hh=x.hormones||{};
+      return (hh[k]==null? null : Number(hh[k])); });
+    var fin=vals.filter(function(v){ return v!=null && isFinite(v); });
+    var last=fin.length? fin[fin.length-1] : 0;
+    var mx=Math.max.apply(null,fin.concat([1])), mn=Math.min.apply(null,fin.concat([0]));
+    var span=Math.max(1e-6, mx-mn);
+    /* 基线：最后一次样本里引擎报的 base */
+    var base=null, lp=(em[em.length-1]||{}).params||{};
+    if(lp.base && lp.base[k]!=null){ base=Number(lp.base[k]); }
+    /* 引擎只报五条调质的基线；24 种激素的出厂值在 HBASE 里 */
+    if(base==null && typeof HBASE!=="undefined" && HBASE[k]!=null){ base=Number(HBASE[k]); }
+    var pad=5, ph=chh-pad*2-34, pw=cw-pad*2;
+    /* 图框 + 基线虚线 */
+    g.fillStyle="#0f141b"; g.fillRect(cx+2,cy+2,cw-4,chh-4);
+    g.strokeStyle="rgba(255,255,255,0.05)"; g.lineWidth=1;
+    g.strokeRect(cx+2,cy+2,cw-4,chh-4);
+    if(base!=null && mx>mn){
+      var by=cy+pad+34+ph*(1-(base-mn)/span);
+      g.strokeStyle="rgba(232,180,74,0.35)"; g.setLineDash([3,3]);
+      g.beginPath(); g.moveTo(cx+pad,by); g.lineTo(cx+pad+pw,by); g.stroke();
+      g.setLineDash([]);
+    }
+    /* 折线：比基线高就绿、低就红 —— 一眼看出「升了还是掉了」 */
+    var up=(base==null)? true : (last>=base);
+    g.strokeStyle = up? "#2fd07d" : "#ff5f6d"; g.lineWidth=1.4;
+    g.beginPath(); var started=false;
+    vals.forEach(function(v,i){
+      if(v==null || !isFinite(v)) { started=false; return; }
+      var x=cx+pad+pw*(em.length<2?0.5:i/(em.length-1));
+      var y=cy+pad+34+ph*(1-(v-mn)/span);
+      if(!started){ g.moveTo(x,y); started=true; } else { g.lineTo(x,y); }
+    });
+    g.stroke();
+    /* 名字：中文 + 英文 + key，一格三行，不认得哪条就没法盯 */
+    var nmp=(typeof HNAME!=="undefined" && HNAME[k]) || [k, ""];
+    g.fillStyle="#c9d4e2"; g.font="9px ui-sans-serif,sans-serif";
+    g.fillText(nmp[0], cx+pad, cy+pad+8);
+    g.fillStyle="#6f7b8b"; g.font="8px ui-sans-serif,sans-serif";
+    g.fillText((nmp[1]||"").slice(0,18), cx+pad, cy+pad+19);
+    g.fillStyle = up? "#8fe3b3" : "#ff9aa3"; g.font="bold 10px ui-monospace,monospace";
+    g.fillText(last.toFixed(2) + (base!=null? (" ("+base.toFixed(2)+")") : ""),
+               cx+pad, cy+pad+31);
+  });
 }
 function viewTime(){
   var m=(S.data&&S.data.metrics)||{};
@@ -4232,6 +4432,9 @@ setInterval(function(){ loadTail(); }, 30000);
 window.addEventListener("resize", function(){ draw(); });
 </script></body></html>
 """
+PAGE = PAGE.replace("__HORMONE_LABELS__", '{"dopa": ["多巴胺", "Dopamine"], "nora": ["去甲肾上腺素", "Norepinephrine"], "cort": ["皮质醇", "Cortisol"], "sero": ["血清素", "Serotonin"], "oxy": ["催产素", "Oxytocin"], "endo": ["内啡肽", "Endorphin"], "gonad": ["促性腺激素", "Gonadotropin"], "mel": ["褪黑素", "Melatonin"], "gaba": ["γ-氨基丁酸", "GABA"], "ach": ["乙酰胆碱", "Acetylcholine"], "adh": ["抗利尿激素", "Vasopressin"], "dop": ["多巴", "L-DOPA"], "cck": ["胆囊收缩素", "Cholecystokinin"], "gh": ["生长激素", "Growth hormone"], "prl": ["催乳素", "Prolactin"], "hist": ["组胺", "Histamine"], "adeno": ["腺苷", "Adenosine"], "kyn": ["犬尿氨酸", "Kynurenine"], "npy": ["神经肽Y", "Neuropeptide Y"], "nps": ["神经肽S", "Neuropeptide S"], "ofq": ["孤啡肽", "Nociceptin"], "enk": ["脑啡肽", "Enkephalin"], "orex": ["食欲素", "Orexin"], "testo": ["睾酮", "Testosterone"]}')
+PAGE = PAGE.replace("__HORMONE_BASE__", '{"dopa": 20.0, "nora": 15.0, "cort": 18.0, "sero": 40.0, "oxy": 30.0, "endo": 25.0, "gonad": 10.0, "mel": 22.0, "gaba": 35.0, "ach": 28.0, "adh": 24.0, "dop": 20.0, "cck": 16.0, "gh": 14.0, "prl": 26.0, "hist": 12.0, "adeno": 20.0, "kyn": 15.0, "npy": 32.0, "nps": 18.0, "ofq": 13.0, "enk": 17.0, "orex": 21.0, "testo": 11.0}')
+
 
 
 def main(argv=None):
