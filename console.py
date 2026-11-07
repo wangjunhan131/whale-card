@@ -3249,14 +3249,38 @@ function drawHormoneOverlay(cv, em, dropped){
   g.strokeStyle="rgba(232,180,74,0.35)"; g.setLineDash([4,4]);
   g.beginPath(); g.moveTo(PAD.l,y0); g.lineTo(PAD.l+pw,y0); g.stroke();
   g.setLineDash([]);
-  /* 第二遍：画线 */
+  /* 第二遍：画线。
+     🔴 m35995：240 点 × 24 条叠在一起就是一坨毛线，什么起伏都看不出来。
+     两条改动：①按「离零线的平均幅度」排序，只有前 6 条画亮线，
+     其余压到 0.16 透明度当背景纹理；②点数超过 150 就分桶取平均。 */
+  var _amp = series.map(function(s,i){
+    var a=0,n=0;
+    s.vals.forEach(function(v){ if(v!=null && isFinite(v)){ a+=Math.abs(v); n++; } });
+    return {i:i, a: n? a/n : 0};
+  }).sort(function(x,y){ return y.a-x.a; });
+  var _top={}; _amp.slice(0,6).forEach(function(o){ _top[o.i]=1; });
+  var MAXP=150;
+  function _ds(vals){
+    if(vals.length<=MAXP) return vals;
+    var out=[], bsz=Math.ceil(vals.length/MAXP);
+    for(var i2=0;i2<vals.length;i2+=bsz){
+      var sum=0,cnt=0;
+      for(var j=i2;j<Math.min(i2+bsz,vals.length);j++){
+        if(vals[j]!=null && isFinite(vals[j])){ sum+=vals[j]; cnt++; }
+      }
+      out.push(cnt? sum/cnt : null);
+    }
+    return out;
+  }
   var chips=[];
-  series.forEach(function(s){
-    g.strokeStyle=s.col; g.lineWidth=1.2; g.globalAlpha=0.85;
+  series.forEach(function(s,si){
+    var on=!!_top[si];
+    s.vals=_ds(s.vals);
+    g.strokeStyle=s.col; g.lineWidth=on?1.6:0.8; g.globalAlpha=on?0.92:0.16;
     g.beginPath(); var started=false;
     s.vals.forEach(function(v,i){
       if(v==null || !isFinite(v)){ started=false; return; }
-      var x=PAD.l+pw*(em.length<2?0.5:i/(em.length-1));
+      var x=PAD.l+pw*(s.vals.length<2?0.5:i/(s.vals.length-1));
       var y=Y(v);
       if(!started){ g.moveTo(x,y); started=true; } else { g.lineTo(x,y); }
     });
@@ -3271,7 +3295,7 @@ function drawHormoneOverlay(cv, em, dropped){
     s.vals.forEach(function(v,i){
       if(v==null || !isFinite(v)) return;
       if(v<=hi+1e-9 && v>=lo-1e-9) return;
-      var x=PAD.l+pw*(em.length<2?0.5:i/(em.length-1));
+      var x=PAD.l+pw*(s.vals.length<2?0.5:i/(s.vals.length-1));
       var top=(v>hi);
       g.fillStyle=s.col; g.globalAlpha=0.55;
       g.beginPath();
