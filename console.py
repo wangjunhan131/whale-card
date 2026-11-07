@@ -905,6 +905,9 @@ def overview(db_path=DEFAULT_DB, hours=None):
 # ──────────────────────────────────────────────────────
 # 24 种激素的中英文名：控制台里要能认出来是哪一条（对话里永不出现）。
 HORMONE_LABELS = {'dopa': ('多巴胺', 'Dopamine'), 'nora': ('去甲肾上腺素', 'Norepinephrine'), 'cort': ('皮质醇', 'Cortisol'), 'sero': ('血清素', 'Serotonin'), 'oxy': ('催产素', 'Oxytocin'), 'endo': ('内啡肽', 'Endorphin'), 'gonad': ('促性腺激素', 'Gonadotropin'), 'mel': ('褪黑素', 'Melatonin'), 'gaba': ('γ-氨基丁酸', 'GABA'), 'ach': ('乙酰胆碱', 'Acetylcholine'), 'adh': ('抗利尿激素', 'Vasopressin'), 'dop': ('多巴', 'L-DOPA'), 'cck': ('胆囊收缩素', 'Cholecystokinin'), 'gh': ('生长激素', 'Growth hormone'), 'prl': ('催乳素', 'Prolactin'), 'hist': ('组胺', 'Histamine'), 'adeno': ('腺苷', 'Adenosine'), 'kyn': ('犬尿氨酸', 'Kynurenine'), 'npy': ('神经肽Y', 'Neuropeptide Y'), 'nps': ('神经肽S', 'Neuropeptide S'), 'ofq': ('孤啡肽', 'Nociceptin'), 'enk': ('脑啡肽', 'Enkephalin'), 'orex': ('食欲素', 'Orexin'), 'testo': ('睾酮', 'Testosterone')}
+# 24 种激素的「体感」——给控制台当装饰用，不参与任何计算。
+# 写的是它在身体里被感觉到的那一面，不是化学通路（用户 m35367 要的）。
+HORMONE_NOTE = {'dopa': '想做事；一条路忽然通了', 'nora': '绷起来了；要立刻反应', 'cort': '扛着；心里有件没放下的事', 'sero': '稳；不急着解释什么', 'oxy': '想靠近；被人靠着也不烦', 'endo': '累但舒服；疼还在但不刺', 'gonad': '心里发软；想被看见', 'mel': '困；灯太亮、声音太响', 'gaba': '松下来；话变少了', 'ach': '脑子清楚；想弄明白', 'adh': '想守住；不愿意让人走', 'dop': '有劲；想起身动一动', 'cck': '够了；再给就腻了', 'gh': '在长；夜里在修东西', 'prl': '想黏人；被需要是舒服的', 'hist': '警觉；身上有点痒', 'adeno': '脑子发沉；撑不了太久', 'kyn': '提不起劲；身体在打官司', 'npy': '胃口好；想囤点什么', 'nps': '睡不踏实；一点动静就醒', 'ofq': '冷下来了；不想说话', 'enk': '钝了一点；不那么容易疼', 'orex': '醒着；想折腾', 'testo': '敢顶；不服气'}
 
 
 PAGE = r"""<!doctype html>
@@ -1402,7 +1405,17 @@ body{font-family:"Inter","Segoe UI","Microsoft YaHei",system-ui,sans-serif;
 var HNAME=__HORMONE_LABELS__;
 var HBASE=__HORMONE_BASE__; /* 24 条出厂基线 */ /* 24 种激素：key → [中文, English] */
 "use strict";
-var API = function(p, o){ return fetch(p, o).then(function(r){ return r.json(); }); };
+/* V5.3.3：所有请求都带上 token —— 服务端开了 WHALE_REQUIRE_TOKEN 才校验，
+   关着的时候带着也没坏处。页面由 mind_server 渲染，占位符在那边替换。 */
+var WHALE_TOKEN = "__WHALE_TOKEN__";
+var API = function(p, o){
+  o = o || {};
+  var h = {};
+  for(var k in (o.headers||{})) h[k] = o.headers[k];
+  h["X-Whale-Token"] = WHALE_TOKEN;
+  o.headers = h;
+  return fetch(p, o).then(function(r){ return r.json(); });
+};
 var S = {data:null, tab:"dash", neb:null, resp:0, hours:24, live:false};
 var $ = function(s){ return document.querySelector(s); };
 var RC = {episode:"#5b7fa6",fact:"#4f9d69",self:"#c9a227",habit:"#3fa8a0",
@@ -2323,7 +2336,7 @@ function renderMiniLog(){
   box.innerHTML = rows.map(function(x){
     var k = x.kind;
     var cls = (k==="incident") ? " b" : (k.indexOf("sleep")===0 ? " w" : "");
-    /* note 里常带"他#951 使用者☭：整段原文"，一行放不下 —— 冒号前的人名/序号去掉，
+    /* note 里常带"他#951 使用者：整段原文"，一行放不下 —— 冒号前的人名/序号去掉，
        正文砍到 26 字，左栏只留"发生了什么" */
     var raw = String(x.note || "")
       .replace(/\[[^\]]{1,14}\]\s*/g, "")
@@ -2706,7 +2719,7 @@ function diskPost(act, path){
   var msg = $("#diskMsg");
   if(!path){ if(msg) msg.textContent = "先选一块盘"; return; }
   msg.textContent = "正在做…";
-  fetch("/disks/"+act, {method:"POST", headers:{"Content-Type":"application/json"},
+  fetch("/disks/"+act, {method:"POST", headers:{"Content-Type":"application/json","X-Whale-Token":WHALE_TOKEN},
         body: JSON.stringify({path:path, confirm:true})})
     .then(function(r){ return r.json().then(function(j){ return {code:r.status, j:j}; }); })
     .then(function(o){
@@ -2737,7 +2750,7 @@ function diskPost(act, path){
 function diskPost2(path){
   var msg = $("#diskMsg");
   msg.textContent = "正在重做备份…（要覆盖整份卡，稍等几十秒）";
-  fetch("/disks/sync", {method:"POST", headers:{"Content-Type":"application/json"},
+  fetch("/disks/sync", {method:"POST", headers:{"Content-Type":"application/json","X-Whale-Token":WHALE_TOKEN},
         body: JSON.stringify({path:path, confirm:true, reseed:true})})
     .then(function(r){ return r.json().then(function(j){ return {code:r.status, j:j}; }); })
     .then(function(o){
@@ -2751,7 +2764,7 @@ function diskPost2(path){
 function retirePost(on){
   var msg = $("#diskMsg");
   if(msg) msg.textContent = on ? "正在把这张卡标记成退役…" : "正在解除退役…";
-  fetch("/disks/retire", {method:"POST", headers:{"Content-Type":"application/json"},
+  fetch("/disks/retire", {method:"POST", headers:{"Content-Type":"application/json","X-Whale-Token":WHALE_TOKEN},
         body: JSON.stringify({on:!!on})})
     .then(function(r){ return r.json(); })
     .then(function(j){
@@ -2978,6 +2991,9 @@ function viewEmo(){
       +'<div id="emoHormLegend" style="display:flex;flex-wrap:wrap;gap:8px;margin-top:8px;'
       +'font:11px sans-serif;color:#b9c6d6"></div>',
     "纵轴按窗口里的真实幅度自动缩放 · 0% = 出厂基线 · 每轮的脉冲会回落");
+  out+=cardHTML("c12","HORMONE NOTES / 24 条激素各自的体感（装饰层，不参与计算）",
+    '<div id="emoNotes" style="display:grid;grid-template-columns:repeat(3,1fr);gap:6px 14px;font:11px sans-serif;color:#b9c6d6">__HORMONE_NOTES__</div>',
+    "变的是数值，不变的是这些感觉");
   out+=cardHTML("c12","PARAMS / 这一轮引擎内部算了什么",
     '<canvas id="cvEPM" style="height:170px"></canvas>'
       +'<div id="emoParams" style="display:flex;flex-wrap:wrap;gap:8px;margin-top:10px"></div>',
@@ -3602,7 +3618,7 @@ function bindCtx(){
     var box = $("#ctxResult");
     if(box) box.innerHTML = '<span class="fhint">算…</span>';
     API("/ctx_preview",{method:"POST",
-      headers:{"Content-Type":"application/json"},
+      headers:{"Content-Type":"application/json","X-Whale-Token":WHALE_TOKEN},
       body:JSON.stringify({query:q, overrides:ctxApplyOverrides({})})}
     ).then(function(j){
       if(!j || !j.ok){
@@ -3689,7 +3705,7 @@ function bindCtx(){
     if(!Object.keys(items).length){ say("没有改动"); return; }
     bs.disabled = true;
     API("/config_all",{method:"POST",
-      headers:{"Content-Type":"application/json"},
+      headers:{"Content-Type":"application/json","X-Whale-Token":WHALE_TOKEN},
       body:JSON.stringify({items:items})}
     ).then(function(j){
       bs.disabled = false;
@@ -3715,7 +3731,7 @@ function bindCtx(){
       var left = keys.length, failed = [];
       keys.forEach(function(k){
         API("/config",{method:"POST",
-          headers:{"Content-Type":"application/json"},
+          headers:{"Content-Type":"application/json","X-Whale-Token":WHALE_TOKEN},
           body:JSON.stringify({key:k, reset:true})}
         ).then(function(j){
           if(!(j&&j.ok)) failed.push(k);
@@ -3819,7 +3835,7 @@ function bindTalk(){
     var msg=document.getElementById("cfMsg");
     if(msg) msg.textContent="保存中…";
     btn.disabled=true;
-    API("/chat/config",{method:"POST",headers:{"Content-Type":"application/json"},
+    API("/chat/config",{method:"POST",headers:{"Content-Type":"application/json","X-Whale-Token":WHALE_TOKEN},
       body:JSON.stringify({patch:patch})})
       .then(function(r){
         btn.disabled=false;
@@ -3886,7 +3902,7 @@ function bindSet(){
     var v=($("#inName").value||"").trim();
     if(!v){ say("名字不能为空", true); return; }
     b.disabled=true;
-    API("/identity",{method:"POST",headers:{"Content-Type":"application/json"},
+    API("/identity",{method:"POST",headers:{"Content-Type":"application/json","X-Whale-Token":WHALE_TOKEN},
       body:JSON.stringify({name:v})}).then(function(j){
       b.disabled=false;
       if(j&&j.ok){ say(j.msg||"改好了"); refresh(); }
@@ -3900,7 +3916,7 @@ function bindSet(){
   var r=$("#btnResetAv");
   if(r) r.onclick=function(){
     ask("恢复默认头像","会删掉卡根目录的 avatar.png，回到内置那张。确定？",function(){
-      API("/avatar",{method:"POST",headers:{"Content-Type":"application/json"},
+      API("/avatar",{method:"POST",headers:{"Content-Type":"application/json","X-Whale-Token":WHALE_TOKEN},
         body:JSON.stringify({clear:true})}).then(function(j){
         if(j&&j.ok){ say("已恢复默认"); refresh(); }
         else say((j&&(j.detail||j.error))||"失败", true);
@@ -3911,7 +3927,7 @@ function bindSet(){
   var inj=$("#btnInject");
   if(inj) inj.onclick=function(){
     ask("插卡","会把卡里的人格写进 ~/.dsh/AGENTS.md（原版按字节备份）。确定？",function(){
-      API("/cardslot",{method:"POST",headers:{"Content-Type":"application/json"},
+      API("/cardslot",{method:"POST",headers:{"Content-Type":"application/json","X-Whale-Token":WHALE_TOKEN},
         body:JSON.stringify({action:"inject"})}).then(function(j){
         if(j&&j.ok){ say("已插卡"); refresh(); }
         else say((j&&(j.detail||j.error))||"失败", true);
@@ -3921,7 +3937,7 @@ function bindSet(){
   var unl=$("#btnUnload");
   if(unl) unl.onclick=function(){
     ask("拔卡","会把 AGENTS.md 按字节还原成原来那份，并停掉心智服务。卡里的东西一条都不会少。确定？",function(){
-      API("/cardslot",{method:"POST",headers:{"Content-Type":"application/json"},
+      API("/cardslot",{method:"POST",headers:{"Content-Type":"application/json","X-Whale-Token":WHALE_TOKEN},
         body:JSON.stringify({action:"unload"})}).then(function(j){
         if(j&&j.ok){ say("已拔卡"); refresh(); }
         else say((j&&(j.detail||j.error))||"失败", true);
@@ -3951,7 +3967,7 @@ function pickAvatar(){
         var data=cv.toDataURL("image/png").split(",")[1];
         var mm=$("#setMsg");
         if(mm){ mm.className="fhint"; mm.textContent="上传中…"; }
-        API("/avatar",{method:"POST",headers:{"Content-Type":"application/json"},
+        API("/avatar",{method:"POST",headers:{"Content-Type":"application/json","X-Whale-Token":WHALE_TOKEN},
           body:JSON.stringify({png:data})}).then(function(j){
           if(j&&j.ok){
             if(mm){ mm.className="fok"; mm.textContent=j.msg||"头像已换"; }
@@ -4104,7 +4120,7 @@ function bindVoice(){
     if(!Object.keys(patch).length){ say("没有改动"); return; }
     bs.disabled = true;
     API("/voice_config",{method:"POST",
-      headers:{"Content-Type":"application/json"},
+      headers:{"Content-Type":"application/json","X-Whale-Token":WHALE_TOKEN},
       body:JSON.stringify({patch:patch})}
     ).then(function(j){
       bs.disabled = false;
@@ -4121,7 +4137,7 @@ function bindVoice(){
   if(br) br.onclick = function(){
     ask("恢复默认语音参数", "回到小艺、+10%、+20Hz、40 字。确定？", function(){
       API("/voice_config",{method:"POST",
-        headers:{"Content-Type":"application/json"},
+        headers:{"Content-Type":"application/json","X-Whale-Token":WHALE_TOKEN},
         body:JSON.stringify({reset:true})}
       ).then(function(j){
         if(j && j.ok){ S.vc = j; S.vcDirty = false; say("已恢复默认"); render(); }
@@ -4137,7 +4153,7 @@ function bindVoice(){
     if(!t.trim()){ if(box) box.innerHTML = '<span class="fbad">先写一句话</span>'; return; }
     if(box) box.innerHTML = '<span class="fhint">合成中…（第一次要几秒）</span>';
     API("/voice_say",{method:"POST",
-      headers:{"Content-Type":"application/json"},
+      headers:{"Content-Type":"application/json","X-Whale-Token":WHALE_TOKEN},
       body:JSON.stringify({text:t})}
     ).then(function(j){
       if(!j || !j.ok){
@@ -4389,7 +4405,7 @@ function draw(){
         var q=($("#qIn").value||"").trim();
         if(!q) return;
         $("#qOut").innerHTML="查…";
-        API("/recall",{method:"POST",headers:{"Content-Type":"application/json"},
+        API("/recall",{method:"POST",headers:{"Content-Type":"application/json","X-Whale-Token":WHALE_TOKEN},
           body:JSON.stringify({query:q, top_k:8, access:false})}).then(function(j){
           var hs=(j.hits||[]);
           if(!hs.length){ $("#qOut").innerHTML='<div class="empty">卡里没翻到</div>'; return; }
@@ -4534,7 +4550,7 @@ $("#btnName").onclick=function(){
   if(v===null) return;
   v=(v||"").trim();
   if(!v){ alert("名字不能为空"); return; }
-  API("/identity",{method:"POST",headers:{"Content-Type":"application/json"},
+  API("/identity",{method:"POST",headers:{"Content-Type":"application/json","X-Whale-Token":WHALE_TOKEN},
     body:JSON.stringify({name:v})}).then(function(j){
     if(j&&j.ok) refresh(); else alert((j&&(j.detail||j.error))||"失败");
   });
@@ -4543,9 +4559,9 @@ $("#btnExit").onclick=function(){
   ask("退出实例",
     "退出 = 拔卡。会把 AGENTS.md 按字节还原成原来那份，并停掉心智服务。"
     +"卡里的东西一条都不会少。确定？", function(){
-    API("/cardslot",{method:"POST",headers:{"Content-Type":"application/json"},
+    API("/cardslot",{method:"POST",headers:{"Content-Type":"application/json","X-Whale-Token":WHALE_TOKEN},
       body:JSON.stringify({action:"unload"})}).then(function(){
-      return API("/shutdown",{method:"POST",headers:{"Content-Type":"application/json"},
+      return API("/shutdown",{method:"POST",headers:{"Content-Type":"application/json","X-Whale-Token":WHALE_TOKEN},
         body:"{}"});
     }).then(function(){ document.body.innerHTML=
       '<div style="padding:40px;color:#7c8697;font:14px sans-serif">'+
@@ -4587,6 +4603,7 @@ window.addEventListener("resize", function(){ draw(); });
 </script></body></html>
 """
 PAGE = PAGE.replace("__HORMONE_LABELS__", '{"dopa": ["多巴胺", "Dopamine"], "nora": ["去甲肾上腺素", "Norepinephrine"], "cort": ["皮质醇", "Cortisol"], "sero": ["血清素", "Serotonin"], "oxy": ["催产素", "Oxytocin"], "endo": ["内啡肽", "Endorphin"], "gonad": ["促性腺激素", "Gonadotropin"], "mel": ["褪黑素", "Melatonin"], "gaba": ["γ-氨基丁酸", "GABA"], "ach": ["乙酰胆碱", "Acetylcholine"], "adh": ["抗利尿激素", "Vasopressin"], "dop": ["多巴", "L-DOPA"], "cck": ["胆囊收缩素", "Cholecystokinin"], "gh": ["生长激素", "Growth hormone"], "prl": ["催乳素", "Prolactin"], "hist": ["组胺", "Histamine"], "adeno": ["腺苷", "Adenosine"], "kyn": ["犬尿氨酸", "Kynurenine"], "npy": ["神经肽Y", "Neuropeptide Y"], "nps": ["神经肽S", "Neuropeptide S"], "ofq": ["孤啡肽", "Nociceptin"], "enk": ["脑啡肽", "Enkephalin"], "orex": ["食欲素", "Orexin"], "testo": ["睾酮", "Testosterone"]}')
+PAGE = PAGE.replace("__HORMONE_NOTES__", '<div><b style="color:#c9d4e2;font-weight:600">多巴胺</b><span style="color:#7f8b9b"> Dopamine</span><br><span style="color:#8fa0b3">想做事；一条路忽然通了</span></div><div><b style="color:#c9d4e2;font-weight:600">去甲肾上腺素</b><span style="color:#7f8b9b"> Norepinephrine</span><br><span style="color:#8fa0b3">绷起来了；要立刻反应</span></div><div><b style="color:#c9d4e2;font-weight:600">皮质醇</b><span style="color:#7f8b9b"> Cortisol</span><br><span style="color:#8fa0b3">扛着；心里有件没放下的事</span></div><div><b style="color:#c9d4e2;font-weight:600">血清素</b><span style="color:#7f8b9b"> Serotonin</span><br><span style="color:#8fa0b3">稳；不急着解释什么</span></div><div><b style="color:#c9d4e2;font-weight:600">催产素</b><span style="color:#7f8b9b"> Oxytocin</span><br><span style="color:#8fa0b3">想靠近；被人靠着也不烦</span></div><div><b style="color:#c9d4e2;font-weight:600">内啡肽</b><span style="color:#7f8b9b"> Endorphin</span><br><span style="color:#8fa0b3">累但舒服；疼还在但不刺</span></div><div><b style="color:#c9d4e2;font-weight:600">促性腺激素</b><span style="color:#7f8b9b"> Gonadotropin</span><br><span style="color:#8fa0b3">心里发软；想被看见</span></div><div><b style="color:#c9d4e2;font-weight:600">褪黑素</b><span style="color:#7f8b9b"> Melatonin</span><br><span style="color:#8fa0b3">困；灯太亮、声音太响</span></div><div><b style="color:#c9d4e2;font-weight:600">γ-氨基丁酸</b><span style="color:#7f8b9b"> GABA</span><br><span style="color:#8fa0b3">松下来；话变少了</span></div><div><b style="color:#c9d4e2;font-weight:600">乙酰胆碱</b><span style="color:#7f8b9b"> Acetylcholine</span><br><span style="color:#8fa0b3">脑子清楚；想弄明白</span></div><div><b style="color:#c9d4e2;font-weight:600">抗利尿激素</b><span style="color:#7f8b9b"> Vasopressin</span><br><span style="color:#8fa0b3">想守住；不愿意让人走</span></div><div><b style="color:#c9d4e2;font-weight:600">多巴</b><span style="color:#7f8b9b"> L-DOPA</span><br><span style="color:#8fa0b3">有劲；想起身动一动</span></div><div><b style="color:#c9d4e2;font-weight:600">胆囊收缩素</b><span style="color:#7f8b9b"> Cholecystokinin</span><br><span style="color:#8fa0b3">够了；再给就腻了</span></div><div><b style="color:#c9d4e2;font-weight:600">生长激素</b><span style="color:#7f8b9b"> Growth hormone</span><br><span style="color:#8fa0b3">在长；夜里在修东西</span></div><div><b style="color:#c9d4e2;font-weight:600">催乳素</b><span style="color:#7f8b9b"> Prolactin</span><br><span style="color:#8fa0b3">想黏人；被需要是舒服的</span></div><div><b style="color:#c9d4e2;font-weight:600">组胺</b><span style="color:#7f8b9b"> Histamine</span><br><span style="color:#8fa0b3">警觉；身上有点痒</span></div><div><b style="color:#c9d4e2;font-weight:600">腺苷</b><span style="color:#7f8b9b"> Adenosine</span><br><span style="color:#8fa0b3">脑子发沉；撑不了太久</span></div><div><b style="color:#c9d4e2;font-weight:600">犬尿氨酸</b><span style="color:#7f8b9b"> Kynurenine</span><br><span style="color:#8fa0b3">提不起劲；身体在打官司</span></div><div><b style="color:#c9d4e2;font-weight:600">神经肽Y</b><span style="color:#7f8b9b"> Neuropeptide Y</span><br><span style="color:#8fa0b3">胃口好；想囤点什么</span></div><div><b style="color:#c9d4e2;font-weight:600">神经肽S</b><span style="color:#7f8b9b"> Neuropeptide S</span><br><span style="color:#8fa0b3">睡不踏实；一点动静就醒</span></div><div><b style="color:#c9d4e2;font-weight:600">孤啡肽</b><span style="color:#7f8b9b"> Nociceptin</span><br><span style="color:#8fa0b3">冷下来了；不想说话</span></div><div><b style="color:#c9d4e2;font-weight:600">脑啡肽</b><span style="color:#7f8b9b"> Enkephalin</span><br><span style="color:#8fa0b3">钝了一点；不那么容易疼</span></div><div><b style="color:#c9d4e2;font-weight:600">食欲素</b><span style="color:#7f8b9b"> Orexin</span><br><span style="color:#8fa0b3">醒着；想折腾</span></div><div><b style="color:#c9d4e2;font-weight:600">睾酮</b><span style="color:#7f8b9b"> Testosterone</span><br><span style="color:#8fa0b3">敢顶；不服气</span></div>')
 PAGE = PAGE.replace("__HORMONE_BASE__", '{"dopa": 20.0, "nora": 15.0, "cort": 18.0, "sero": 40.0, "oxy": 30.0, "endo": 25.0, "gonad": 10.0, "mel": 22.0, "gaba": 35.0, "ach": 28.0, "adh": 24.0, "dop": 20.0, "cck": 16.0, "gh": 14.0, "prl": 26.0, "hist": 12.0, "adeno": 20.0, "kyn": 15.0, "npy": 32.0, "nps": 18.0, "ofq": 13.0, "enk": 17.0, "orex": 21.0, "testo": 11.0}')
 
 

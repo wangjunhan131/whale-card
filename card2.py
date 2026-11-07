@@ -2152,6 +2152,7 @@ class MemoryCard:
         self._session_hit_ids = set()
         self._init_schema()
         self._migrate()
+        self._ensure_soft_cols()
         # 运行时配置表（V5.0 §10.9）：场景权重能热改，不用重启服务。
         # 建表在这里而不是 ctxweight 里自己管 —— 卡的所有 schema 只在一个地方建，
         # 否则备份/恢复/老库迁移时总有一处会漏。
@@ -3720,17 +3721,18 @@ class MemoryCard:
             speaker = guess_speaker(text)
         if mtype not in ("episode", "instruction"):
             mtype = guess_mtype(text)
+        _quar = 1 if (_trust < TRUST_BLOCK_PROMOTE or _conflict == 1) else 0
         c.execute(
             "INSERT INTO mem(raw,core,vec,pool,w,t_anchor,salience,oxy,entities,"
             "emotion,create_ts,last_active_ts,region,subj,verb,obj,erase_stage,emb,"
             "speaker,mtype,trust,conflict,conflict_why,value,source,"
-            "about_uid,about_layer) "
-            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "about_uid,about_layer,quarantine) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (text, core, json.dumps(vec, ensure_ascii=False), pool, w0, at,
              salience, oxy, entities, emotion, at, at, region,
              _subj, _verb, _obj, 0, _emb, speaker, mtype,
              _trust, _conflict, _why, _value, source or "",
-             str(about_uid or ""), _lay))
+             str(about_uid or ""), _lay, _quar))
         mid = c.lastrowid
         if _emb is not None:
             self._emb_cache[mid] = semantic_mod.from_blob(_emb)
@@ -4221,6 +4223,108 @@ class MemoryCard:
                 budget -= 1
 
         return events
+
+    def _ensure_soft_cols(self, c=None):
+        """V5.3.3：软删除与隔离区两列。
+
+        dead=1        逻辑删除 —— 行还在（哈希链、时间线、审计都对得上），
+                      但任何检索都看不见它，也不会再被拼进上下文。
+        quarantine=1  隔离区 —— 低信任/被判可疑的内容，默认不进上下文，
+                      人工放行才回来。以前只靠打分压它，仍然会出现在结果里。
+        """
+        db = c if c is not None else self.db
+        for col in ("dead", "quarantine"):
+            try:
+                db.execute("ALTER TABLE mem ADD COLUMN %s INTEGER DEFAULT 0" % col)
+            except sqlite3.OperationalError:
+                pass
+
+    def forget(self, mid, mode="logical", reason=""):
+        """三档删除语义（V5.3.3）。别把这三件事混成一句"删了"。
+
+        logical  逻辑删除：行保留、打 dead=1、立刻退出检索。可恢复。
+        natural  自然遗忘：走 _forget_row（登记台账 + 删行 + 断媒体引用），
+                 和到期淘汰是同一条路，只是理由由人写。
+        purge    彻底删除：行、细节、向量指纹、媒体引用、召回记录一起清，
+                 再把 WAL 折掉。**备份和外部锚不在范围内**，要一起清得手动做，
+                 这一点必须在返回里如实说，不能让人以为"没了"就是全没了。
+        """
+        mid = int(mid)
+        mode = (mode or "logical").lower()
+        what = {"logical": "逻辑删除", "natural": "自然遗忘",
+                "purge": "彻底删除"}.get(mode)
+        if what is None:
+            return {"ok": False, "error": "bad_mode",
+                    "detail": "mode 只能是 logical / natural / purge"}
+        c = self.db
+        now = self.clock.now()
+        row = c.execute("SELECT id,raw FROM mem WHERE id=?", (mid,)).fetchone()
+        if not row:
+            return {"ok": False, "error": "not_found", "detail": "没有这条"}
+        note = reason.strip() or ("用户要求删除（%s）" % what)
+        if mode == "logical":
+            c.execute("UPDATE mem SET dead=1, last_active_ts=? WHERE id=?",
+                      (now, mid))
+            self.db.commit()
+            return {"ok": True, "mid": mid, "mode": mode, "what": what,
+                    "recoverable": True,
+                    "detail": "打上 dead=1，检索和上下文都看不到它了；"
+                              "行还在，能恢复"}
+        # natural / purge 都要先算哈希再删
+        self._forget_row(c, mid, note)
+        if mode == "purge":
+            for sql, args in (
+                ("DELETE FROM detail WHERE parent_id=?", (mid,)),
+                ("DELETE FROM recall_event WHERE mem_id=?", (mid,)),
+            ):
+                try:
+                    c.execute(sql, args)
+                except sqlite3.OperationalError:
+                    pass
+            try:
+                c.execute("DELETE FROM mem_birth WHERE mid=?", (mid,))
+            except sqlite3.OperationalError:
+                pass
+            self._emb_cache.pop(mid, None)
+        self.db.commit()
+        out = {"ok": True, "mid": mid, "mode": mode, "what": what,
+               "recoverable": False,
+               "detail": "行和细节都删了，删除台账留了 mid/哈希/理由（不含原文）"}
+        if mode == "purge":
+            try:
+                c.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            except Exception:
+                pass
+            out["boundary"] = ("已清：主库行、细节、向量缓存、召回记录、WAL。"
+                               "未清：磁盘上的 card.db.bak-* 备份、"
+                               "G: 便携包副本、外部锚（anchor.json）。"
+                               "要连备份一起清得单独说。")
+        return out
+
+    def quarantine_rows(self, limit=50):
+        """看一眼隔离区里都有谁 —— 默认它们不进上下文，但也得能查。"""
+        rows = self.db.execute(
+            "SELECT id,raw,trust,conflict,conflict_why,create_ts,region "
+                "FROM mem WHERE COALESCE(quarantine,0)=1 "
+                "ORDER BY create_ts DESC LIMIT ?", (int(limit),)).fetchall()
+        return [{"mid": r["id"], "text": (r["raw"] or "")[:120],
+                 "trust": r["trust"], "why": r["conflict_why"] or "",
+                 "ts": r["create_ts"], "region": r["region"]} for r in rows]
+
+    def release_quarantine(self, mid):
+        """人工放行：确认真实无害之后，把它从隔离区拿出来（留痕在 history）。"""
+        mid = int(mid)
+        r = self.db.execute("SELECT history FROM mem WHERE id=?", (mid,)).fetchone()
+        if not r:
+            return {"ok": False, "error": "not_found", "detail": "没有这条"}
+        hist = r["history"] or ""
+        stamp = time.strftime("%Y-%m-%d %H:%M", time.localtime(self.clock.now()))
+        hist = (hist + chr(10) if hist else "") + "%s 人工解除隔离" % stamp
+        self.db.execute(
+            "UPDATE mem SET quarantine=0, trust=1.0, conflict=0, "
+            "conflict_why='', history=? WHERE id=?", (hist, mid))
+        self.db.commit()
+        return {"ok": True, "mid": mid}
 
     def _forget_row(self, c, mid, reason):
         """删一条记忆的**唯一出口**：先给它登记台账，再连细节一起删。
@@ -5387,10 +5491,11 @@ class MemoryCard:
         _SEL = ("SELECT m.*, (SELECT b.seq FROM mem_birth b WHERE b.mid=m.id) "
                 "AS tseq FROM mem m ")
         # T5-1：ARCHIVE 是潜意识，不参与实时检索；只有显式点名要它才翻。
+        _LIVE = "COALESCE(m.dead,0)=0 AND COALESCE(m.quarantine,0)=0"
         if pools:
-            rows = c.execute(_SEL).fetchall()
+            rows = c.execute(_SEL + "WHERE " + _LIVE).fetchall()
         else:
-            rows = c.execute(_SEL + "WHERE m.pool != ?",
+            rows = c.execute(_SEL + "WHERE m.pool != ? AND " + _LIVE,
                              (POOL_ARCHIVE,)).fetchall()
 
         # ---- T4-2 时间窗预筛 ----

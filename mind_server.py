@@ -37,6 +37,8 @@ T6-1：把卡变成一个「住在外面的进程」。
 import argparse
 import json
 import os
+import secrets
+import io
 import sys
 import threading
 import time
@@ -482,6 +484,63 @@ class Mind(object):
                 pass
 
 
+# ---- V5.3.3 本机 API 的来源校验 ----
+# 127.0.0.1 不等于安全：任何本机进程、任何本地网页都能打这个端口。
+# 这里只挡"浏览器跨站"这一路（也是最现实的一路）：
+#   1. 带 Origin / Referer 且不是本机页面 → 直接 403；
+#   2. OPTIONS 一律 405（我们没有跨域预检白名单，别给浏览器留想象空间）；
+#   3. 想再严一档就设 WHALE_REQUIRE_TOKEN=1，所有请求都要带 X-Whale-Token
+#      （token 在卡目录 qq_state/api_token.txt，control console 会自动带上）。
+_LOCAL_HOSTS = {"127.0.0.1", "localhost", "::1", "[::1]", ""}
+
+
+def _origin_ok(handler):
+    for k in ("Origin", "Referer"):
+        v = (handler.headers.get(k) or "").strip()
+        if not v:
+            continue
+        try:
+            host = v.split("//", 1)[1].split("/", 1)[0]
+        except IndexError:
+            return False
+        # 去掉端口：Origin 里一定带端口，白名单里不带
+        if host.startswith("["):                      # [::1]:8848
+            host = host.split("]", 1)[0] + "]"
+        elif host.count(":") == 1:
+            host = host.split(":", 1)[0]
+        if host not in _LOCAL_HOSTS:
+            return False
+    return True
+
+
+def _token_path(mind):
+    return os.path.join(os.path.dirname(os.path.abspath(mind.db_path)),
+                        "qq_state", "api_token.txt")
+
+
+_TOK = {"v": None}
+
+
+def api_token(mind):
+    """读 token；没有就生成一个（第一次启动自动建，不打扰人）。"""
+    if _TOK["v"]:
+        return _TOK["v"]
+    p = _token_path(mind)
+    try:
+        t = io.open(p, encoding="utf-8").read().strip()
+    except OSError:
+        t = ""
+    if not t:
+        t = secrets.token_urlsafe(24)
+        try:
+            os.makedirs(os.path.dirname(p), exist_ok=True)
+            io.open(p, "w", encoding="utf-8").write(t)
+        except OSError:
+            pass
+    _TOK["v"] = t
+    return t
+
+
 class Handler(BaseHTTPRequestHandler):
     mind = None                        # 由 main() 注入
     server_version = "WhaleMind/" + VERSION
@@ -515,6 +574,21 @@ class Handler(BaseHTTPRequestHandler):
         m = Handler.mind
         if m is None:
             return self._fail(503, "mind_not_ready", "服务还没初始化")
+        if method == "OPTIONS":
+            # 不接跨域预检：没有白名单就不给浏览器任何幻想
+            self.send_response(405)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
+        if not _origin_ok(self):
+            m.blocked = getattr(m, "blocked", 0) + 1
+            return self._fail(403, "cross_origin_blocked",
+                              "只接受本机页面的请求（Origin/Referer 不是 127.0.0.1）")
+        if os.environ.get("WHALE_REQUIRE_TOKEN") == "1":
+            if (self.headers.get("X-Whale-Token") or "").strip() != api_token(m):
+                m.blocked = getattr(m, "blocked", 0) + 1
+                return self._fail(401, "unauthorized",
+                                  "要带 X-Whale-Token（见卡目录 qq_state/api_token.txt）")
         m.requests += 1
         path = self.path.split("?")[0].rstrip("/") or "/"
         try:
@@ -665,7 +739,8 @@ class Handler(BaseHTTPRequestHandler):
             if method == "GET" and path == "/console":
                 # 控制台页面本身。返回 HTML 而不是 JSON，所以不走 _send。
                 import console as _console
-                raw = _console.PAGE.encode("utf-8")
+                _page = _console.PAGE.replace("__WHALE_TOKEN__", api_token(m))
+                raw = _page.encode("utf-8")
                 self.send_response(200)
                 self.send_header("Content-Type", "text/html; charset=utf-8")
                 self.send_header("Content-Length", str(len(raw)))
@@ -1116,6 +1191,48 @@ class Handler(BaseHTTPRequestHandler):
                                            % (mid, reason))
                             except Exception as e:
                                 out["timeline_error"] = str(e)
+                    if not out.get("ok"):
+                        return self._send(404, out)
+                    return self._send(200, out)
+                if path == "/forget":
+                    # 三档删除语义（V5.3.3）。mode: logical / natural / purge
+                    # 默认 logical —— 删错了还能捞回来，purge 才真清。
+                    mid = body.get("id") or body.get("mid")
+                    if not mid:
+                        return self._fail(400, "no_id", "要给出记忆 id")
+                    mode = (body.get("mode") or "logical").strip().lower()
+                    reason = (body.get("reason") or "").strip()
+                    out = None
+                    with m.lock:
+                        out = m.card.forget(mid, mode=mode, reason=reason)
+                        if out.get("ok") and m.tl is not None:
+                            try:
+                                m.tl.append("forget", "%s id=%s %s"
+                                            % (out.get("what", "删除"), mid,
+                                               reason or ""))
+                            except Exception as e:
+                                out["timeline_error"] = str(e)
+                    if not out.get("ok"):
+                        code = 404 if out.get("error") == "not_found" else 400
+                        return self._send(code, out)
+                    return self._send(200, out)
+                if path == "/mem/quarantine":
+                    # 隔离区里都有谁（默认它们不进上下文）
+                    with m.lock:
+                        rows = m.card.quarantine_rows(limit=int(body.get("limit") or 50))
+                    return self._send(200, {"ok": True, "count": len(rows),
+                                            "rows": rows})
+                if path == "/mem/release":
+                    mid = body.get("id") or body.get("mid")
+                    if not mid:
+                        return self._fail(400, "no_id", "要给出记忆 id")
+                    with m.lock:
+                        out = m.card.release_quarantine(mid)
+                        if out.get("ok") and m.tl is not None:
+                            try:
+                                m.tl.append("untrust", "人工解除隔离 id=%s" % mid)
+                            except Exception:
+                                pass
                     if not out.get("ok"):
                         return self._send(404, out)
                     return self._send(200, out)
