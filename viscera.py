@@ -157,10 +157,17 @@ def restless(state, rng=None):
                        + rng.gauss(0.0, REST_SIG_SYMP), 0.0, 1.0)
     s["para"] = _clamp(s["para"] * 0.40 + REST_PARA * 0.60
                        + rng.gauss(0.0, REST_SIG_PARA), 0.0, 1.0)
-    for k in ("cort", "dopa", "sero", "nora", "oxy"):
+    # 🔴 2026-11-07 晚：原来只有五条调质在静息时呼吸，其余 19 条是死平的直线。
+    #    他要「都跑起来」——理由也对：它们各自都连着下游（13 条联动），
+    #    一条永远不动的曲线等于宣布它不存在。这里给全部 24 条各自的随机游走。
+    for k in s["h"].keys():
         b = H_BASE.get(k, 20.0)
-        s["h"][k] = _clamp(b + (s["h"][k] - b) * 0.985
-                           + rng.gauss(0.0, REST_SIG_HORMONE * b), 0.35 * b, 2.5 * b)
+        # 幅度按各自基线缩放；慢变量（半衰期长）走得更慢一点，才像「底色」而不像噪声
+        hl = HALFLIFE_H.get(k, 6.0)
+        slow = 0.995 if hl >= 12.0 else (0.988 if hl >= 6.0 else 0.980)
+        s["h"][k] = _clamp(b + (s["h"][k] - b) * slow
+                           + rng.gauss(0.0, REST_SIG_HORMONE * b),
+                           0.35 * b, 2.5 * b)
     return s
 
 

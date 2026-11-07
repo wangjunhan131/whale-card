@@ -2991,9 +2991,6 @@ function viewEmo(){
       +'<div id="emoHormLegend" style="display:flex;flex-wrap:wrap;gap:8px;margin-top:8px;'
       +'font:11px sans-serif;color:#b9c6d6"></div>',
     "纵轴按窗口里的真实幅度自动缩放 · 0% = 出厂基线 · 每轮的脉冲会回落");
-  out+=cardHTML("c12","HORMONE NOTES / 24 条激素各自的体感（装饰层，不参与计算）",
-    '<div id="emoNotes" style="display:grid;grid-template-columns:repeat(3,1fr);gap:6px 14px;font:11px sans-serif;color:#b9c6d6">__HORMONE_NOTES__</div>',
-    "变的是数值，不变的是这些感觉");
   out+=cardHTML("c12","PARAMS / 这一轮引擎内部算了什么",
     '<canvas id="cvEPM" style="height:170px"></canvas>'
       +'<div id="emoParams" style="display:flex;flex-wrap:wrap;gap:8px;margin-top:10px"></div>',
@@ -3288,70 +3285,75 @@ function drawHormoneOverlay(cv, em, dropped){
   }
 }
 function drawHormoneGrid(cv, em){
-  /* 24 格小图。每格单独缩放 —— 不同激素量纲差得远，共用一根纵轴就只剩压扁的线。 */
+  /* 24 格小图。每格独立纵轴 + 裁在自己格子里。
+     2026-11-07 晚修（第三版）：上一版没有 clip、也没给最小跨度，
+     噪声被放大到格子外面去 —— 画面上就是曲线横穿邻居、格子边缘出现长竖线。 */
   var dpr=window.devicePixelRatio||1;
-  var W=cv.clientWidth||900, H=cv.clientHeight||360;
+  var keys=[], seen={};
+  (em||[]).forEach(function(x){ var hh=x.hormones||{};
+    Object.keys(hh).forEach(function(k){ if(!seen[k]){ seen[k]=1; keys.push(k); } }); });
+  var COLS=8, ROWS=Math.max(1, Math.ceil(keys.length/COLS));
+  var W=cv.clientWidth||900, H=ROWS*112;
+  cv.style.width="100%"; cv.style.height=H+"px";
   cv.width=W*dpr; cv.height=H*dpr;
   var g=cv.getContext("2d"); g.setTransform(dpr,0,0,dpr,0,0);
   g.clearRect(0,0,W,H);
-  if(!em || !em.length){ return; }
-  var keys=[], seen={};
-  em.forEach(function(x){ var hh=x.hormones||{};
-    Object.keys(hh).forEach(function(k){ if(!seen[k]){ seen[k]=1; keys.push(k); } }); });
-  if(!keys.length){ return; }
-  var COLS=8, ROWS=Math.ceil(keys.length/COLS);
-  var cw=W/COLS, chh=H/ROWS;
+  if(!em || !em.length || !keys.length){ return; }
+  var cw=W/COLS, chh=H/ROWS, pad=6, head=34;
+  var lp=(em[em.length-1]||{}).params||{};
   keys.forEach(function(k,idx){
     var cx=(idx%COLS)*cw, cy=Math.floor(idx/COLS)*chh;
     var vals=em.map(function(x){ var hh=x.hormones||{};
       return (hh[k]==null? null : Number(hh[k])); });
     var fin=vals.filter(function(v){ return v!=null && isFinite(v); });
-    var last=fin.length? fin[fin.length-1] : 0;
-    /* 🔴 每格自己的纵轴也按「去掉极值后的范围」撑开（m35217 第二问）：
-       原来用全量 min~max，一次大脉冲就把整格压成一条几乎不动的线。
-       改成 5%~95% 分位当主体，两侧再留 18% 余量 —— 平时那点波动才看得见。 */
+    var base=null;
+    if(lp.base && lp.base[k]!=null){ base=Number(lp.base[k]); }
+    if(base==null && typeof HBASE!=="undefined" && HBASE[k]!=null){ base=Number(HBASE[k]); }
+    var last=fin.length? fin[fin.length-1] : (base==null?0:base);
     var srt=fin.slice().sort(function(a,b){ return a-b; });
     function _q(f){ return srt.length? srt[Math.min(srt.length-1, Math.max(0, Math.round(f*(srt.length-1))))] : null; }
     var mx=_q(0.95), mn=_q(0.05);
-    if(mx==null){ mx=1; mn=0; }
-    var span=Math.max(1e-6, mx-mn);
-    mn=mn-span*0.18; mx=mx+span*0.18; span=mx-mn;
-    /* 基线：最后一次样本里引擎报的 base */
-    var base=null, lp=(em[em.length-1]||{}).params||{};
-    if(lp.base && lp.base[k]!=null){ base=Number(lp.base[k]); }
-    /* 引擎只报五条调质的基线；24 种激素的出厂值在 HBASE 里 */
-    if(base==null && typeof HBASE!=="undefined" && HBASE[k]!=null){ base=Number(HBASE[k]); }
-    var pad=5, ph=chh-pad*2-34, pw=cw-pad*2;
-    /* 图框 + 基线虚线 */
-    g.fillStyle="#0f141b"; g.fillRect(cx+2,cy+2,cw-4,chh-4);
-    g.strokeStyle="rgba(255,255,255,0.05)"; g.lineWidth=1;
-    g.strokeRect(cx+2,cy+2,cw-4,chh-4);
-    if(base!=null && mx>mn){
-      var by=cy+pad+34+ph*(1-(base-mn)/span);
-      g.strokeStyle="rgba(232,180,74,0.35)"; g.setLineDash([3,3]);
-      g.beginPath(); g.moveTo(cx+pad,by); g.lineTo(cx+pad+pw,by); g.stroke();
-      g.setLineDash([]);
-    }
-    /* 折线：比基线高就绿、低就红 —— 一眼看出「升了还是掉了」 */
-    var up=(base==null)? true : (last>=base);
-    g.strokeStyle = up? "#2fd07d" : "#ff5f6d"; g.lineWidth=1.4;
-    g.beginPath(); var started=false;
-    vals.forEach(function(v,i){
-      if(v==null || !isFinite(v)) { started=false; return; }
-      var x=cx+pad+pw*(em.length<2?0.5:i/(em.length-1));
-      var y=cy+pad+34+ph*(1-(v-mn)/span);
-      if(!started){ g.moveTo(x,y); started=true; } else { g.lineTo(x,y); }
-    });
-    g.stroke();
-    /* 名字：中文 + 英文 + key，一格三行，不认得哪条就没法盯 */
-    var nmp=(typeof HNAME!=="undefined" && HNAME[k]) || [k, ""];
+    if(mx==null){ mx=(base||1)*1.1; mn=(base||1)*0.9; }
+    var span=mx-mn;
+    /* 最小跨度：基线附近 24%。没有这条，几乎不动的曲线也会把 0.01 的噪声放大成满格 ——
+       那不是"看得清"，那是把噪声当信号。 */
+    var ref=(base==null? (Math.abs(mx)||1) : Math.abs(base));
+    var minSpan=Math.max(0.02, ref*0.24);
+    if(span<minSpan){ var mid=(mx+mn)/2; mn=mid-minSpan/2; mx=mid+minSpan/2; span=minSpan; }
+    else { mn=mn-span*0.18; mx=mx+span*0.18; span=mx-mn; }
+    var px=cx+pad, py=cy+head, pw=cw-pad*2, ph=chh-head-pad*2;
+    if(pw<4 || ph<4){ return; }
+    g.fillStyle="#0f141b"; g.fillRect(cx+1,cy+1,cw-2,chh-2);
+    g.strokeStyle="rgba(255,255,255,0.06)"; g.lineWidth=1;
+    g.strokeRect(cx+1,cy+1,cw-2,chh-2);
+    var nmp=(typeof HNAME!=="undefined" && HNAME[k]) || [k,""];
     g.fillStyle="#c9d4e2"; g.font="9px ui-sans-serif,sans-serif";
     g.fillText(nmp[0], cx+pad, cy+pad+8);
     g.fillStyle="#6f7b8b"; g.font="8px ui-sans-serif,sans-serif";
-    g.fillText((nmp[1]||"").slice(0,18), cx+pad, cy+pad+19);
+    g.fillText((nmp[1]||"").slice(0,20), cx+pad, cy+pad+19);
+    var up=(base==null)? true : (last>=base);
     g.fillStyle = up? "#8fe3b3" : "#ff9aa3"; g.font="bold 10px ui-monospace,monospace";
     g.fillText(last.toFixed(2) + (base!=null? (" ("+base.toFixed(2)+")") : ""),
                cx+pad, cy+pad+31);
+    g.save();
+    g.beginPath(); g.rect(px, py, pw, ph); g.clip();
+    if(base!=null){
+      var by=py+ph*(1-(base-mn)/span);
+      g.strokeStyle="rgba(232,180,74,0.35)"; g.setLineDash([3,3]);
+      g.beginPath(); g.moveTo(px,by); g.lineTo(px+pw,by); g.stroke();
+      g.setLineDash([]);
+    }
+    g.strokeStyle = up? "#2fd07d" : "#ff5f6d"; g.lineWidth=1.3;
+    g.beginPath(); var started=false;
+    vals.forEach(function(v,i){
+      if(v==null || !isFinite(v)){ started=false; return; }
+      var x=px+pw*(em.length<2?0.5:i/(em.length-1));
+      var yy=py+ph*(1-(v-mn)/span);
+      if(yy<py){ yy=py; } if(yy>py+ph){ yy=py+ph; }
+      if(!started){ g.moveTo(x,yy); started=true; } else { g.lineTo(x,yy); }
+    });
+    g.stroke();
+    g.restore();
   });
 }
 function viewTime(){
