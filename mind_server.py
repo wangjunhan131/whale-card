@@ -750,13 +750,23 @@ class Handler(BaseHTTPRequestHandler):
                     m.flow_time()
                     # 时间窗：/console_data?hours=5 分钟…168 小时，缺省 72。
                     _hq = None
+                    _live = False
                     try:
                         from urllib.parse import parse_qs as _pqs
                         _q = _pqs(self.path.split("?", 1)[1] if "?" in self.path else "")
                         if _q.get("hours"):
                             _hq = float(_q["hours"][0])
+                        if _q.get("live") and _q["live"][0] in ("1", "true", "yes"):
+                            _live = True
                     except Exception:
-                        _hq = None
+                        _hq, _live = None, False
+                    # 监视器模式：先让身体按时间走一格再读。
+                    # 没有新对话就没有新样本，曲线会看着冻住 —— 采的是「此刻」。
+                    if _live:
+                        try:
+                            m.card.viscera_sample()
+                        except Exception:
+                            pass
                     ov = _console.overview(m.db_path, hours=_hq)
                     # 六维权重在这里现算，不让前端去调 /context ——
                     # 那会触发一次真实 recall、写 recall_event，

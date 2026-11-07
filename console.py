@@ -4323,7 +4323,7 @@ function refresh(){
   return Promise.all([
     API("/health"),
     API("/status"),
-    API("/console_data?hours="+encodeURIComponent(S.hours)),
+    API("/console_data?hours="+encodeURIComponent(S.hours)+(S.live?"&live=1":"")),
     API("/cardslot"),
     API("/timeline"),
     API("/disks"),

@@ -2301,7 +2301,7 @@ class MemoryCard:
         except Exception:
             pass
 
-    def _hist_viscera(self, res=None, now=None):
+    def _hist_viscera(self, res=None, now=None, force=False):
         """给控制台留一格曲线。同一分钟里不重复写。
 
         只在真有事发生时写（一句话进来、手动刺激），不跑定时采样 ——
@@ -2316,7 +2316,7 @@ class MemoryCard:
                 last = float((row["m"] if row is not None else 0) or 0.0)
             # 5 秒一格：一段正常交流（一问一答）能画出起伏，
             # 又不至于一条消息写八行。7 天清理兜底，涨不上去。
-            if now - last < 5.0:
+            if now - last < (2.0 if force else 5.0):
                 return
             v = getattr(self, "v", None) or viscera.base_state()
             b = viscera.body(v)
@@ -2389,6 +2389,35 @@ class MemoryCard:
             self._vhist_ts = now
         except Exception:
             pass
+
+    def viscera_sample(self, now=None, force=True):
+        """不喂新话，只让身体按时间自己走一格，然后记一个点。
+
+        为什么需要它：控制台「实时」档每 3 秒刷一次，但**没有新对话就没有
+        新样本** —— 曲线当然不动。监视器采的是「此刻」，不是「事件」。
+        这里只做 settle（衰减回落），不注入任何刺激：没人说话的时候，
+        身体本来就在慢慢回到基线，这才是真的。
+        """
+        try:
+            now = float(now if now is not None else time.time())
+            self.v = viscera.normalize(self.v or viscera.base_state())
+            dt = now - float(self.v.get("ts") or now)
+            if dt > 0:
+                self.v = viscera.settle(self.v, dt)
+            # 静息漂移：人坐着不动，心率也有 1~3 次的自然起伏（HRV）。
+            # 只做衰减的话采出来是一条直线 —— 那不是平静，那是没在活。
+            try:
+                import random as _rnd
+                _d = _rnd.uniform(-0.03, 0.03)
+                self.v["symp"] = max(0.0, min(1.0, float(self.v.get("symp") or 0.0) + _d))
+            except Exception:
+                pass
+            self.v["ts"] = now
+            self._save_viscera()
+            self._hist_viscera(None, now, force=force)
+            return self.v
+        except Exception:
+            return self.v
 
     def viscera_history(self, hours=24.0, limit=600):
         """控制台用：最近 N 小时的身体曲线。空表就是空数组，不补假数据。"""

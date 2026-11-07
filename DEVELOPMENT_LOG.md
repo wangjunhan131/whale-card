@@ -1805,3 +1805,19 @@ eplace(/[（(].*$/, "") 剥掉强度再数。
 截图：`whale-lab/probe/console-hormones-grid-20261107.png`。
 
 **教训**：`_safe_json` 那次插成零缩进，把 `MemoryCard` 类整个截断（`AttributeError: _init_schema`）；修的时候 `s.replace("_json = json", …)` 又撞上 `tags_json = json` 这个子串，把 media 那段插坏 —— **用字符串替换打补丁时，锚点必须带上足够的上下文**。
+
+
+## 2026-11-07 中午｜给曲线一根旋钮：5 分 / 1 时 / 24 时 / 7 天 + 实时（V5.4）
+
+- **为什么**：窗口固定 72 小时，曲线一天只动一格，看着像死物。用户要「看到它动」。
+- `console.overview(db_path, hours=None)` 收窗口；`/console_data?hours=` 解析后透传；
+  `emotion_series(hours, limit)` 的 limit 随窗口放大（小窗口 1500，大窗口 900）——
+  五分钟的窗口只给 600 个点等于「一秒一格」，看着还是不动。
+- 顶栏加 `.winwrap` 分段控件（5分/1时/24时/7天 + 实时）；选 5 分或按「实时」
+  进 live 档，每 3 秒自己 `refresh()`；15 秒的总刷新照旧。
+- **踩坑**：`parse_qs` 在 `mind_server.py` 里是**别的函数内部** import 的，模块级没有 →
+  第一次接线时 `NameError` 被 `except` 吞掉，`hours` 静默失效（四个窗口全返回同一批点）。
+  改成函数内显式 `from urllib.parse import parse_qs`。**「参数没生效」要先怀疑异常被吞。**
+- `tests/test_t102.py` 原先拿**真卡**比 mtime 判「--dry 没写盘」；服务在跑时 WAL 一开就改
+  mtime（后来改比字节也照样红，因为服务真的在写内容）→ 改成把卡**复制到临时目录**再跑
+  `--dry`，测的才是这件事本身。37/0。
