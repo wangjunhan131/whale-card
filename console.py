@@ -2149,7 +2149,13 @@ function renderSide(){
   $("#ins").textContent = id.instance || "—";
   $("#seal").textContent = id.sealed ? "开启" : "未封";
   $("#mem").textContent = (id.mem||0)+" 条";
-  $("#mood").textContent = S.mood || "—";
+  /* 心境是慢基底（0~1），三维是此刻的偏移（−1~1）。两层，不是两个答案。 */
+  (function(){
+    var st=(S.data&&S.data.status)||{}, pad=st.pad||{};
+    var m=S.mood||"—", cur=pad.label||"";
+    $("#mood").textContent = cur ? (m+" · 此刻"+cur) : m;
+    $("#mood").title = "心境是慢的（一天尺度），三维是此刻（一句话尺度）";
+  })();
   $("#who").textContent = (id.nick||"") + (id.qq? " · "+id.qq : "");
   var slotTxt = {unloaded:"没插", injected:"插着", broken:"坏了",
                  unknown:"对不上", empty:"没文件"}[S.slot] || "—";
@@ -2999,9 +3005,12 @@ function drawEmo(){
     var hrv=pts("hr").filter(function(x){ return x!=null && isFinite(x); });
     var lo=55, hi=130;
     if(hrv.length){
-      var mn=Math.min.apply(null,hrv), mx=Math.max.apply(null,hrv);
-      if(mx-mn < 18){ var mid=(mn+mx)/2; lo=mid-9; hi=mid+9; }
-      else { lo=Math.min(55,mn-4); hi=Math.max(130,mx+4); }
+      /* 用 5%~95% 分位定范围：几个尖刺不该把整条线压成一条。 */
+      var srt=hrv.slice().sort(function(a,b){ return a-b; });
+      function q(f){ return srt[Math.min(srt.length-1, Math.max(0, Math.round(f*(srt.length-1))))]; }
+      var mn=q(0.05), mx=q(0.95);
+      lo=mn-2; hi=mx+2;
+      if(hi-lo < 8){ var mid=(lo+hi)/2; lo=mid-4; hi=mid+4; }
     }
     lineChart(cv, [
       {color:"#ff5f6d", pts:pts("hr")},

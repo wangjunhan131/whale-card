@@ -2607,6 +2607,22 @@ class MemoryCard:
         ⚠️ 这是一个**纯读法**：不写库、不改激素、不进召回打分。
            算式在 padlib.py（纯函数），这里是转发；控制台画历史曲线也用同一份。
         """
+        # 2026-11-07：旧版读的是 V3.7 那四个 0~1 的激素（self.h），
+        # 而身体层（viscera 24 激素）是另一本账 —— 结果三维卡说「坐立不安」、
+        # 心境说「还行」，两个读数各说各的。三维改读身体那一套，同源才可比。
+        v = getattr(self, "v", {}) or {}
+        hh = v.get("h") or {}
+        if hh and "dopa" in hh:
+            base = viscera.H_BASE
+            # 换算成 padlib 自己的刻度：**在身体基线处必须正好等于 padlib 的
+            # 基线**（dopa .40 / cort .20 / oxy .50 / sero .60），否则基线不算
+            # 「平静」，一点点偏移就被 3.2 倍放大成「坐立不安」。
+            PADB = {"dopa": 0.40, "cort": 0.20, "oxy": 0.50, "sero": 0.60}
+            def _nz(k):
+                b = float(base.get(k) or 1.0)
+                return max(0.0, min(1.0, PADB[k] * float(hh.get(k, b)) / b))
+            return padlib.pad_of(getattr(self, "mood", MOOD_NEUTRAL),
+                                 _nz("sero"), _nz("dopa"), _nz("cort"), _nz("oxy"))
         h = getattr(self, "h", {}) or {}
         return padlib.pad_of(getattr(self, "mood", MOOD_NEUTRAL),
                              h.get("h_sero"), h.get("h_dopa"),
