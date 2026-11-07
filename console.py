@@ -2994,11 +2994,11 @@ function viewEmo(){
   out+=cardHTML("c12","PARAMS / 这一轮引擎内部算了什么",
     '<canvas id="cvEPM" style="height:170px"></canvas>'
       +'<div id="emoParams" style="display:flex;flex-wrap:wrap;gap:8px;margin-top:10px"></div>',
-    "门控 / 疲劳 / 心境 / 安全感 / 预期误差");
+    "门控 / 疲劳 / 心境 / 安全感 / 预期误差 · 都随对话更新，静息时保持上次读数");
   out+=cardHTML("c6","PULSE / 预期误差 RPE",
-    '<canvas id="cvEP" style="height:130px"></canvas>',"−1 坏事 → +1 比预期好");
+    '<canvas id="cvEP" style="height:130px"></canvas>',"−1 坏事 → +1 比预期好 · 只在有新对话时更新，没事件就沿用上一次读数");
   out+=cardHTML("c6","SAFETY / 安全感",
-    '<canvas id="cvES" style="height:130px"></canvas>',"0 → 1 · 低于 0.25 关掉暧昧通路");
+    '<canvas id="cvES" style="height:130px"></canvas>',"0 → 1 · 低于 0.25 关掉暧昧通路 · 台阶是采样，拐点才是真的发生了什么");
   out+=cardHTML("c12","MOOD MIX / 这段时间的主导情绪",
     '<canvas id="cvEL" style="height:200px"></canvas>'
       +'<div id="emoLegend" style="display:flex;flex-wrap:wrap;gap:10px;margin-top:8px;'
