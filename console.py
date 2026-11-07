@@ -2990,7 +2990,7 @@ function viewEmo(){
     '<canvas id="cvEOV" style="height:300px"></canvas>'
       +'<div id="emoHormLegend" style="display:flex;flex-wrap:wrap;gap:8px;margin-top:8px;'
       +'font:11px sans-serif;color:#b9c6d6"></div>',
-    "纵轴按窗口里的真实幅度自动缩放 · 0% = 出厂基线 · 每轮的脉冲会回落");
+    "纵轴按窗口里的真实幅度自动缩放 · 只画偏离最大的 6 条（其余在图例里）· 0% = 出厂基线");
   out+=cardHTML("c12","PARAMS / 这一轮引擎内部算了什么",
     '<canvas id="cvEPM" style="height:170px"></canvas>'
       +'<div id="emoParams" style="display:flex;flex-wrap:wrap;gap:8px;margin-top:10px"></div>',
@@ -3275,8 +3275,9 @@ function drawHormoneOverlay(cv, em, dropped){
   var chips=[];
   series.forEach(function(s,si){
     var on=!!_top[si];
+    if(!on){ return; }              /* 其余 18 条不画：压淡也还是毛线 */
     s.vals=_ds(s.vals);
-    g.strokeStyle=s.col; g.lineWidth=on?1.6:0.8; g.globalAlpha=on?0.92:0.16;
+    g.strokeStyle=s.col; g.lineWidth=1.7; g.globalAlpha=0.95;
     g.beginPath(); var started=false;
     s.vals.forEach(function(v,i){
       if(v==null || !isFinite(v)){ started=false; return; }
