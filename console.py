@@ -3003,47 +3003,60 @@ function drawEmo(){
   var d=S.data||{}, em=(d.emotion||[]);
   var X=em.map(function(x){ return x.ts; });
   function pts(k){ return em.map(function(x){ return x[k]; }); }
+
+  /* 纵轴自适应：让数据真正占满画面高度的 60~70%。
+     做法：以 5%~95% 分位当"主体范围"，两侧各留 0.27 倍主体跨度当留白 ——
+     主体跨度 / 轴跨度 = 1 / 1.54 ≈ 65%。原来的固定 0~100、55~130
+     会把静息那点起伏压成一条直线，看着像坏了。 */
+  function autoY(arr, minSpan, floorZero){
+    var v=(arr||[]).filter(function(x){ return x!=null && isFinite(x); });
+    if(!v.length) return {lo:null, hi:null};
+    var srt=v.slice().sort(function(a,b){ return a-b; });
+    function q(f){ return srt[Math.min(srt.length-1, Math.max(0, Math.round(f*(srt.length-1))))]; }
+    var mn=q(0.05), mx=q(0.95);
+    var span=mx-mn;
+    if(!(span>0)) span=Math.abs(mx)||1;
+    if(minSpan && span<minSpan) span=minSpan;
+    var mid=(mn+mx)/2;
+    mn=mid-span/2; mx=mid+span/2;
+    var lo=mn-span*0.27, hi=mx+span*0.27;
+    if(floorZero && lo<0) lo=0;
+    return {lo:lo, hi:hi};
+  }
   var cv=$("#cvEHR");
   if(cv){
     /* 纵轴跟数据走：窗口里只有静息时，固定 55~130 会把起伏压成一条直线。
        窗口里有过大波动（被骂、被夸）就按数据撑开，宁可抖也不假平。 */
-    var hrv=pts("hr").filter(function(x){ return x!=null && isFinite(x); });
-    var lo=55, hi=130;
-    if(hrv.length){
-      /* 用 5%~95% 分位定范围：几个尖刺不该把整条线压成一条。 */
-      var srt=hrv.slice().sort(function(a,b){ return a-b; });
-      function q(f){ return srt[Math.min(srt.length-1, Math.max(0, Math.round(f*(srt.length-1))))]; }
-      var mn=q(0.05), mx=q(0.95);
-      lo=mn-2; hi=mx+2;
-      if(hi-lo < 8){ var mid=(lo+hi)/2; lo=mid-4; hi=mid+4; }
-    }
+    var y1=autoY(pts("hr").concat(em.map(function(x){ return (x.resp||0)*5; })), 6, true);
     lineChart(cv, [
       {color:"#ff5f6d", pts:pts("hr")},
       {color:"#57c8f0", pts:em.map(function(x){ return (x.resp||0)*5; })}
-    ], {xs:X, height:cvh(cv,150), min:Math.round(lo), max:Math.round(hi)});
+    ], {xs:X, height:cvh(cv,150),
+        min:(y1.lo==null?null:Math.round(y1.lo)),
+        max:(y1.hi==null?null:Math.round(y1.hi))});
   }
   var ca=$("#cvEAP");
   if(ca){
     /* 静息时交感 0.05、副交感 0.02，固定 0~1 就是贴着底边一条线。
-       按窗口里的真实峰值缩放（最小 0.3），这样「刚被骂完那一阵子的抬升」看得见。 */
-    var apMax=Math.max(0.30, Math.ceil((_p95(pts("sym").concat(pts("para")))||0)*1.35*100)/100);
+       按窗口里真实幅度撑满 60~70%，「刚被骂完那一阵子的抬升」才看得见。 */
+    var y2=autoY(pts("sym").concat(pts("para")), 0.04, true);
     lineChart(ca, [
       {color:"#e8b44a", pts:pts("sym")},
       {color:"#5fb3d4", pts:pts("para")}
-    ], {xs:X, height:cvh(ca,150), min:0, max:apMax});
+    ], {xs:X, height:cvh(ca,150), min:(y2.lo==null?0:y2.lo), max:(y2.hi==null?1:y2.hi)});
   }
   var ch=$("#cvEH");
   if(ch){
     /* 五条调质平时都在 10~45 之间，固定 0~100 会全部挤在下半截。
-       用 0→「峰值上浮 15%」看波形；真实值仍然标在 PARAMS 卡里。 */
-    var hMax=Math.max(60, Math.ceil((_p95(pts("dopa").concat(pts("nora"),pts("sero"),pts("cort"),pts("oxy")))||0)*1.15));
+       改成按数据撑开；真实值仍然标在 PARAMS 卡里。 */
+    var y3=autoY(pts("dopa").concat(pts("nora"),pts("sero"),pts("cort"),pts("oxy")), 8, true);
     lineChart(ch, [
       {color:"#2fd07d", pts:pts("dopa")},
       {color:"#e8b44a", pts:pts("nora")},
       {color:"#57c8f0", pts:pts("sero")},
       {color:"#ff5f6d", pts:pts("cort")},
       {color:"#9d8bff", pts:pts("oxy")}
-    ], {xs:X, height:cvh(ch,180), min:0, max:hMax});
+    ], {xs:X, height:cvh(ch,180), min:(y3.lo==null?0:y3.lo), max:(y3.hi==null?100:y3.hi)});
   }
   var cp=$("#cvEP");
   if(cp) lineChart(cp, [{color:"#c78bb8", pts:pts("rpe")}],
@@ -3173,9 +3186,11 @@ function drawHormoneOverlay(cv, em){
   function q(arr,f){ if(!arr.length) return null;
     var v=arr.slice().sort(function(a,b){ return a-b; });
     return v[Math.min(v.length-1, Math.round(f*(v.length-1)))]; }
-  /* 用 90% 分位而不是最大值：一两个极端脉冲不该把整张图重新压平 */
-  var up=Math.max(12, Math.ceil((q(pos,0.90)||0)*1.30));
-  var dn=Math.max(10, Math.ceil((q(neg,0.90)||0)*1.30));
+  /* 用 90% 分位而不是最大值：一两个极端脉冲不该把整张图重新压平。
+     ×1.45 而不是 ×1.30：峰值落在半高的 1/1.45 ≈ 69% 处，
+     整张图的上下起伏能占到画面高度的六成到七成 —— 再小就"看不出在动"了。 */
+  var up=Math.max(9, Math.ceil((q(pos,0.90)||0)*1.45));
+  var dn=Math.max(7, Math.ceil((q(neg,0.90)||0)*1.45));
   var lo=-dn, hi=up;
   function Y(v){ return PAD.t+ph*(1-(Math.max(lo,Math.min(hi,v))-lo)/(hi-lo)); }
   /* 刻度：自适应之后步长也得跟着变，不然写死的 −90/−45 就出画了 */

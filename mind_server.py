@@ -829,8 +829,15 @@ class Handler(BaseHTTPRequestHandler):
                 import cardslot as _slot
                 return self._send(200, {"ok": True, "cardslot": _slot.status()})
 
+            if method == "GET" and path == "/motiv":
+                # 动机层快照（驱力池 + 上一轮决策）
+                try:
+                    return self._send(200, {"ok": True,
+                                            "motiv": m.card.motiv_snapshot()})
+                except Exception as e:
+                    return self._fail(500, "motiv_read", str(e))
+
             if method == "GET" and path == "/viscera/profile":
-                # 身体参数（哪些是出厂值、哪些是这张卡自己定的）
                 try:
                     return self._send(200, {"ok": True,
                                             "profile": viscera.current_profile(),
@@ -873,6 +880,33 @@ class Handler(BaseHTTPRequestHandler):
                     except Exception as _e:
                         return self._fail(500, "chat_cfg_write", str(_e))
                     return self._send(200, {"ok": True, "cfg": _cfg})
+                if path == "/motiv/tick":
+                    # 走一轮动机。quiet / at_school 由调用方给（值守脚本知道作息）
+                    try:
+                        m.flow_time()
+                        _q = bool(body.get("quiet"))
+                        _s = bool(body.get("at_school"))
+                        _res = m.card.motiv_tick(quiet=_q, at_school=_s)
+                        try:
+                            m.tl.append("motiv", _res.get("line") or "动机",
+                                        allow_foreign=True)
+                        except Exception:
+                            pass
+                        return self._send(200, {"ok": True, "motiv": _res})
+                    except Exception as _e:
+                        return self._fail(500, "motiv_tick", str(_e))
+                if path == "/motiv/done":
+                    # 做完记一笔：speak=True 才占「主动开口」的额度
+                    try:
+                        _kind = str(body.get("kind") or "")
+                        _spoke = bool(body.get("spoke"))
+                        if not _kind:
+                            return self._fail(400, "empty_kind", "kind 不能为空")
+                        return self._send(200, {"ok": True,
+                                                "motiv": m.card.motiv_done(
+                                                    _kind, spoke=_spoke)})
+                    except Exception as _e:
+                        return self._fail(500, "motiv_done", str(_e))
                 if path == "/viscera/profile":
                     # 改身体参数（写进卡，不是改源码）
                     try:

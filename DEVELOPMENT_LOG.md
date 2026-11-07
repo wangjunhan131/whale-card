@@ -1848,3 +1848,74 @@ PARAMS 卡在实时档不再是一排「—」②把我调试时重复采到的 
 测试：t106 43/0、t107 54/0、t108 31/0；
 ode --check 通过 PAGE 抽出的 143K 脚本。
 提交 4a525e0（restless）+ 9708b66（时间轴/纵轴），已 push，便携包 253 条 verify 通过。
+
+## 2026-11-07 傍晚｜时间锚定 / 身体参数进卡 / 群聊当场不记（V5.3.1）
+
+### 新增
+- card2.anchor_relative_time(text, ts)：渲染时把「昨天/今天/明天/大前天…」
+  按**这条记忆自己的 create_ts** 换成绝对日期。存的是相对、读的是绝对，
+  
+aw 一个字不动。跨年也会算对（1 月 1 日说「昨天」= 去年 12 月 31 日）。
+- iscera.current_profile() / validate_profile() / apply_profile()：
+  身体参数（9 个标量 + H_BASE/HALFLIFE_H 两张表）可外置；白名单 + 范围校验。
+- card2.set_viscera_profile(patch)：验证 → 生效 → 写 meta['viscera_profile']；
+  __init__ 里 _load_viscera_profile() 读回来 —— 换机器/换代码版本，身体不变。
+- mind_server：GET /viscera/profile、POST /viscera/profile。
+- mind_server._start_viscera_sampler()：后台每 120 秒记一次静息采样。
+- qq_guard.group_noise(text, recent)：群聊当场不记（太短 / 纯表情 / 复读）。
+- 	ests/test_t109.py：32 项验收。
+
+### 修改
+- semantic.py：补 class SemanticUnavailable(Exception) —— 这个文件 7 处
+  
+aise 和 1 处 xcept 引用它，但**从来没定义过**；平时装了模型走不到失败
+  分支，一触发就是未捕获 NameError。别人提的 issue 里唯一一条真 bug。
+- card2.render()：末尾对渲染出的整行做锚定（连 detail 里的 TIME 一起）。
+- console.py：情绪页 OVERLAY → **激素总览**；AUTONOMIC / HORMONE FIELD /
+  激素总览三张图的纵轴从写死（0~1 / 0~100 / -90~200）改成**按窗口真实幅度
+  自适应**（p95×1.35、正负分开取 p90×1.3），刻度步长按范围自动选。
+- iscera.py：REST_SYMP 0.08→0.10、REST_PARA 0.12→0.10，新增
+  REST_SIG_SYMP=0.065 / REST_SIG_PARA=0.055 / REST_SIG_HORMONE=0.030。
+  原来静息抖动只有 ±2%（心率不到 1 拍），控制台上就是一条直线。
+- qq_guard.poll_once()：群消息进卡前过 group_noise，@ 我的直接放行；
+  每个群维护本轮最近 20 条用于判复读（跨轮不保留）。
+
+### 完成
+- 全套 **43 个测试文件全绿**（t109 32/32 新增）。
+- 真卡：8848 重启后 /health ok、1101→1106 条、第 22 天、链 ok、usable_ratio 1.0。
+- /viscera/profile 读出 11 个键；POST 脏值（HR_CAP=999）返回 400
+  ad_viscera_profile；把当前参数写进卡后重启仍从卡里读回。
+- 采样实测：心率 73.8~79.2 在跳（原来恒定 75.0），交感/副交感也各自有起伏。
+- 开源仓提交 cfb0f51 已 push（6 files, +549/−42）。
+
+### 未完成
+- 便携包 G:\card-live **没同步**：U 盘当前没插（G: 不存在），下次插上补。
+- 待做：condition_expected 共现表、召回对象过滤、记忆四元组 / mem 绑 seq /
+  召回置信阈值 / 多对象关系卡 / 群里别的 AI 打标 / 日记进卡。
+- 时间锚定目前只作用于 
+ender()（长期印象格与召回行）；「最近在聊」那格
+  用的是原话，没锚（本来就是最近几轮，风险低）。
+
+## 2026-11-07 傍晚｜动机层 + 统一时间线 + 曲线看得见（V5.3.2）
+
+**新增**
+- `motiv.py`：七条驱力（好奇/依恋/胜任/好玩/关心/休息/秩序）的池子 + 六类欲望候选 + 仲裁（硬否决写理由）。
+  设计上只做「内在天气」：影响语气、看什么、学什么、闲时自演化；**外发消息要过 quiet/上课/间隔/额度四道门**。
+- `tests/test_t110.py` 29 项（静息不生欲望、四道否决、风险刹车、settle 不穿基线、bump 不抬驱力）。
+- `mind_server` 三个路由：`GET /motiv`、`POST /motiv/tick`、`POST /motiv/done`（tick 顺手往时间线写一条）。
+
+**修改**
+- `card2.recall()`：`SELECT m.*, (SELECT seq FROM mem_birth WHERE mid=m.id) AS tseq`，
+  想起的东西**按时间线序号排序**，行首挂短日期（`11-05｜…`），被 supersede 的标「旧说法」。
+- `card2._hist_viscera()`：没事件的采样点原 label 是空串（攒了 258 条「没名字」的点），
+  改成沿用六小时内上一个标签、都没有才记「静息」；**只在认知层开着时生效**。
+- `console.py`：新增 `autoY()` —— 5%~95% 分位当主体、两侧各留 0.27 倍跨度，主体占画面 **65%**；
+  心率/交感副交感/五调质三张图改用；激素总览叠加图 ×1.30→×1.45。
+
+**完成**
+- 44 个测试文件全绿（t108 31/31、t107 54/54、t110 29/29）。
+- 真卡：258 条空标签补齐，`/console_data` 597 点无空标签。
+
+**未完成**
+- 「冲突按 seq 裁决」只做了排序与标注（`superseded_by` 目前 0 条），等真出现新旧说法再验。
+- 自主学习→skill 库、主动外发消息的落地通道还没做。

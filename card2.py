@@ -47,6 +47,7 @@ for _v in ('OPENBLAS_NUM_THREADS', 'OMP_NUM_THREADS', 'MKL_NUM_THREADS',
 
 import hormone
 import viscera
+import motiv
 import padlib
 import ctxweight
 import skill
@@ -2160,6 +2161,7 @@ class MemoryCard:
         self._load_hormones()
         self._load_viscera()
         self._load_viscera_profile()
+        self._load_motiv()
         try:
             self._ensure_hist_cols()
         except Exception:
@@ -2313,6 +2315,122 @@ class MemoryCard:
         except Exception:
             pass
 
+    # ---------- 动机层（2026-11-07，用户 m35010 授权「主动」）----------
+    # 驱力池存 meta['motiv_state']，跟记忆一起搬走 —— 换机器她不会变成另一个人。
+    # 这里只算「想不想做什么」；**能不能做**由 motiv.arbitrate 否决，
+    # 真正开口/动手由调用方（mind_server 的定时器 / 值守脚本）执行。
+    MOTIV_KEY = "motiv_state"
+
+    def _load_motiv(self):
+        self.mo = {"d": motiv.base(), "ts": 0.0, "last_sent_ts": 0.0,
+                   "sent": {}, "learned": {}, "last": None}
+        try:
+            row = self.db.execute(
+                "SELECT val FROM meta WHERE key=?", (self.MOTIV_KEY,)).fetchone()
+            if row is not None and row["val"]:
+                st = json.loads(row["val"])
+                self.mo["d"] = motiv.normalize(st.get("d"))
+                self.mo["ts"] = float(st.get("ts") or 0.0)
+                self.mo["last_sent_ts"] = float(st.get("last_sent_ts") or 0.0)
+                self.mo["sent"] = st.get("sent") or {}
+                self.mo["learned"] = st.get("learned") or {}
+                self.mo["last"] = st.get("last")
+        except Exception as e:
+            print("[mind] 动机状态读取失败（用出厂驱力）：%s" % e)
+
+    def _save_motiv(self):
+        try:
+            c = self.db.cursor()
+            c.execute(
+                "INSERT INTO meta(key,val) VALUES(?,?)"
+                " ON CONFLICT(key) DO UPDATE SET val=excluded.val",
+                (self.MOTIV_KEY, json.dumps(self.mo, ensure_ascii=False)))
+            self.db.commit()
+        except Exception:
+            pass
+
+    def _day_key(self, now):
+        return time.strftime("%Y-%m-%d", time.localtime(float(now)))
+
+    def _last_user_ts(self):
+        try:
+            row = self.db.execute(
+                "SELECT MAX(create_ts) FROM mem WHERE speaker='user'").fetchone()
+            return float((row[0] if row else 0) or 0.0)
+        except Exception:
+            return 0.0
+
+    def motiv_tick(self, now=None, quiet=False, at_school=False):
+        """走一轮动机：回落驱力 → 生候选 → 仲裁。返回决策（含被拒理由）。"""
+        now = float(now if now is not None else time.time())
+        dt_h = 0.0
+        if self.mo.get("ts"):
+            dt_h = max(0.0, min(72.0, (now - float(self.mo["ts"])) / 3600.0))
+        self.mo["d"] = motiv.settle(self.mo["d"], dt_h)
+        self.mo["ts"] = now
+        dk = self._day_key(now)
+        last_spoke = self._last_user_ts()
+        ctx = {"now": now, "last_spoke_ts": last_spoke,
+               "last_event_ts": last_spoke,
+               "last_sent_ts": float(self.mo.get("last_sent_ts") or 0.0),
+               "quiet": bool(quiet), "at_school": bool(at_school),
+               "sent_today": int((self.mo.get("sent") or {}).get(dk, 0)),
+               "learned_today": int((self.mo.get("learned") or {}).get(dk, 0))}
+        cands = motiv.candidates(self.mo["d"], ctx)
+        chosen, rejected = motiv.arbitrate(cands, ctx)
+        res = {"now": now, "dt_hours": round(dt_h, 3),
+               "drives": {k: round(v, 3) for k, v in self.mo["d"].items()},
+               "chosen": chosen,
+               "rejected": [{"kind": r.get("kind"), "reject": r.get("reject")}
+                            for r in rejected],
+               "line": motiv.describe(chosen, rejected),
+               "ctx": {"quiet": ctx["quiet"], "at_school": ctx["at_school"],
+                       "sent_today": ctx["sent_today"],
+                       "learned_today": ctx["learned_today"],
+                       "since_spoke_h": round(
+                           max(0.0, (now - last_spoke) / 3600.0), 2)
+                       if last_spoke else None}}
+        self.mo["last"] = {"ts": now, "kind": (chosen or {}).get("kind"),
+                           "line": res["line"]}
+        self._save_motiv()
+        return res
+
+    def motiv_done(self, kind, now=None, spoke=False):
+        """做完了：消耗对应驱力 + 记账（主动开口要占当天额度）。"""
+        now = float(now if now is not None else time.time())
+        dk = self._day_key(now)
+        drive = (motiv.DESIRES.get(kind) or ("curiosity",))[0]
+        self.mo["d"] = motiv.bump(self.mo["d"], drive, 0.18 if spoke else 0.12)
+        if spoke:
+            self.mo["last_sent_ts"] = now
+            self.mo["sent"][dk] = int(self.mo.get("sent", {}).get(dk, 0)) + 1
+        elif kind == "learn":
+            self.mo["learned"][dk] = int(self.mo.get("learned", {}).get(dk, 0)) + 1
+        # 计数只留最近 14 天，别让 meta 无限长
+        keep = {self._day_key(now - i * 86400) for i in range(14)}
+        self.mo["sent"] = {k: v for k, v in self.mo.get("sent", {}).items() if k in keep}
+        self.mo["learned"] = {k: v for k, v in self.mo.get("learned", {}).items()
+                              if k in keep}
+        self._save_motiv()
+        return {"drives": {k: round(v, 3) for k, v in self.mo["d"].items()}}
+
+    def motiv_on_chat(self, now=None):
+        """刚聊过：想说话的劲儿泄一点。绝不抬高任何驱力（那就成好感度了）。"""
+        self.mo["d"] = motiv.bump(self.mo["d"], "attachment", 0.10)
+        self.mo["d"] = motiv.bump(self.mo["d"], "care", 0.06)
+        self._save_motiv()
+
+    def motiv_snapshot(self):
+        dk = self._day_key(time.time())
+        return {"drives": {k: round(v, 3) for k, v in self.mo["d"].items()},
+                "base": {k: v[0] for k, v in motiv.DRIVES.items()},
+                "half_life_h": {k: v[1] for k, v in motiv.DRIVES.items()},
+                "last": self.mo.get("last"),
+                "today": {"sent": int((self.mo.get("sent") or {}).get(dk, 0)),
+                          "learned": int((self.mo.get("learned") or {}).get(dk, 0)),
+                          "reach_cap": motiv.REACH_DAILY_CAP,
+                          "learn_cap": motiv.LEARN_DAILY_CAP}}
+
     # ---------- 身体参数外置（2026-11-07）----------
     # 性格在 core_zone，身体参数以前只在源码里 —— 换机器代码版本不同，
     # 同一个人就会长出不同的身体。现在参数的「家」是这张卡：
@@ -2440,6 +2558,22 @@ class MemoryCard:
                     label = str(link.label(res) or "")
                 except Exception:
                     pass
+            # 🔧 V5.3.2：没事件的采样点原来 label 是空串 —— 控制台「主导情绪」
+            #    那一栏就攒出两百多条没名字的点（看着像坏了，其实只是「这一刻
+            #    没有新事情发生」）。情绪是会持续一段时间的，不是每个瞬间都重新
+            #    判定一次：没新事件就沿用上一次的标签；六小时内一次都没有才算静息。
+            #    只在认知层开着时这么做 —— 关了开关就该一个标签都不产生。
+            if link and not label:
+                try:
+                    row = self.db.execute(
+                        "SELECT label FROM viscera_hist WHERE label<>'' "
+                        "AND ts>=? ORDER BY ts DESC LIMIT 1",
+                        (now - 6 * 3600,)).fetchone()
+                    label = str((row["label"] if row is not None else "") or "")
+                except Exception:
+                    label = ""
+                if not label:
+                    label = "静息"
             # 24 种激素全记：对话里不出现，后台要能一格一格看见
             _hj = {k: round(float(x), 2) for k, x in (h or {}).items()}
             # 动态参数：这一轮引擎内部到底算了什么
@@ -5246,11 +5380,17 @@ class MemoryCard:
 
         now = self.clock.now()
         c = self.db.cursor()
+        # 🔧 V5.3.2 统一时间线：每条记忆都带上它在时间线上的序号（mem_birth.seq）。
+        #    为什么非要这个：光有 create_ts 只能排"大概谁先"，而 seq 是哈希链上的
+        #    真实顺序 —— 两件事冲突时，"谁在后"必须以链为准，不能以浮点秒为准。
+        #    取不到（极少数历史行）就给 None，后面按 create_ts 兜底。
+        _SEL = ("SELECT m.*, (SELECT b.seq FROM mem_birth b WHERE b.mid=m.id) "
+                "AS tseq FROM mem m ")
         # T5-1：ARCHIVE 是潜意识，不参与实时检索；只有显式点名要它才翻。
         if pools:
-            rows = c.execute("SELECT * FROM mem").fetchall()
+            rows = c.execute(_SEL).fetchall()
         else:
-            rows = c.execute("SELECT * FROM mem WHERE pool != ?",
+            rows = c.execute(_SEL + "WHERE m.pool != ?",
                              (POOL_ARCHIVE,)).fetchall()
 
         # ---- T4-2 时间窗预筛 ----
@@ -6144,18 +6284,47 @@ class MemoryCard:
         if not fresh:
             fresh = hits[:2]
 
+        # 🔧 V5.3.2 统一时间线（用户 m34990）：想起的东西按**时间线 seq** 排，
+        #    并在行首挂一个短日期。三个用处：
+        #      ① 两件事冲突时，"谁在后"以链为准（不是以浮点秒为准）
+        #      ② 编号/脑补出来的事没有时间戳，混进来一眼就能看出对不上
+        #      ③ 一天里"先后"错了，也比"完全不知道顺序"强
+        def _seqk(h):
+            _r = h[2]
+            try:
+                _sq = _r["tseq"]
+            except Exception:
+                _sq = None
+            return (0 if _sq is None else 1, _sq or 0, _r["create_ts"] or 0)
+
+        _direct = [h for h in fresh if h[2]["id"] not in assoc_ids]
+        _assoc = [h for h in fresh if h[2]["id"] in assoc_ids]
+        _direct.sort(key=_seqk)
+        _assoc.sort(key=_seqk)
+        fresh = _direct + _assoc
+
         for s, wn, r in fresh:
             # 🔧 T4-4：联想来的条目加个前缀，跟直接想起区分开。
             #    直接命中最多 5 条，联想最多再补 2 条，别把格子塞满。
+            _ts = r["create_ts"] or 0
+            _tag = ""
+            if _ts:
+                try:
+                    _tag = time.strftime("%m-%d", time.localtime(float(_ts)))
+                except Exception:
+                    _tag = ""
+            if r["superseded_by"]:
+                _tag = (_tag + "｜旧说法") if _tag else "旧说法"
             if r["id"] in assoc_ids:
                 if n_direct >= 5:
                     break
-                line = "- （顺带想起）" + self.render(r, wn)
+                body = "（顺带想起）" + self.render(r, wn)
             else:
                 n_direct += 1
                 if n_direct > 5:
                     break
-                line = "- " + self.render(r, wn)
+                body = self.render(r, wn)
+            line = ("- %s｜%s" % (_tag, body)) if _tag else ("- " + body)
             if used + len(line) > cap4:
                 dropped += 1
                 break
