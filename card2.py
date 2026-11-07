@@ -2238,13 +2238,126 @@ class MemoryCard:
         except Exception:
             pass
 
+    def _emotion(self):
+        """懒加载认知层（预期误差 → 调质脉冲）。挂了就是 None。
+
+        绝不能让「情绪引擎装坏了」变成「她没有身体」——所以出错一律退 None，
+        调用方退回 viscera.guess 那条笨但可靠的路。
+        """
+        if getattr(self, "_elink_tried", False):
+            return getattr(self, "_elink", None)
+        self._elink_tried = True
+        self._elink = None
+        try:
+            import emotion_link
+            link = emotion_link.EmotionLink(self.card_dir or os.getcwd(), "xiyin")
+            if getattr(link, "available", False):
+                self._elink = link
+        except Exception:
+            self._elink = None
+        return self._elink
+
+    def emotion_label(self):
+        """这一轮主导感受的人话（不带数字）。没有引擎就空串。"""
+        link = self._emotion()
+        if not link:
+            return ""
+        try:
+            return link.label()
+        except Exception:
+            return ""
+
+    def _hist_viscera(self, res=None, now=None):
+        """给控制台留一格曲线。同一分钟里不重复写。
+
+        只在真有事发生时写（一句话进来、手动刺激），不跑定时采样 ——
+        曲线该反映「她经历了什么」，而不是「进程还活着」。
+        """
+        try:
+            now = float(now if now is not None else time.time())
+            last = float(getattr(self, "_vhist_ts", 0.0) or 0.0)
+            if not last:
+                row = self.db.execute(
+                    "SELECT MAX(ts) AS m FROM viscera_hist").fetchone()
+                last = float((row["m"] if row is not None else 0) or 0.0)
+            # 5 秒一格：一段正常交流（一问一答）能画出起伏，
+            # 又不至于一条消息写八行。7 天清理兜底，涨不上去。
+            if now - last < 5.0:
+                return
+            v = getattr(self, "v", None) or viscera.base_state()
+            b = viscera.body(v)
+            h = v.get("h") or {}
+            rpe = 0.0
+            try:
+                rpe = float(getattr(res, "rpe", 0.0) or 0.0) if res is not None else 0.0
+            except Exception:
+                rpe = 0.0
+            safety, label = -1.0, ""
+            link = self._emotion()
+            if link:
+                try:
+                    safety = float(link.safe())
+                    label = str(link.label(res) or "")
+                except Exception:
+                    pass
+            c = self.db.cursor()
+            c.execute(
+                "INSERT INTO viscera_hist(ts,hr,resp,face,sym,para,dopa,nora,sero,"
+                "cort,oxy,rpe,safety,label) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (now, float(b.get("hr", 0)), float(b.get("resp", 0)),
+                 float(b.get("face", 0)), float(v.get("symp", 0)),
+                 float(v.get("para", 0)), float(h.get("dopa", 0)),
+                 float(h.get("nora", 0)), float(h.get("sero", 0)),
+                 float(h.get("cort", 0)), float(h.get("oxy", 0)),
+                 rpe, safety, label))
+            # 只留 7 天，老点删掉（曲线画不了那么长，账也不想无限长）
+            c.execute("DELETE FROM viscera_hist WHERE ts < ?", (now - 7 * 86400.0,))
+            self.db.commit()
+            self._vhist_ts = now
+        except Exception:
+            pass
+
+    def viscera_history(self, hours=24.0, limit=600):
+        """控制台用：最近 N 小时的身体曲线。空表就是空数组，不补假数据。"""
+        out = []
+        try:
+            since = float(time.time()) - float(hours) * 3600.0
+            rows = self.db.execute(
+                "SELECT ts,hr,resp,face,sym,para,dopa,nora,sero,cort,oxy,"
+                "rpe,safety,label FROM viscera_hist WHERE ts >= ?"
+                " ORDER BY ts ASC LIMIT ?", (since, int(limit))).fetchall()
+            for r in rows:
+                out.append({
+                    "ts": round(float(r["ts"]), 1),
+                    "hr": round(float(r["hr"]), 1),
+                    "resp": round(float(r["resp"]), 1),
+                    "face": round(float(r["face"]), 3),
+                    "sym": round(float(r["sym"]), 3),
+                    "para": round(float(r["para"]), 3),
+                    "dopa": round(float(r["dopa"]), 2),
+                    "nora": round(float(r["nora"]), 2),
+                    "sero": round(float(r["sero"]), 2),
+                    "cort": round(float(r["cort"]), 2),
+                    "oxy": round(float(r["oxy"]), 2),
+                    "rpe": round(float(r["rpe"]), 3),
+                    "safety": round(float(r["safety"]), 3),
+                    "label": str(r["label"] or ""),
+                })
+        except Exception:
+            return []
+        return out
+
     def viscera_touch(self, text="", now=None, emotion=0.0):
         """一句话进来：先让身体反应，再让激素跟上，最后存回去。
 
         顺序就是人真实的顺序 —— 不是「我想了想觉得被冒犯了」，
         是「心里一沉/心跳快了一下」，然后才「有点生气」。
+
+        两条路：有认知层就走「价值打分 → RPE → 五条调质脉冲 → 灌激素」，
+        没有就退回从话里猜刺激（viscera.guess）。两条路都过一遍时间衰减。
         """
-        now = float(now if now is not None else self.clock.now())
+        # 墙上时间：这层是「身体」，不是「记忆」，不该被记忆时钟卡住
+        now = float(now if now is not None else time.time())
         v = getattr(self, "v", None) or viscera.base_state()
         try:
             last = float(v.get("ts") or 0.0)
@@ -2253,10 +2366,21 @@ class MemoryCard:
         # 时间戳为 0（第一次）时按 0 小时算，别一口气衰减一年
         dt = (now - last) / 3600.0 if last > 0 else 0.0
         dt = max(0.0, min(72.0, dt))
-        events = viscera.guess(text, emotion)
-        self.v = viscera.step(v, dt, events)
+        link = self._emotion()
+        res = None
+        if link:
+            try:
+                res = link.step(text or "")
+            except Exception:
+                res = None
+        if res is not None:
+            self.v = link.apply_to(v, res, dt, now=now)
+        else:
+            events = viscera.guess(text, emotion)
+            self.v = viscera.step(v, dt, events)
         self.v["ts"] = now
         self._save_viscera()
+        self._hist_viscera(res, now)
         return self.v
 
     def viscera_stimulate(self, kinds, strength=1.0, now=None):
@@ -2275,10 +2399,27 @@ class MemoryCard:
         dt = max(0.0, min(72.0, dt))
         if isinstance(kinds, str):
             kinds = [kinds]
-        evs = [(str(k), float(strength)) for k in (kinds or ["chat"])]
-        self.v = viscera.step(v, dt, evs)
+        kinds = list(kinds or ["chat"])
+        evs = [(str(k), float(strength)) for k in kinds]
+        # 有认知层就让它算这一记刺激「比预期好还是差」—— 两个端点各说各的
+        # （心率在爬、情绪写着「安稳」）比没有曲线更糟。
+        res = None
+        link = self._emotion()
+        if link and getattr(link, "available", False):
+            try:
+                from emotion_link import STIM_SCENARIO, STIM_TEXT
+                _k = str(kinds[0])
+                res = link.step(STIM_TEXT.get(_k, ""),
+                                scenario=STIM_SCENARIO.get(_k, "generic"))
+            except Exception:
+                res = None
+        if res is not None:
+            self.v = link.apply_to(v, res, dt, now)
+        else:
+            self.v = viscera.step(v, dt, evs)
         self.v["ts"] = now
         self._save_viscera()
+        self._hist_viscera(res, now)
         return self.v
 
     def viscera_line(self):
@@ -2293,9 +2434,16 @@ class MemoryCard:
         """控制台/接口用：完整数字。"""
         try:
             v = getattr(self, "v", None) or viscera.base_state()
-            return viscera.snapshot(v)
+            snap = viscera.snapshot(v)
         except Exception:
             return {}
+        try:
+            link = self._emotion()
+            if link:
+                snap["emotion"] = link.snapshot()
+        except Exception:
+            pass
+        return snap
 
     def log_hormones(self, now=None, min_interval=300.0):
         """采一条激素样本（默认 5 分钟一次），给控制台画趋势。
@@ -2743,6 +2891,29 @@ class MemoryCard:
             oxy_g REAL NOT NULL DEFAULT 0
         )""")
         c.execute("CREATE INDEX IF NOT EXISTS ix_hlog_ts ON h_log(ts)")
+        # 身体历史：每一次「一句话进来」都留一格。
+        # 为什么要单独一张表而不是塞进 h_log：h_log 记的是慢激素心境
+        # （seor/dopa/cort/oxy/mood），这张记的是**快反应层** —— 心率、
+        # 交感副交感、以及认知层给的五条调质脉冲（DA/NE/OT/5HT/CORT）。
+        # 曲线要能分开画，混在一张表里以后改哪个都得动历史数据。
+        c.execute("""CREATE TABLE IF NOT EXISTS viscera_hist (
+            id    INTEGER PRIMARY KEY AUTOINCREMENT,
+            ts    REAL NOT NULL,
+            hr    REAL NOT NULL DEFAULT 0,
+            resp  REAL NOT NULL DEFAULT 0,
+            face  REAL NOT NULL DEFAULT 0,
+            sym   REAL NOT NULL DEFAULT 0,
+            para  REAL NOT NULL DEFAULT 0,
+            dopa  REAL NOT NULL DEFAULT 0,
+            nora  REAL NOT NULL DEFAULT 0,
+            sero  REAL NOT NULL DEFAULT 0,
+            cort  REAL NOT NULL DEFAULT 0,
+            oxy   REAL NOT NULL DEFAULT 0,
+            rpe   REAL NOT NULL DEFAULT 0,
+            safety REAL NOT NULL DEFAULT -1,
+            label TEXT NOT NULL DEFAULT ''
+        )""")
+        c.execute("CREATE INDEX IF NOT EXISTS ix_vhist_ts ON viscera_hist(ts)")
         self.db.commit()
 
     def _migrate(self):

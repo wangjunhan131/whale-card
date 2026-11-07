@@ -160,6 +160,43 @@ def hormones_series(db_path=DEFAULT_DB, hours=24.0, limit=400):
     return out
 
 
+def emotion_series(db_path=DEFAULT_DB, hours=72.0, limit=600):
+    """viscera_hist：快反应层的曲线 —— 心率、交感/副交感、五条调质、RPE、安全感。
+
+    和 h_log 分开：那边是慢激素心境（几分钟一格），这边是「一句话一格」。
+    空表就是空数组，不补假数据 —— 刚接上引擎时本来就还没有历史。
+    """
+    out = []
+    try:
+        c = _conn(db_path)
+        since = time.time() - float(hours) * 3600.0
+        rows = c.execute(
+            "SELECT ts,hr,resp,face,sym,para,dopa,nora,sero,cort,oxy,"
+            "rpe,safety,label FROM viscera_hist WHERE ts >= ?"
+            " ORDER BY ts ASC LIMIT ?", (since, int(limit))).fetchall()
+        c.close()
+        for r in rows:
+            out.append({
+                "ts": round(_f(r["ts"]), 1),
+                "hr": round(_f(r["hr"]), 1),
+                "resp": round(_f(r["resp"]), 1),
+                "face": round(_f(r["face"]), 3),
+                "sym": round(_f(r["sym"]), 3),
+                "para": round(_f(r["para"]), 3),
+                "dopa": round(_f(r["dopa"]), 2),
+                "nora": round(_f(r["nora"]), 2),
+                "sero": round(_f(r["sero"]), 2),
+                "cort": round(_f(r["cort"]), 2),
+                "oxy": round(_f(r["oxy"]), 2),
+                "rpe": round(_f(r["rpe"]), 3),
+                "safety": round(_f(r["safety"]), 3),
+                "label": str(r["label"] or ""),
+            })
+    except Exception:
+        return []
+    return out
+
+
 def mem_by_day(db_path=DEFAULT_DB, days=14):
     """最近 N 天每天写入几条记忆。"""
     out = []
@@ -832,6 +869,10 @@ def overview(db_path=DEFAULT_DB):
         "forget": forget_curve(db_path),
         "sys": sys_sample(),
         "talk": talk_state(db_path),
+        # 情绪页：快反应层的曲线（心率/交感/五条调质/RPE/安全感）。
+        # 当前这具身体的读数由前端再问一次 /viscera —— 那里走的是卡自己的
+        # viscera 模块，控制台不重写第二份公式。
+        "emotion": emotion_series(db_path),
         "chat": {"cfg": _chatcfg.load_cfg(), "spec": _chatcfg.spec_json()},
         "generated": round(time.time(), 1),
     }
@@ -1293,6 +1334,7 @@ body{font-family:"Inter","Segoe UI","Microsoft YaHei",system-ui,sans-serif;
       <div class="tab on" data-t="dash">状态总览</div>
 <div class="tab" data-t="mem">记忆</div>
       <div class="tab" data-t="ctx">上下文</div>
+      <div class="tab" data-t="emo">情绪</div>
       <div class="tab" data-t="voice">语音</div>
       <div class="tab" data-t="neb">星云</div>
       <div class="tab" data-t="time">时间线</div>
@@ -2692,6 +2734,19 @@ function bar(name, v, tot){
     '<span class="nu">'+mb+'</span></div>';
 }
 
+/* 小方块：一个数字 + 一个中文注。情绪页用，别的页也能用。
+   刻意不依赖样式表里的类名 —— 少一个 CSS 依赖就少一处「本地能看、别人那边塌」。 */
+function kvMini(name, val, note){
+  return '<div style="flex:1 1 104px;min-width:96px;padding:7px 9px;'
+    + 'border:1px solid #242c37;border-radius:9px;background:#1a2029">'
+    + '<div style="font:9.5px Consolas,monospace;color:#5b6474;letter-spacing:.08em">'
+    + esc(name) + '</div>'
+    + '<div style="font:600 18px Consolas,monospace;color:#d5dbe4;line-height:1.25">'
+    + esc(val) + '</div>'
+    + '<div style="font:10px sans-serif;color:#7c8697">' + esc(note || '') + '</div>'
+    + '</div>';
+}
+
 function viewMem(){
   var d=S.data||{}, m=d.metrics||{};
   var regs=(d.regions||[]), rmax=1, rsum=0;
@@ -2843,6 +2898,109 @@ function viewNeb(){
   return out;
 }
 
+function viewEmo(){
+  var d=S.data||{}, em=d.emotion||[];
+  var out='';
+  out+=cardHTML("c12","BODY NOW / 现在这具身体 · 快反应层",
+    '<div id="emoNow" style="display:flex;flex-wrap:wrap;gap:8px"></div>',
+    em.length? ("近 "+em.length+" 个点"):"还没攒到点");
+  out+=cardHTML("c6","HEART / 心率与呼吸",
+    '<canvas id="cvEHR" style="height:150px"></canvas>',"心跳 55→130 · 呼吸 ×5 放大");
+  out+=cardHTML("c6","AUTONOMIC / 交感 vs 副交感",
+    '<canvas id="cvEAP" style="height:150px"></canvas>',"0 → 1");
+  out+=cardHTML("c12","HORMONE FIELD / 激素（快反应层）",
+    '<canvas id="cvEH" style="height:180px"></canvas>',"0 → 100 · 五条主调质");
+  out+=cardHTML("c6","PULSE / 预期误差 RPE",
+    '<canvas id="cvEP" style="height:130px"></canvas>',"−1 坏事 → +1 比预期好");
+  out+=cardHTML("c6","SAFETY / 安全感",
+    '<canvas id="cvES" style="height:130px"></canvas>',"0 → 1 · 低于 0.25 关掉暧昧通路");
+  out+=cardHTML("c12","MOOD MIX / 这段时间的主导情绪",
+    '<canvas id="cvEL" style="height:200px"></canvas>'
+      +'<div id="emoLegend" style="display:flex;flex-wrap:wrap;gap:10px;margin-top:8px;'
+      +'font:12px sans-serif;color:#b9c6d6"></div>',"次数");
+  out+=cardHTML("c12","HOW IT WORKS / 这一层怎么接的",
+    '<div id="emoHow" style="display:flex;flex-direction:column;gap:6px;color:#8b95a5;font:12px sans-serif"></div>',"说明");
+  return out;
+}
+function drawEmo(){
+  var d=S.data||{}, em=(d.emotion||[]);
+  function pts(k){ return em.map(function(x){ return x[k]; }); }
+  var cv=$("#cvEHR");
+  if(cv) lineChart(cv, [
+    {color:"#ff5f6d", pts:pts("hr")},
+    {color:"#57c8f0", pts:em.map(function(x){ return (x.resp||0)*5; })}
+  ], {height:cvh(cv,150), min:55, max:130});
+  var ca=$("#cvEAP");
+  if(ca) lineChart(ca, [
+    {color:"#e8b44a", pts:pts("sym")},
+    {color:"#5fb3d4", pts:pts("para")}
+  ], {height:cvh(ca,150), min:0, max:1});
+  var ch=$("#cvEH");
+  if(ch) lineChart(ch, [
+    {color:"#2fd07d", pts:pts("dopa")},
+    {color:"#e8b44a", pts:pts("nora")},
+    {color:"#57c8f0", pts:pts("sero")},
+    {color:"#ff5f6d", pts:pts("cort")},
+    {color:"#9d8bff", pts:pts("oxy")}
+  ], {height:cvh(ch,180), min:0, max:100});
+  var cp=$("#cvEP");
+  if(cp) lineChart(cp, [{color:"#c78bb8", pts:pts("rpe")}],
+    {height:cvh(cp,130), min:-1, max:1});
+  var cs=$("#cvES");
+  if(cs) lineChart(cs, [{color:"#66c08a", pts:em.map(function(x){
+      return (x.safety!=null && x.safety>=0)? x.safety : null; })}],
+    {height:cvh(cs,130), min:0, max:1});
+  var cl=$("#cvEL");
+  if(cl){
+    var cnt={};
+    /* 按「主情绪」合并：标签后面那截是强度（淡淡的/很明显），
+       不剥掉的话同一个情绪会被拆成三块，饼图就看不出什么了。 */
+    em.forEach(function(x){
+      var k=String(x.label||"未标").replace(/[（(].*$/, "").trim() || "未标";
+      cnt[k]=(cnt[k]||0)+1;
+    });
+    var items=Object.keys(cnt).map(function(k){ return {name:k, n:cnt[k]}; });
+    items.sort(function(a,b){ return b.n-a.n; });
+    donut(cl, items.slice(0,7), cvh(cl,200), "TURNS");
+    /* 图例：光有颜色分不出来是哪一种情绪 —— 饼图没用说明就只是装饰 */
+    var lg=$("#emoLegend");
+    if(lg){
+      var PAL2=["#57c8f0","#2fd07d","#9d8bff","#e8b44a","#ff5f6d","#5f9ea0","#c78bb8"];
+      lg.innerHTML = items.slice(0,7).map(function(it,i){
+        return '<span style="display:inline-flex;align-items:center;gap:6px">'
+          + '<i style="width:9px;height:9px;border-radius:2px;background:'
+          + PAL2[i%PAL2.length] + ';display:inline-block"></i>'
+          + esc(it.name) + ' <b style="color:#e6eef7">' + it.n + '</b></span>';
+      }).join("");
+    }
+  }
+  /* 当前读数走 /viscera：那里用的是卡自己的 viscera 模块，控制台不重写公式 */
+  API("/viscera").then(function(j){
+    var v=(j&&j.viscera)||{}, b=v.body||{}, e=v.emotion||{};
+    var box=$("#emoNow");
+    if(box){
+      var st=e.state||{};
+      box.innerHTML = kvMini("心率", (b.hr||0).toFixed(1), "次/分")
+        + kvMini("呼吸", (b.resp||0).toFixed(1), "次/分")
+        + kvMini("脸红", (b.face||0).toFixed(2), "0→1")
+        + kvMini("交感", (v.symp||0).toFixed(2), "紧张")
+        + kvMini("副交感", (v.para||0).toFixed(2), "松弛")
+        + kvMini("多巴胺", (st.DA!=null?st.DA:0).toFixed(2), "调质")
+        + kvMini("皮质醇", (st.CORT!=null?st.CORT:0).toFixed(2), "调质")
+        + kvMini("催产素", (st.OT!=null?st.OT:0).toFixed(2), "调质")
+        + kvMini("安全感", (e.safety!=null?e.safety:0).toFixed(2), "0→1")
+        + kvMini("主导", esc(e.label||"—"), "");
+      box.insertAdjacentHTML("beforeend",
+        '<div style="flex-basis:100%;font:12px sans-serif;color:#8b95a5">' + esc(v.text||"") + '</div>');
+    }
+    var how=$("#emoHow");
+    if(how) how.innerHTML =
+      '<div>认知层算「这件事比预期好还是差」（预期误差 RPE），'
+      + '给出五条调质的脉冲；生理层（24 种激素 + 交感/副交感）负责回落、负反馈、拮抗。</div>'
+      + '<div>单向衰减、脉冲封顶 ±0.5、慢变量只吃四成 —— 一句话改不掉三天的依恋。</div>'
+      + '<div>数值永远不进模型：给她的只有「心跳快了一拍；呼吸变浅了」这种话。</div>';
+  }).catch(function(){});
+}
 function viewTime(){
   var m=(S.data&&S.data.metrics)||{};
   var tail=((S.data&&S.data.timeline_tail)||[]).slice().reverse();
@@ -3759,6 +3917,7 @@ function render(){
   else if(S.tab==="neb") g.innerHTML=viewNeb();
   else if(S.tab==="time") g.innerHTML=viewTime();
   else if(S.tab==="ctx") g.innerHTML=viewCtx();
+  else if(S.tab==="emo") g.innerHTML=viewEmo();
   else if(S.tab==="talk") g.innerHTML=viewTalk();
   else if(S.tab==="voice") g.innerHTML=viewVoice();
   else g.innerHTML=viewSet();
@@ -3790,6 +3949,7 @@ function autoFill(){
 
 function draw(){
   var d=S.data||{};
+  if(S.tab==="emo"){ drawEmo(); return; }
   if(S.tab==="dash"){
     var hlog=d.hlog||[], m=d.metrics||{};
     var cv=$("#cvH");

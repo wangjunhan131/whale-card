@@ -378,6 +378,40 @@ def step(state, dt_hours, stimuli=()):
     return s
 
 
+# ------------------------------------------------------------------ 外部脉冲注入
+# 用途：让「认知层」（预期误差 → 五条调质脉冲）直接推激素，
+# 而不是从一句话里猜刺激。半衰期、负反馈、拮抗仍归这里管，
+# 所以两种时间尺度同时存在：RPE 是这一秒的事，回落到基线是几小时的事。
+INJECT_SCALE = 18.0   # 满强度脉冲一次最多推 18 点（0~100 空间）
+
+
+def inject(state, deltas, sym=0.0, para=0.0, scale=INJECT_SCALE):
+    """按「相对脉冲」改激素，并叠加自主神经偏移。纯函数。
+
+    deltas: {激素名: -1~1}，慢变量只吃 40%（一句话不该改掉三天的依恋）。
+    sym/para: 交感/副交感的瞬时增量（-1~1）。
+    """
+    s = normalize(state)
+    for k, v in (deltas or {}).items():
+        if k not in s["h"]:
+            continue
+        try:
+            v = float(v)
+        except Exception:
+            continue
+        if not v:
+            continue
+        w = 0.40 if k in SLOW else 1.0
+        cap = CAPS.get(k, 100.0)
+        s["h"][k] = _clamp(s["h"][k] + v * w * float(scale), 0.0, cap)
+    # 交感/副交感是「此刻的状态」，不是累计量：每轮残留 45%，其余由这一轮
+    # 重新定。原来写成累加，十几轮对话就把交感顶死在 1.0 —— 曲线上表现为
+    # 「心率一直 125」，那不是紧张，那是坏掉了。
+    s["symp"] = max(0.0, min(1.0, s["symp"] * 0.45 + float(sym or 0.0)))
+    s["para"] = max(0.0, min(1.0, s["para"] * 0.45 + float(para or 0.0)))
+    return s
+
+
 
 # ------------------------------------------------------------------ 从一句话猜刺激
 # 刻意做得很笨：宁可猜不出（返回 chat），也不要猜错成「被拒绝」。

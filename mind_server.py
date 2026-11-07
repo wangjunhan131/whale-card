@@ -846,6 +846,7 @@ class Handler(BaseHTTPRequestHandler):
                 if path == "/viscera/stim":
                     # 手动给一记刺激（测试/调试用）：只动身体，不写记忆
                     try:
+                        m.flow_time()
                         _kinds = body.get("events") or ["chat"]
                         if isinstance(_kinds, str):
                             _kinds = [_kinds]
