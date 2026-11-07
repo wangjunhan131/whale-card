@@ -2403,21 +2403,31 @@ class MemoryCard:
             self.v = viscera.normalize(self.v or viscera.base_state())
             dt = now - float(self.v.get("ts") or now)
             if dt > 0:
-                self.v = viscera.settle(self.v, dt)
-            # 静息漂移：人坐着不动，心率也有 1~3 次的自然起伏（HRV）。
-            # 只做衰减的话采出来是一条直线 —— 那不是平静，那是没在活。
-            try:
-                import random as _rnd
-                _d = _rnd.uniform(-0.03, 0.03)
-                self.v["symp"] = max(0.0, min(1.0, float(self.v.get("symp") or 0.0) + _d))
-            except Exception:
-                pass
+                self.v = viscera.restless(viscera.settle(self.v, dt))
             self.v["ts"] = now
             self._save_viscera()
-            self._hist_viscera(None, now, force=force)
+            self._hist_viscera(self._last_emotion_res(), now, force=force)
             return self.v
         except Exception:
             return self.v
+
+    def _last_emotion_res(self):
+        """采样点不该让 PARAMS 卡变成一排「—」：沿用最近一次真实计算的结果。"""
+        try:
+            self._ensure_hist_cols()
+            r = self.db.execute(
+                "SELECT p, pulse FROM viscera_hist WHERE p IS NOT NULL "
+                "AND p != '' ORDER BY ts DESC LIMIT 1").fetchone()
+            if not r:
+                return None
+            import json as _json
+            p = _json.loads(r["p"]) if r["p"] else {}
+            pulse = _json.loads(r["pulse"]) if r["pulse"] else {}
+            if not p:
+                return None
+            return {"params": p, "pulse": pulse}
+        except Exception:
+            return None
 
     def viscera_history(self, hours=24.0, limit=600):
         """控制台用：最近 N 小时的身体曲线。空表就是空数组，不补假数据。"""
