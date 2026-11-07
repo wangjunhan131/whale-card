@@ -1919,3 +1919,100 @@ ender()（长期印象格与召回行）；「最近在聊」那格
 **未完成**
 - 「冲突按 seq 裁决」只做了排序与标注（`superseded_by` 目前 0 条），等真出现新旧说法再验。
 - 自主学习→skill 库、主动外发消息的落地通道还没做。
+## 2026-11-07 傍晚｜V5.3.3：把"可信度"补上（软删除 / 隔离区 / 来源校验 / 一层装饰）
+
+**新增**
+- `forget(mid, mode)` 三档删除：logical（dead=1，可恢复）/ natural（原遗忘路径，台账留
+  mid+哈希+理由）/ purge（再清 detail、recall_event、mem_birth、向量缓存 + WAL）。
+  purge 的返回体带 `boundary`，明说 `card.db.bak-*`、便携包、外部锚没动。
+- `quarantine` 列 + `quarantine_rows()` / `release_quarantine()`：防污层判死的记忆
+  现在**真的不进检索**（SQL 级 `COALESCE(dead,0)=0 AND COALESCE(quarantine,0)=0`）。
+- `_origin_ok()`：看 Origin / Referer，剥端口后必须本机；OPTIONS 一律 405。
+  可选 `WHALE_REQUIRE_TOKEN=1` + `X-Whale-Token`（存 `qq_state/api_token.txt`）。
+- 路由：`/forget`、`/mem/quarantine`、`/mem/release`；成功都写时间线。
+- `HORMONE_NOTE`：24 条激素各一句体感，控制台多一张「激素总览 · 体感」卡。
+- `tests/test_t111.py` 26 项：三档语义 / 隔离区进出 / 来源校验 / SQL 级排除。
+- `docs/数字生命卡-技术说明-V5.3.3.txt`（42928 字节）：新增第 8 章，并订正三处措辞
+  （三因子→四因子 + W_CEIL_RECALL 说明；防篡改→可检测部分篡改；时序真实顺序）。
+
+**修改**
+- `remember()` 写入时判 `trust < 0.50 或 conflict=1` → `quarantine=1`（INSERT 28 个占位符）。
+- `console.py` 的 `API()` 自动带令牌，19 处裸 fetch 统一补 header。
+
+**完成**
+- 全套 45 个测试文件 0 挂；真卡重启后 /health ok（1124 条）、跨站 POST 403、
+  本机 POST 200、logical 删完 `recall` 确认 False、bad id 404 / bad mode 400。
+
+**未完成 / 已知边界**
+- purge 不清磁盘备份与便携包副本（设计如此，返回体已点名）。
+- 隔离判别仍靠规则版信任分：0.50~0.70 那批误判（如"你是我的骄傲"）只是压低分，不隔离。
+- 19 条装饰激素没有任何行为影响 —— 按用户要求只当观感，别拿它们当机制。
+
+**教训**
+- 补丁脚本里用 `'''...'''` 写 `"\n"` 会被当真实换行 → `SyntaxError`，改 `chr(10)`。
+- `MemoryCard` 没有 `self.lock`（锁在 `mind.lock`），照抄旧写法会连删三处缩进。
+- `json.dumps` 产出双引号字符串，HTML 属性里的 `"` 会变成 `\"` 撑坏整行 → 用 `repr()`。
+- `recall()` 返回 tuple 不是 dict，测试里 `h.get("id")` 会 `AttributeError`。
+
+## 2026-11-07 夜｜V5.3.4：别把猜的当成记得（召回带对象 / 低置信 / 共现表 / 别家 AI / 主动开口）
+
+**新增**
+- ``recall(..., about_uid=)`` 软加权：同一个人的记忆 ×1.10、明确属于别人 ×0.92。
+  不做硬过滤 —— about_uid 覆盖率只有三成，硬过滤会把七成记忆挡死。
+- ``CONF_WEAK = 0.34``：top1 低于它时，【这句话让我想起了】前加
+  「（这几条我不太确定，可能记岔了）」。
+- ``condition_expected(a,b,n,last_ts)`` 共现表 + ``expected_after(region,k)``：
+  remember() 里跟「上一条同一个人（没标人则全局）」连一笔，回答「A 之后常跟 B」。
+  不做 SNN：事件标签仍要 LLM 生成，共现表几十行给同一信号且解释得清。
+- ``qq_guard.looks_like_bot()``：14 个短语 + 「200 字以上且含首先/其次」→ source=qq-bot、
+  salience ≤0.45（群里 49% 的消息来自另一个 AI，不标以后会把它的口吻当群友）。
+- ``tools/qq_proactive.py``：动机引擎的出口。问卡 → 卡否决（安静/上课/间隔/额度）→
+  只在 reach_out / care_check 组一句 → 自己再核时间窗 → 发 → POST /motiv/done。
+  **默认不发**，``--send`` 才真发。
+- ``tests/test_t112.py`` 17 项；``docs/数字生命卡-技术说明-V5.3.4.txt``（第 9 章）。
+
+**修改**
+- ``assemble_context(..., about_uid=None)``：显式参数（上一版误写成 kwargs.get，NameError）。
+
+**完成**
+- 全套 **46 个测试文件 0 挂**；真卡重启后 /health ok（1124 条 / 第 22 天）。
+- 推送 ``463a8f2``；顺手清掉 3 条自己冒烟写进真卡的 probe 记录（purge）。
+
+**未完成 / 已知边界**
+- 评估集 R@1 62.5%（5/8，样本太小没有统计意义）；比上次 75% 少一条，
+  不能排除是这一轮反复跑 eval 把 access 权重抬起来造成的漂移 —— 需要扩样本再看。
+- 多对象关系卡、自主学习→skill 库、主动升级的落地形式，还没做。
+
+**教训**
+- ``python -X utf8 -c`` 里套三引号/多层引号必翻车（今天四次），一律写临时 .py 再跑。
+- ``recall()`` 对外返回的是候选元组 (score, wn, row, sim, cover)，取 id 要 ``[2]["id"]``。
+
+## 2026-11-07 夜｜V5.3.5：关系卡 / 学到的整理成技能 / 主动升级提案
+
+**新增**
+- ``person`` 表 + ``person_touch/person_card/people``：一个人一行（关系层、第一次、最后一次、
+  出现次数、各分区分布）。remember() 带 about_uid 时自动挂一笔。
+  **只记关系与频次，不记评价** —— 好感度打分与「不用装热络」冲突。
+- ``GET /people``、``GET /person?uid=``（没有就 404 not_found，不编）。
+- ``tools/learn_to_skill.py``：把一份笔记压成一条技能（场景 / 做法）。
+  抽不出「什么时候用」就如实写「未标注」，不替它编场景；同名覆盖，不留两条。
+- ``tools/self_upgrade.py``：只读体检 → 一条提案写回卡（region=work）。
+  **只写提案，不改代码、不删数据、不动参数** —— 发现问题可以自己做，动手得先说出来。
+- ``tests/test_t113.py`` 24 项。
+
+**修改**
+- ``mind_server`` 两个新路由的 query 解析：``_qs`` 是另一个方法的局部变量，
+  在 ``_route`` 里 UnboundLocalError → 各自就地 ``parse_qs``。
+
+**完成**
+- t109 32 / t110 29 / t111 26 / t112 17 / t113 24 全绿；真卡重启 /health ok（1127 条）。
+- 推送 ``b8a8780``。真跑一次 ``self_upgrade``：7 项里只有「对象覆盖率 33%」要看一眼。
+
+**未完成 / 已知边界**
+- 关系卡目前只有基础频次（没有「上次聊了什么」「他最近在忙什么」），要等写入侧
+  真带上 about_uid 才有内容 —— 现在库里 33% 有对象。
+- 主动开口通道默认不发；要不要真开（以及发什么）还没定。
+
+**教训**
+- ``ON CONFLICT ... layer=excluded.layer OR person.layer`` 里 ``OR`` 是逻辑或，
+  不是拼接 —— 写成了会把 layer 变成 0。要合并字符串用 ``CASE WHEN``/``||``。

@@ -72,14 +72,18 @@ try:
         "SELECT count(*) FROM mem WHERE raw LIKE '验收条目 %'").fetchone()[0]
     chk("灌完之后都还在", n_before == over, n_before)
 
-    print("[3] 跑一轮 tick，触发容量腾退")
+    print("[3] 跑一轮 tick —— V5.4 之后不再按容量腾退")
     tomb_before = c.db.execute("SELECT count(*) FROM mem_tomb").fetchone()[0]
     c.tick(1.0)
     tomb_after = c.db.execute("SELECT count(*) FROM mem_tomb").fetchone()[0]
 
     short_n = c.db.execute(
         "SELECT count(*) FROM mem WHERE pool='short'").fetchone()[0]
-    chk("短期池回到上限以内", short_n <= card2.N_SHORT_MAX, short_n)
+    # 2026-11-07 用户拍板：「所有池都不设置容量限制」——
+    # 所以短期池不再有 N_SHORT_MAX 这道闸，超了也全留着，
+    # 去留只由 7 天时间窗决定。
+    chk("短期池**不再**被容量上限削回去（超了也留着）",
+        short_n > card2.N_SHORT_MAX, (short_n, card2.N_SHORT_MAX))
 
     n_after = c.db.execute(
         "SELECT count(*) FROM mem WHERE raw LIKE '验收条目 %'").fetchone()[0]
@@ -88,15 +92,19 @@ try:
     chk("没有新增墓碑", tomb_after == tomb_before,
         (tomb_before, tomb_after))
 
-    med = c.db.execute(
-        "SELECT count(*) FROM mem WHERE raw LIKE '验收条目 %' AND pool='medium'"
-    ).fetchone()[0]
-    chk("腾出去的进了 medium", med > 0, med)
+    chk("驱逐函数已经是空操作（没人在按容量踢人）",
+        c._evict_short_overflow(c.clock.now()) == [])
 
-    low = c.db.execute(
-        "SELECT count(*) FROM mem WHERE raw LIKE '验收条目 %' AND pool='medium'"
-        " AND w < ?", (card2.W_FLOOR_MEDIUM,)).fetchone()[0]
-    chk("进 medium 的都抬到了存活线以上", low == 0, low)
+    # 时间窗仍然有效：把一条挪到 8 天前，再跑 tick，它必须离开 short
+    _old = c.db.execute(
+        "SELECT id FROM mem WHERE raw LIKE '验收条目 %' LIMIT 1").fetchone()[0]
+    c.db.execute("UPDATE mem SET t_anchor=?, last_active_ts=? WHERE id=?",
+                 (c.clock.now() - 8 * 86400, c.clock.now() - 8 * 86400, _old))
+    c.db.commit()
+    c.tick(1.0)
+    _r = c.db.execute("SELECT pool FROM mem WHERE id=?", (_old,)).fetchone()
+    chk("超过 7 天窗的会离开短期池（时间决定去留）",
+        _r is None or _r[0] != "short", (_r[0] if _r else "(已删)"))
 
     print("[4] 真诚睡（chatter）规矩没被带坏")
     t = c.db.execute(

@@ -56,7 +56,9 @@ chk("空关系层不写成 0", (c.person_card("u2") or {}).get("layer") == "")
 chk("uid 空则什么都不做", c.person_touch("", "friend", ts=1.0) is None)
 
 lst = c.people(limit=10)
-chk("列表按次数排", lst and lst[0]["uid"] == "u1", lst)
+_mine = [r for r in lst if r["uid"] in ("u1", "u2")]
+chk("列表按次数排（只看本用例造的那两个）",
+    len(_mine) == 2 and _mine[0]["uid"] == "u1", _mine)
 
 # 大分区取前三
 for i in range(5):

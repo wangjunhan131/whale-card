@@ -638,6 +638,18 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(200, {"ok": True, "cfg": _chat.load_cfg(),
                                         "spec": _chat.spec_json(),
                                         "path": _chat.CFG_PATH})
+            if method == "GET" and path == "/inbox":
+                # V5.4 收件层：看最近收到什么（默认只给 300 字摘要）
+                from urllib.parse import parse_qs as _pq4
+                _q4 = _pq4(self.path.split("?", 1)[1] if "?" in self.path else "")
+                _lim = int((_q4.get("limit") or ["50"])[0])
+                _hrs = float((_q4.get("hours") or ["0"])[0]) or None
+                _unk = (_q4.get("unkept") or ["0"])[0] in ("1", "true")
+                _full = (_q4.get("full") or ["0"])[0] in ("1", "true")
+                return self._send(200, {
+                    "items": m.card.inbox_list(limit=_lim, hours=_hrs,
+                                               unkept_only=_unk, full=_full),
+                    "stats": m.card.inbox_stats()})
             if method == "GET" and path == "/voice_config":
                 return self._send(200, _voice_payload())
             if method == "GET" and path == "/voice_file":
@@ -1221,6 +1233,42 @@ class Handler(BaseHTTPRequestHandler):
                     if not out.get("ok"):
                         return self._send(404, out)
                     return self._send(200, out)
+                if path == "/intake":
+                    # V5.4 统一收件口：以后接任何 APP 都只是往这里扔原文
+                    _txt = (body.get("text") or "").strip()
+                    if not _txt:
+                        return self._fail(400, "empty_text", "要给出 text")
+                    _id = m.card.inbox_add(
+                        _txt, source=body.get("source", ""),
+                        channel=body.get("channel", "private"),
+                        who=body.get("who", ""), uid=body.get("uid", ""),
+                        gid=body.get("gid", ""), kind=body.get("kind", "text"),
+                        ts=body.get("ts"), note=body.get("note", ""))
+                    if _id is None:
+                        return self._fail(400, "intake_failed", "收件层没写进去")
+                    try:
+                        if m.tl is not None:
+                            m.tl.append("intake", "收到一条 %s：%s" % (
+                                body.get("source", "?"), _txt[:40]))
+                    except Exception:
+                        pass
+                    return self._send(200, {"ok": True, "id": _id})
+                if path == "/inbox":
+                    from urllib.parse import parse_qs as _pq3
+                    _q3 = _pq3(self.path.split("?", 1)[1] if "?" in self.path else "")
+                    _lim = int((_q3.get("limit") or ["50"])[0])
+                    _hrs = float((_q3.get("hours") or ["0"])[0]) or None
+                    _unk = (_q3.get("unkept") or ["0"])[0] in ("1", "true")
+                    _full = (_q3.get("full") or ["0"])[0] in ("1", "true")
+                    return self._send(200, {
+                        "items": m.card.inbox_list(limit=_lim, hours=_hrs,
+                                                   unkept_only=_unk, full=_full),
+                        "stats": m.card.inbox_stats()})
+                if path == "/inbox/mark":
+                    _n = m.card.inbox_mark(body.get("ids") or [],
+                                           kept=body.get("kept", 1),
+                                           kept_mid=body.get("kept_mid"))
+                    return self._send(200, {"ok": True, "n": _n})
                 if path == "/forget":
                     # 三档删除语义（V5.3.3）。mode: logical / natural / purge
                     # 默认 logical —— 删错了还能捞回来，purge 才真清。
@@ -1766,6 +1814,26 @@ def main(argv=None):
     mind = Mind(a.db)
     Handler.mind = mind
     st = mind.card.stats()
+
+    # ===== V5.4 启动守卫（2026-11-07 用户问「没插卡就不加载吗」时定的）=====
+    # 真正的风险不是「没插卡」，而是：盘没挂上时，程序照着原路径去连，
+    # SQLite 会**替你新建一个空库** —— 服务照常起来、/health 报 ok、
+    # 只是记忆是 0 条。看着一切正常，这最骗人。
+    # 所以这里加一道闸：0 条记忆就当"这不是我的卡"，拒绝启动。
+    # 全新空卡要跑（first_run / 测试）就显式设 WHALE_ALLOW_EMPTY=1。
+    if int(st.get("total") or 0) == 0 and os.environ.get(
+            "WHALE_ALLOW_EMPTY", "0") != "1":
+        print("[mind] 这张卡是空的（0 条记忆），拒绝启动。", file=sys.stderr)
+        print("[mind] 多半是盘没挂上、路径指错了，或者刚被建成空库。",
+              file=sys.stderr)
+        print("[mind] 真要用一张全新空卡，设环境变量 WHALE_ALLOW_EMPTY=1。",
+              file=sys.stderr)
+        try:
+            mind.close()
+        except Exception:
+            pass
+        srv.server_close()
+        return 4
     print("[mind] 卡已打开：%s" % os.path.abspath(a.db))
     print("[mind] %d 条记忆 / %d 条细节 / 盖章=%s"
           % (st["total"], st["details"], mind.sealed))

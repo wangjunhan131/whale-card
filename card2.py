@@ -1690,6 +1690,7 @@ REGION_BOOST = 1.25
 # 默认值来自 10-30 在 20 条真实查询上的网格搜索；10-31 修好候选集/分区/BLAS 后
 # 由 eval_weights.py 重新扫描一遍确认（见那个脚本开头的说明）。
 SCORE_W = (0.35, 0.30, 0.20, 0.10)
+
 # 对象倾向：同一个人 ×1.10，明确属于别人 ×0.92（软加权，见 recall）
 OBJECT_BOOST_SAME = 1.10
 OBJECT_BOOST_OTHER = 0.92
@@ -1703,6 +1704,26 @@ EMOTION_RECALL_BOOST = 0.25   # 情绪满格时最多 +25%
 # 两个开关默认关：实测都会让评估集的 R@1 掉一半（详见检索打分那段注释）。
 _EMOTION_BOOST_ON = os.environ.get("WHALE_EMO_BOOST", "0") == "1"
 _RECENCY_FRESH_STEP = os.environ.get("WHALE_FRESH_STEP", "0") == "1"
+
+# ===== V5.4 时间窗加成（2026-11-07 用户拍板）=====
+# 他说的是：「就在当前提问之前的一个月内，他的那些消息的权重会稍微高一点点，
+# 超过一个月就回落到正常衰减曲线，相当于在原来的权重曲线上加了一块东西」。
+# 所以这里**不是**给全库加新近度（11-06 实测那种做法把 R@1 从 75% 打到 37.5%，
+# 因为每天几百条群消息，越近顶上来的越是刚聊完的废话），而是：
+#   · 只作用于「他本人说的话」（speaker == 'user'）——群消息、我自己的话都不加
+#   · 30 天内线性衰减，最多 +12%，超过 30 天严格为 0
+#   · 乘在最终分 s 上，不动 SCORE_W / recency 项本身，随时可 env 关掉
+# 参数是扫出来的，不是拍的（2026-11-07 深夜，卡副本上跑 tools/eval_memory.py）：
+#   关掉        R@1 75.0% / R@3 75.0%
+#   12% / 30天  R@1 62.5% / R@3 87.5%   ← 太猛，把该想起的挤下去了
+#   6%  / 30天  R@1 75.0% / R@3 87.5%   ← 选它
+#   12% / 7天   R@1 75.0% / R@3 87.5%
+#   6%  / 7天   R@1 75.0% / R@3 87.5%
+# 也就是说：加成控制在 6% 以内时，第一命中不掉、前三命中多捞回一条。
+WINDOW_BONUS_DAYS = float(os.environ.get("WHALE_WINDOW_DAYS", "30") or 30)
+WINDOW_BONUS_MAX = float(os.environ.get("WHALE_WINDOW_MAX", "0.06") or 0.06)
+_WINDOW_BONUS_ON = os.environ.get("WHALE_WINDOW_BONUS", "1") == "1"
+
 RECENCY_FAST_DAYS = 0.5       # 近期那一档：半天之内几乎必然先想起
 RECENCY_SLOW_DAYS = 14.0      # 远期那一档：原来那个常数
 
@@ -3767,6 +3788,18 @@ class MemoryCard:
              _trust, _conflict, _why, _value, source or "",
              str(about_uid or ""), _lay, _quar))
         mid = c.lastrowid
+        # V5.4：正式入库的记忆也在收件层留一份原文（kept=1）。
+        # 这样短期池淘汰之后，60 小时内还能从收件层把它原样翻回来 —
+        # 「原文进短期」不再依赖我每轮都记得调 /report。
+        try:
+            self._ensure_inbox(c)
+            c.execute(
+                "INSERT INTO inbox(ts,source,channel,who,uid,gid,kind,text,"
+                "kept,kept_mid,note) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                (at, source or "", "private", "", str(about_uid or ""), "",
+                 mtype or "text", text, 1, mid, "remember()"))
+        except Exception as _ibe:
+            print("[card2] 收件层留档失败: %s" % _ibe)
         if _emb is not None:
             self._emb_cache[mid] = semantic_mod.from_blob(_emb)
         for kind, txt, wgt in details:
@@ -3986,9 +4019,11 @@ class MemoryCard:
                 else:
                     events.append((r["id"], "expire", None))
 
-        # 2) 短期池容量驱逐（V5.0 补回：满了也要走海马，不能直接 pop）
-        ev = self._evict_short_overflow(now)
-        events.extend(ev)
+        # 2) 收件层过期清理（V5.4）：只留 60 小时，没被挑中的到期就走
+        try:
+            self.inbox_gc(now=now)
+        except Exception as _ige:
+            print("[card2] 收件层清理失败: %s" % _ige)
 
         # 3) 细节衰减
         #
@@ -4183,30 +4218,14 @@ class MemoryCard:
         return target
 
     def _evict_short_overflow(self, now):
-        """短期池满 N_SHORT_MAX 时的驱逐（V3.7 §3.2 / V5.0 补回）
+        """已停用：短期池不再按容量驱逐（V5.4，2026-11-07 用户拍板）
 
-        规则：按 Score_evict = w_current * (1 - age / SHORT_MAX_TTL) 从小到大踢。
-        被踢的**必须走海马判定**，不能直接 pop —— 低分丢弃，高分转中期/长期。
+        「所有池都不设置容量限制」——所以「满 N 条就沉中期」这套容量机制
+        整个拿掉。短期池现在**只是一段 7 天的时间窗**（`SHORT_MAX_TTL`）：
+        七天之内全部留着，到期由 `_consolidate()` 按海马分决定沉到哪里，
+        与「池子里现在有多少条」完全无关。
         """
-        rows = self.db.execute(
-            "SELECT * FROM mem WHERE pool='short'").fetchall()
-        n = len(rows)
-        if n <= N_SHORT_MAX:
-            return []
-        scored = []
-        for r in rows:
-            wn = wn_row(r, now)
-            # 这里的 age 也是现实时间，理由同 tick 里的到期判定：
-            # 匀位置看的是"它占着桌子多久了"，不是"它忘得多慢"。
-            age = max(0.0, now - r["t_anchor"])
-            evict_score = wn * max(0.0, 1.0 - age / SHORT_MAX_TTL)
-            scored.append((evict_score, r["id"], r))
-        scored.sort(key=lambda x: x[0])        # 最小的先踢
-        events = []
-        for _s, mid, r in scored[:n - N_SHORT_MAX]:
-            moved = self._consolidate(r, now)
-            events.append((mid, "evict->" + (moved or "dropped"), None))
-        return events
+        return []
 
     def _sink(self, now):
         """五空间下沉：LONG → ARCHIVE → DEEP → TRACE
@@ -4474,6 +4493,125 @@ class MemoryCard:
                                "G: 便携包副本、外部锚（anchor.json）。"
                                "要连备份一起清得单独说。")
         return out
+
+    # ===== V5.4 收件层 inbox =====
+    # 为什么要有这一层（2026-11-07 用户定的）：
+    #   1) 本窗口靠我每轮手动 /report 写两条，漏一轮就丢（11-07「号被封 7 天」
+    #      就是这么丢的）；
+    #   2) QQ 走 qq_guard 只按规则筛重点，普通闲聊只落 todo.jsonl；
+    #   3) B站/抖音/小说我看完只写进 whale-lab notes，卡完全不知道。
+    # 所以：所有来源先进这里（原文一字不落、落盘），再挑「有意义的原文」进短期池。
+    # 它在短期池**前面**，只负责装下 + 除杂，不做分类、不打分。
+    def _ensure_inbox(self, c=None):
+        c = c or self.db.cursor()
+        c.execute(
+            "CREATE TABLE IF NOT EXISTS inbox("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT,"
+            "ts REAL, source TEXT, channel TEXT, who TEXT, uid TEXT, gid TEXT,"
+            "kind TEXT, text TEXT, kept INTEGER DEFAULT 0, kept_mid INTEGER,"
+            "note TEXT)")
+        c.execute("CREATE INDEX IF NOT EXISTS idx_inbox_ts ON inbox(ts)")
+        return c
+
+    def inbox_add(self, text, source="", channel="private", who="", uid="",
+                  gid="", kind="text", ts=None, note="", kept=0, kept_mid=None):
+        """把一条原文塞进收件层。返回 id（失败返回 None，不抛）。"""
+        try:
+            t = (text or "").strip()
+            if not t:
+                return None
+            c = self._ensure_inbox()
+            now = float(ts if ts is not None else self.clock.now())
+            c.execute(
+                "INSERT INTO inbox(ts,source,channel,who,uid,gid,kind,text,"
+                "kept,kept_mid,note) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                (now, source or "", channel or "private", who or "", str(uid or ""),
+                 str(gid or ""), kind or "text", t, int(kept or 0),
+                 kept_mid, note or ""))
+            self.db.commit()
+            return c.lastrowid
+        except Exception as e:
+            print("[card2] 收件层写入失败: %s" % e)
+            return None
+
+    def inbox_list(self, limit=50, hours=None, unkept_only=False, full=False):
+        """看收件层里有什么。text 默认截到 300 字，full=True 给原文。"""
+        try:
+            c = self.db.cursor()
+            self._ensure_inbox(c)
+            where, args = [], []
+            if hours:
+                where.append("ts >= ?")
+                args.append(float(self.clock.now()) - float(hours) * 3600.0)
+            if unkept_only:
+                where.append("COALESCE(kept,0)=0")
+            sql = ("SELECT * FROM inbox"
+                   + (" WHERE " + " AND ".join(where) if where else "")
+                   + " ORDER BY ts DESC LIMIT ?")
+            args.append(int(limit))
+            out = []
+            for r in c.execute(sql, args):
+                d = dict(r)
+                if not full:
+                    t = d.get("text") or ""
+                    d["text"] = t if len(t) <= 300 else t[:300] + "…"
+                    d["text_len"] = len(t)
+                out.append(d)
+            return out
+        except Exception as e:
+            print("[card2] 收件层读取失败: %s" % e)
+            return []
+
+    def inbox_mark(self, ids, kept=1, kept_mid=None):
+        """标记「这几条已经挑进记忆了」。"""
+        try:
+            if isinstance(ids, (int, str)):
+                ids = [ids]
+            ids = [int(i) for i in ids]
+            if not ids:
+                return 0
+            c = self._ensure_inbox()
+            q = "UPDATE inbox SET kept=? WHERE id IN (%s)" % ",".join("?" * len(ids))
+            c.execute(q, [int(kept or 0)] + ids)
+            if kept_mid is not None:
+                c.execute("UPDATE inbox SET kept_mid=? WHERE id=?", (kept_mid, ids[0]))
+            self.db.commit()
+            return len(ids)
+        except Exception as e:
+            print("[card2] 收件层标记失败: %s" % e)
+            return 0
+
+    def inbox_gc(self, ttl_hours=60.0, now=None):
+        """收件层过期清理：没被挑中的整条删；被挑中的只清正文留个壳。
+
+        用户定的保留时间是 60 小时。删掉的是「没被判定有意义」的那些 —
+        这不是压缩（压缩是改写），是「没挑中就让它走」。
+        """
+        stats = {"dropped": 0, "blanked": 0}
+        try:
+            now = float(now if now is not None else self.clock.now())
+            cut = now - float(ttl_hours) * 3600.0
+            c = self._ensure_inbox()
+            c.execute("DELETE FROM inbox WHERE ts < ? AND COALESCE(kept,0)=0", (cut,))
+            stats["dropped"] = c.rowcount or 0
+            c.execute("UPDATE inbox SET text='' WHERE ts < ? AND COALESCE(kept,0)=1"
+                      " AND COALESCE(text,'')<>''", (cut,))
+            stats["blanked"] = c.rowcount or 0
+            self.db.commit()
+        except Exception as e:
+            print("[card2] 收件层清理失败: %s" % e)
+        return stats
+
+    def inbox_stats(self):
+        try:
+            c = self._ensure_inbox()
+            rows = list(c.execute(
+                "SELECT COALESCE(kept,0) k, COUNT(*) n FROM inbox GROUP BY k"))
+            tot = sum(int(r["n"]) for r in rows)
+            kept = sum(int(r["n"]) for r in rows if int(r["k"]) == 1)
+            return {"total": tot, "kept": kept, "unkept": tot - kept}
+        except Exception:
+            return {"total": 0, "kept": 0, "unkept": 0}
 
     def quarantine_rows(self, limit=50):
         """看一眼隔离区里都有谁 —— 默认它们不进上下文，但也得能查。"""
@@ -5770,8 +5908,15 @@ class MemoryCard:
                     if _ou == str(about_uid):
                         s *= OBJECT_BOOST_SAME
                     elif _ou:
-                        s *= OBJECT_BOOST_OTHER \
-                    * (0.85 + 0.30 * r["salience"])
+                        s *= OBJECT_BOOST_OTHER
+                # salience 乘子：这条本身有多重（对所有候选生效）
+                s *= (0.85 + 0.30 * r["salience"])
+                # V5.4 时间窗加成：只给他本人说的话，30 天内越近越多
+                if _WINDOW_BONUS_ON and (r["speaker"] or "") == "user":
+                    _age_s = max(0.0, now - r["last_active_ts"])
+                    _span = WINDOW_BONUS_DAYS * DAY
+                    if _age_s < _span:
+                        s *= (1.0 + WINDOW_BONUS_MAX * (1.0 - _age_s / _span))
                 # 情绪调制（2026-11-07）：不是加分，是放大 ——
                 # 「想不想得起来」×「这件事当时有多重」。
                 # **默认关**：实测开了之后 R@1 75%→37.5%（见 recency 那段记录）。
