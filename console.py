@@ -3001,6 +3001,15 @@ function _p95(arr){
 }
 function drawEmo(){
   var d=S.data||{}, em=(d.emotion||[]);
+  /* 早期没有定时采样，那几个零散老点会把横轴撑开一大片空白、把纵轴也撑高，
+     结果「正常那一段」被压成贴着中线的细线。只画最后一截连续采样的点：
+     从末尾往回走，相邻两点超过 15 分钟（>7.5 倍采样周期）就算断过。 */
+  var _dropped=0;
+  if(em.length>8){
+    var _GAP=900, _cut=em.length-1;
+    while(_cut>0 && (em[_cut].ts - em[_cut-1].ts) <= _GAP) _cut--;
+    if(_cut>0 && em.length-_cut>=5){ _dropped=_cut; em=em.slice(_cut); }
+  }
   var X=em.map(function(x){ return x.ts; });
   function pts(k){ return em.map(function(x){ return x[k]; }); }
 
@@ -3094,7 +3103,7 @@ function drawEmo(){
   if(c24) drawHormoneGrid(c24, em);
   /* 叠在一张表上：按「相对各自基线的偏差%」画，这样 24 条才可比 */
   var cov=$("#cvEOV");
-  if(cov) drawHormoneOverlay(cov, em);
+  if(cov) drawHormoneOverlay(cov, em, _dropped);
   /* 动态参数：门控/疲劳/心境/安全感 0~1，预期误差单独一条 −1~+1 */
   var cpm=$("#cvEPM");
   if(cpm) lineChart(cpm, [
@@ -3148,7 +3157,7 @@ function drawEmo(){
       + '<div>数值永远不进模型：给她的只有「心跳快了一拍；呼吸变浅了」这种话。</div>';
   }).catch(function(){});
 }
-function drawHormoneOverlay(cv, em){
+function drawHormoneOverlay(cv, em, dropped){
   /* 24 条叠一张表：纵轴是「相对自己基线的偏差百分数」。
      绝对值没法同轴 —— 皮质醇 18 和血清素 55 放一起，只有一条看得见。
      纵轴**按窗口里的真实幅度自适应**：原来写死 −90~200，平时那点 ±5% 的
@@ -3249,7 +3258,8 @@ function drawHormoneOverlay(cv, em){
   });
   /* 把当前缩放写在左上角：图变了必须让人知道为什么变 */
   g.fillStyle="rgba(185,198,214,0.65)"; g.font="10px ui-monospace,monospace";
-  g.fillText("纵轴 −"+Math.round(-lo)+"% ~ +"+Math.round(hi)+"%（0 在正中，上下对称）", PAD.l+6, PAD.t+11);
+  g.fillText("纵轴 −"+Math.round(-lo)+"% ~ +"+Math.round(hi)+"%（0 在正中，上下对称）"
+    + (dropped>0 ? "  · 前面 "+dropped+" 个稀疏点已收起（那时候还没有定时采样）" : ""), PAD.l+6, PAD.t+11);
   var lg=$("#emoHormLegend");
   if(lg){
     lg.innerHTML = chips.map(function(t){
