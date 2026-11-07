@@ -3103,11 +3103,21 @@ function drawEmo(){
     var lg=$("#emoLegend");
     if(lg){
       var PAL2=["#57c8f0","#2fd07d","#9d8bff","#e8b44a","#ff5f6d","#5f9ea0","#c78bb8"];
-      lg.innerHTML = items.slice(0,12).map(function(it,i){
-        return '<span style="display:inline-flex;align-items:center;gap:6px">'
+      /* 常驻全套色标：只列「出现过」的那几种，看的人就不知道别的情绪是什么颜色，
+         也没法判断「这段时间确实没出现」还是「图例漏了」。缺的补 0 次。 */
+      var ALL12=["羞涩心动","心动悸动","轻快愉悦","安稳松弛","失落收敛","害怕回避",
+                 "忐忑不安","愧疚自责","酸涩在意","疲惫倦怠","抽离麻木","五味杂陈",
+                 "静息"];
+      var seenN={}; items.forEach(function(it){ seenN[it.name]=it.n; });
+      var order=items.slice(0,12).map(function(it){ return it.name; });
+      ALL12.forEach(function(nm){ if(order.indexOf(nm)<0 && order.length<13){ order.push(nm); } });
+      lg.innerHTML = order.map(function(nm,i){
+        var n=(seenN[nm]||0);
+        var dim=(n? '':' opacity:0.42');
+        return '<span style="display:inline-flex;align-items:center;gap:6px;'+dim+'">'
           + '<i style="width:9px;height:9px;border-radius:2px;background:'
           + PAL2[i%PAL2.length] + ';display:inline-block"></i>'
-          + esc(it.name) + ' <b style="color:#e6eef7">' + it.n + '</b></span>';
+          + esc(nm) + ' <b style="color:#e6eef7">' + n + '</b></span>';
       }).join("");
     }
   }
@@ -3116,7 +3126,12 @@ function drawEmo(){
   if(c24) drawHormoneGrid(c24, em);
   /* 叠在一张表上：按「相对各自基线的偏差%」画，这样 24 条才可比 */
   var cov=$("#cvEOV");
-  if(cov) drawHormoneOverlay(cov, em, _dropped);
+  /* 滚动窗口：686 个点压在一张图上就是「一坨毛线」，看不出任何起伏。
+     只画最近 240 点，横轴就是这个窗口的真实时间 —— 老的自己滑出去。 */
+  if(cov){
+    var _win=em.slice(-240);
+    drawHormoneOverlay(cov, _win, _dropped);
+  }
   /* 动态参数：门控/疲劳/心境/安全感 0~1，预期误差单独一条 −1~+1 */
   var cpm=$("#cvEPM");
   if(cpm) lineChart(cpm, [

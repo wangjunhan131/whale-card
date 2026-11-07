@@ -2658,13 +2658,40 @@ class MemoryCard:
         except Exception:
             return self.v
 
+    class _CarriedRes(object):
+        """把上一次真实计算的参数复原成「带属性的结果对象」。
+
+        为什么需要它：`_hist_viscera()` 是用 `getattr(res, "rpe")` 这种方式
+        读参数的，而采样点传进来的是 dict —— 于是采样点永远写成
+        rpe=0、v_actual=None……控制台上就表现为「预期误差和安全感变成直线、
+        PARAMS 卡全是零」。不是算错了，是**读法不匹配**。
+        没有新事件时沿用上一次的读数，比硬写 0 诚实。
+        """
+
+        def __init__(self, p=None, pulse=None, rpe=None):
+            p = p or {}
+            for k in ("v_actual", "v_expect", "gate", "fatigue",
+                      "safety", "turn", "dominant"):
+                setattr(self, k, p.get(k))
+            self.rpe = p.get("rpe", 0.0) if rpe is None else rpe
+            self.params = p
+            self.pulse = pulse or {}
+            self.carried = True
+
     def _last_emotion_res(self):
         """采样点不该让 PARAMS 卡变成一排「—」：沿用最近一次真实计算的结果。"""
         try:
             self._ensure_hist_cols()
+            # 先找「真正跑过一轮引擎」的行（里面才有 gate/fatigue/v_actual），
+            # 采样行只有 rpe/dominant/mood —— 拿那些行会让 PARAMS 卡全是零。
             r = self.db.execute(
                 "SELECT p, pulse FROM viscera_hist WHERE p IS NOT NULL "
-                "AND p != '' ORDER BY ts DESC LIMIT 1").fetchone()
+                "AND p != '' AND p LIKE '%\"gate\"%' "
+                "ORDER BY ts DESC LIMIT 1").fetchone()
+            if not r:
+                r = self.db.execute(
+                    "SELECT p, pulse FROM viscera_hist WHERE p IS NOT NULL "
+                    "AND p != '' ORDER BY ts DESC LIMIT 1").fetchone()
             if not r:
                 return None
             import json as _json
@@ -2672,7 +2699,7 @@ class MemoryCard:
             pulse = _json.loads(r["pulse"]) if r["pulse"] else {}
             if not p:
                 return None
-            return {"params": p, "pulse": pulse}
+            return self._CarriedRes(p, pulse)
         except Exception:
             return None
 
