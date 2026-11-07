@@ -35,7 +35,7 @@ def ck(name, cond, extra=""):
 
 
 def main():
-    tmp = tempfile.mkdtemp(prefix="t78_", dir=ROOT)
+    tmp = tempfile.mkdtemp(prefix="t78_")
     try:
         db = os.path.join(tmp, "card.db")
         c = card2.MemoryCard(db, embed=False) if _accepts_embed() else card2.MemoryCard(db)

@@ -27,7 +27,7 @@ def t(name, cond, extra=""):
         print("  ❌ %s %s" % (name, extra))
 
 
-TMP = tempfile.mkdtemp(prefix="qqguard_", dir=ROOT)
+TMP = tempfile.mkdtemp(prefix="qqguard_")
 G.STATE = TMP
 G.TODO = os.path.join(TMP, "todo.jsonl")
 G.STATUS_F = os.path.join(TMP, "status.json")

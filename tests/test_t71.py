@@ -13,7 +13,7 @@ sys.path.insert(0, ROOT)
 
 import card2  # noqa: E402
 
-d = tempfile.mkdtemp(prefix="_t71_", dir=ROOT)
+d = tempfile.mkdtemp(prefix="_t71_")
 db = os.path.join(d, "t.db")
 card = card2.MemoryCard(db)
 

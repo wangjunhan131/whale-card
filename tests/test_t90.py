@@ -44,7 +44,7 @@ def check(name, ok, extra=""):
 
 
 def temp_card():
-    d = tempfile.mkdtemp(prefix="t90_", dir=ROOT)
+    d = tempfile.mkdtemp(prefix="t90_")
     dst = os.path.join(d, "c.db")
     s = sqlite3.connect(SRC)
     t = sqlite3.connect(dst)

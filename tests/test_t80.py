@@ -33,7 +33,7 @@ def chk(name, cond, extra=""):
     print(("  ✅ " if cond else "  ❌ ") + name + ("  " + str(extra) if extra else ""))
 
 
-d = tempfile.mkdtemp(prefix="t80_", dir=ROOT)
+d = tempfile.mkdtemp(prefix="t80_")
 db = os.path.join(d, "t80.db")
 port = 8861
 try:

@@ -28,6 +28,7 @@
 import argparse
 import io
 import json
+import math
 import os
 import random
 import sys
@@ -790,21 +791,26 @@ def _jitter(sec, amp=JITTER):
 
 
 def human_gap(text, rnd=None):
-    """按"人要打这句话"估一个发送间隔（秒），并带随机。
+    """按「人要打这句话」估一个发送间隔（秒）。
 
-    参考：中文手机打字约 2~4 字/秒，加上读上文、犹豫、删改，
-    短句（<10 字）落在 8~20 秒，中句 20~45 秒，长句 45~70 秒。
-    这里再乘一个 0.75~1.35 的随机，保证任何两条都不会等长。
+    2026-11-07 改：原来按「打字速度」估（短句 8~20 秒）+ 均匀随机。
+    实测真人私聊相邻消息间隔**中位 54.5 秒**，而且长尾很明显
+    （有人隔三五分钟才补一句），均匀分布做不出这种长尾 —— 它看起来像机器。
+    现在用对数正态：中位数按句长分档，sigma 控制尾巴。
+
+    注意：这不是「延迟发送」，是「读完之后多久才动手」。
     """
     rnd = rnd or random
     n = len(text or "")
     if n <= 10:
-        base = rnd.uniform(8, 20)
+        med = 14.0
     elif n <= 30:
-        base = rnd.uniform(20, 45)
+        med = 30.0
     else:
-        base = rnd.uniform(45, 70)
-    return round(base * rnd.uniform(0.75, 1.35), 1)
+        med = 55.0
+    sigma = 0.55                      # 约 1 个标准差 = 中位数 × 1.7
+    gap = rnd.lognormvariate(math.log(med), sigma)
+    return round(min(240.0, max(3.0, gap)), 1)
 
 
 # ---------------------------------------------------------------- 常驻

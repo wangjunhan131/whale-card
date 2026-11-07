@@ -40,7 +40,7 @@ def _con(path):
 
 
 def main():
-    tmp = tempfile.mkdtemp(prefix="t77_", dir=ROOT)
+    tmp = tempfile.mkdtemp(prefix="t77_")
     try:
         db = os.path.join(tmp, "card.db")
 

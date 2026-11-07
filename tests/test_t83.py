@@ -63,7 +63,7 @@ t("素材用 episode（最快忘）",
 # 9) 漏回复提醒
 import tempfile
 import shutil
-TMP = tempfile.mkdtemp(prefix="qqg2_", dir=ROOT)
+TMP = tempfile.mkdtemp(prefix="qqg2_")
 G.STATE = TMP
 G.TODO = os.path.join(TMP, "todo.jsonl")
 G.STATUS_F = os.path.join(TMP, "status.json")
@@ -80,7 +80,7 @@ t("攒够且放久了会提醒", bool(msg) and "没回" in msg, msg)
 # 10) 不多的时候不提醒
 G.STATUS_F2 = None
 shutil.rmtree(TMP, ignore_errors=True)
-TMP2 = tempfile.mkdtemp(prefix="qqg3_", dir=ROOT)
+TMP2 = tempfile.mkdtemp(prefix="qqg3_")
 G.STATE = TMP2
 G.TODO = os.path.join(TMP2, "todo.jsonl")
 G.STATUS_F = os.path.join(TMP2, "status.json")

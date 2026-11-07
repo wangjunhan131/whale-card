@@ -66,7 +66,7 @@ def main():
                                        now=time.time()) == H.ST_DECAYED)
 
     # 6. 表结构 + 幂等 upsert（临时库）
-    tmp = tempfile.mkdtemp(prefix="t76_", dir=ROOT)
+    tmp = tempfile.mkdtemp(prefix="t76_")
     db = os.path.join(tmp, "t.db")
     try:
         con = sqlite3.connect(db)
@@ -101,7 +101,7 @@ def main():
         shutil.rmtree(tmp, ignore_errors=True)
 
     # 7. 只读挖掘不改库
-    tmp2 = tempfile.mkdtemp(prefix="t76b_", dir=ROOT)
+    tmp2 = tempfile.mkdtemp(prefix="t76b_")
     db2 = os.path.join(tmp2, "t2.db")
     try:
         con = sqlite3.connect(db2)

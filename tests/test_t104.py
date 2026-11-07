@@ -18,6 +18,8 @@ import shutil
 import sqlite3
 import subprocess
 import sys
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import _cardcopy  # noqa: E402
 import tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -43,11 +45,9 @@ def chk(name, cond, extra=""):
 
 def copy_card(src_dir, dst_dir):
     os.makedirs(dst_dir, exist_ok=True)
-    shutil.copy2(os.path.join(src_dir, "card.db"), os.path.join(dst_dir, "card.db"))
-    for ext in ("-wal", "-shm"):
-        p = os.path.join(src_dir, "card.db" + ext)
-        if os.path.exists(p):
-            shutil.copy2(p, os.path.join(dst_dir, "card.db" + ext))
+    # 服务在跑时不能直接 copy2（WinError 33 + 可能拷到半截 WAL），走备份 API
+    _cardcopy.copy_card_db(os.path.join(src_dir, "card.db"),
+                           os.path.join(dst_dir, "card.db"))
 
 
 def db_stat(d):

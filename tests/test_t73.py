@@ -12,7 +12,7 @@ os.chdir(ROOT)
 import disks
 
 PASS = FAIL = 0
-tmp = tempfile.mkdtemp(prefix="t73_", dir=ROOT)
+tmp = tempfile.mkdtemp(prefix="t73_")
 
 
 def ok(name, cond, extra=""):

@@ -34,7 +34,7 @@ def _usable(p):
 _CANDS = [os.path.join(ROOT, "card.db"),
           os.path.join(ROOT, "demo", "demo_card.db")]
 REAL = next((p for p in _CANDS if _usable(p)), "")
-TMP = tempfile.mkdtemp(prefix="replica_", dir=ROOT)
+TMP = tempfile.mkdtemp(prefix="replica_")
 MAIN = os.path.join(TMP, "main.db")
 BK = os.path.join(TMP, "backup.db")
 

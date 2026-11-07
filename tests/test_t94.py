@@ -45,6 +45,8 @@ import os
 import shutil
 import sqlite3
 import sys
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import _cardcopy  # noqa: E402
 import tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -99,10 +101,7 @@ def main():
     if not os.path.exists(SRC):
         print("找不到真卡：%s" % SRC)
         sys.exit(1)
-    shutil.copy2(SRC, dbp)
-    for suf in ("-wal", "-shm"):
-        if os.path.exists(SRC + suf):
-            shutil.copy2(SRC + suf, dbp + suf)
+    _cardcopy.copy_card_db(SRC, dbp)
 
     c = None
     try:

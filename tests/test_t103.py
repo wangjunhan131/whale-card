@@ -15,6 +15,8 @@ import shutil
 import sqlite3
 import subprocess
 import sys
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import _cardcopy  # noqa: E402
 import tempfile
 import time
 import urllib.request
@@ -101,11 +103,8 @@ print("\n== 三、真起一个服务，验退役后写不进去 ==")
 work = tempfile.mkdtemp(prefix="t103srv_")
 proc = None
 try:
-    shutil.copy2(os.path.join(ROOT, "card.db"), os.path.join(work, "card.db"))
-    for suf in ("-wal", "-shm"):
-        p = os.path.join(ROOT, "card.db" + suf)
-        if os.path.exists(p):
-            shutil.copy2(p, os.path.join(work, "card.db" + suf))
+    _cardcopy.copy_card_db(os.path.join(ROOT, "card.db"),
+                        os.path.join(work, "card.db"))
     port = 8871
     env = dict(os.environ)
     env["WHALE_WRITER"] = ""

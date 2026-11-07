@@ -73,7 +73,7 @@ for s, want in (
         check("偏好优先：" + s, got == want, "region=%s" % got)
 
 print("\n[5] 真实写卡：一天后该剩多少")
-d = tempfile.mkdtemp(prefix="t88_", dir=ROOT)
+d = tempfile.mkdtemp(prefix="t88_")
 try:
     dst = os.path.join(d, "c.db")
     s0 = sqlite3.connect(SRC)

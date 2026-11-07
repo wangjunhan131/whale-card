@@ -1630,6 +1630,16 @@ REGION_BOOST = 1.25
 # 默认值来自 10-30 在 20 条真实查询上的网格搜索；10-31 修好候选集/分区/BLAS 后
 # 由 eval_weights.py 重新扫描一遍确认（见那个脚本开头的说明）。
 SCORE_W = (0.35, 0.30, 0.20, 0.10)
+# 🔧 2026-11-07：情绪强度对「能不能想起来」的影响。
+#    人在回忆时不是按时间戳检索的：一件让人心里一紧的事，
+#    隔十年也比昨天的琐事更容易跳出来。卡里 emotion 列一直有，
+#    但打分里从来没读过它 —— 这是个漏的入口，不是设计取舍。
+EMOTION_RECALL_BOOST = 0.25   # 情绪满格时最多 +25%
+# 两个开关默认关：实测都会让评估集的 R@1 掉一半（详见检索打分那段注释）。
+_EMOTION_BOOST_ON = os.environ.get("WHALE_EMO_BOOST", "0") == "1"
+_RECENCY_FRESH_STEP = os.environ.get("WHALE_FRESH_STEP", "0") == "1"
+RECENCY_FAST_DAYS = 0.5       # 近期那一档：半天之内几乎必然先想起
+RECENCY_SLOW_DAYS = 14.0      # 远期那一档：原来那个常数
 
 # 🔴 2026-10-31：片段通道的相对权重。
 #    sem_best = max(主干语义, DET_REL * 片段语义)
@@ -4805,7 +4815,18 @@ class MemoryCard:
                     cover = 0.0
                 wn = wn_row(r, now)
                 age_days = (now - r["last_active_ts"]) / DAY
-                recency = math.exp(-age_days / 14.0)
+                recency = math.exp(-age_days / RECENCY_SLOW_DAYS)
+                # 2026-11-07 试验记录（默认关，别乱开）：
+                #   ①双时间尺度 0.7·exp(-age/0.5d)+0.3·exp(-age/14d)：
+                #     age=0.2 天时给 0.765，比单指数的 0.986 低 → 等于整体
+                #     压低新近项；评估集 R@1 75%→37.5%、EVID 100%→33%。
+                #   ②单指数 + 同日台阶(+0.12)：R@1 仍 37.5%、EVID 掉到 0。
+                #   病根是卡里每天有几百条群消息，「同一天」的加成把闲聊
+                #   顶到前面、真记忆被挤下去 —— 时间尺度不是问题，
+                #   是「什么值得记」应该在**写入**时判，不该在检索时补。
+                if _RECENCY_FRESH_STEP:
+                    if age_days <= 0.25:
+                        recency = min(1.0, recency + 0.12 * (1.0 - age_days / 0.25))
                 # 🔧 T4-3 调参（2026-10-30）：在 20 条真实查询上网格搜索，
                 #    第一命中率 14/20 → 17/20。三处改动：
                 #    ① salience 乘子从 (0.5+s) 收窄到 (0.85+0.30s) ——
@@ -4817,6 +4838,19 @@ class MemoryCard:
                 s = (SCORE_W[0] * blended + SCORE_W[1] * cover
                      + SCORE_W[2] * wn + SCORE_W[3] * recency) \
                     * (0.85 + 0.30 * r["salience"])
+                # 情绪调制（2026-11-07）：不是加分，是放大 ——
+                # 「想不想得起来」×「这件事当时有多重」。
+                # **默认关**：实测开了之后 R@1 75%→37.5%（见 recency 那段记录）。
+                # 它本身不算错，是现在卡里 emotion 大多默认 0.25 且
+                # 群消息也吃到了同样的值，等于给噪声也加了权。
+                # 要开先满足：emotion 只在「真情绪」时才非零，再跑评估。
+                if _EMOTION_BOOST_ON:
+                    try:
+                        _emo = float(r["emotion"] or 0.0)
+                    except Exception:
+                        _emo = 0.0
+                    if _emo > 0:
+                        s *= (1.0 + EMOTION_RECALL_BOOST * min(1.0, _emo))
                 # 羁绊记忆（带 oxy）额外享受 f_endo，普通记忆按一半算
                 oxy_w = min(1.0, float(r["oxy"] or 0.0))
                 s *= (1.0 + (f_end - 1.0) * (0.5 + 0.5 * oxy_w))

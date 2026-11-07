@@ -44,7 +44,7 @@ def _add(con, key, status, *, hits=3, days=3, weight=0.6, pinned=0,
 
 
 def main():
-    tmp = tempfile.mkdtemp(prefix="t79_", dir=ROOT)
+    tmp = tempfile.mkdtemp(prefix="t79_")
     try:
         db = os.path.join(tmp, "card.db")
         c = card2.MemoryCard(db)
