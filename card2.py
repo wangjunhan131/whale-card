@@ -44,6 +44,7 @@ for _v in ('OPENBLAS_NUM_THREADS', 'OMP_NUM_THREADS', 'MKL_NUM_THREADS',
     os.environ[_v] = '1'
 
 import hormone
+import viscera
 import padlib
 import ctxweight
 import skill
@@ -2087,6 +2088,7 @@ class MemoryCard:
         self._load_oxy()
         self._load_mood()
         self._load_hormones()
+        self._load_viscera()
         # 🔧 2026-11-06（V5.2 分区细分）：开关从 meta 读，**默认关**。
         #    关着的时候 weight_now() 走老路径，这张卡的行为和改之前一模一样；
         #    打开才启用「每个区自己的 λ」。
@@ -2207,6 +2209,93 @@ class MemoryCard:
             self.db.commit()
         except Exception:
             pass
+
+    # ---------- 内分泌 + 自主神经 + 躯体（V6：快反应层）----------
+    #
+    # 为什么不塞进 self.h：
+    #    self.h 是四个 0~1 的慢激素，已经被 PAD、召回、语气一起用着；
+    #    这一层是 24 个 0~100 的变量加两个自主神经量，混进去会让
+    #    所有读 self.h 的地方都得改。分开存，互不干扰。
+    def _load_viscera(self):
+        """从 meta 读躯体状态；没有就是刚平静下来的一具身体。"""
+        self.v = viscera.base_state()
+        try:
+            row = self.db.execute(
+                "SELECT val FROM meta WHERE key='viscera_state'").fetchone()
+            if row is not None and row["val"]:
+                self.v = viscera.normalize(json.loads(row["val"]))
+        except Exception:
+            self.v = viscera.base_state()
+
+    def _save_viscera(self):
+        try:
+            c = self.db.cursor()
+            c.execute(
+                "INSERT INTO meta(key,val) VALUES('viscera_state',?)"
+                " ON CONFLICT(key) DO UPDATE SET val=excluded.val",
+                (json.dumps(self.v, ensure_ascii=False),))
+            self.db.commit()
+        except Exception:
+            pass
+
+    def viscera_touch(self, text="", now=None, emotion=0.0):
+        """一句话进来：先让身体反应，再让激素跟上，最后存回去。
+
+        顺序就是人真实的顺序 —— 不是「我想了想觉得被冒犯了」，
+        是「心里一沉/心跳快了一下」，然后才「有点生气」。
+        """
+        now = float(now if now is not None else self.clock.now())
+        v = getattr(self, "v", None) or viscera.base_state()
+        try:
+            last = float(v.get("ts") or 0.0)
+        except Exception:
+            last = 0.0
+        # 时间戳为 0（第一次）时按 0 小时算，别一口气衰减一年
+        dt = (now - last) / 3600.0 if last > 0 else 0.0
+        dt = max(0.0, min(72.0, dt))
+        events = viscera.guess(text, emotion)
+        self.v = viscera.step(v, dt, events)
+        self.v["ts"] = now
+        self._save_viscera()
+        return self.v
+
+    def viscera_stimulate(self, kinds, strength=1.0, now=None):
+        """给身体直接来一记刺激（不经过文本猜测）。
+
+        用途：控制台手动戳一下、测试、以及将来「她看见一张图」这类
+        没有文本可猜的输入。
+        """
+        now = float(now if now is not None else self.clock.now())
+        v = getattr(self, "v", None) or viscera.base_state()
+        try:
+            last = float(v.get("ts") or 0.0)
+        except Exception:
+            last = 0.0
+        dt = (now - last) / 3600.0 if last > 0 else 0.0
+        dt = max(0.0, min(72.0, dt))
+        if isinstance(kinds, str):
+            kinds = [kinds]
+        evs = [(str(k), float(strength)) for k in (kinds or ["chat"])]
+        self.v = viscera.step(v, dt, evs)
+        self.v["ts"] = now
+        self._save_viscera()
+        return self.v
+
+    def viscera_line(self):
+        """给上下文的一句「身体感觉」。没有数字，只有感觉。"""
+        try:
+            v = getattr(self, "v", None) or viscera.base_state()
+            return viscera.describe(v)
+        except Exception:
+            return ""
+
+    def viscera_snapshot(self):
+        """控制台/接口用：完整数字。"""
+        try:
+            v = getattr(self, "v", None) or viscera.base_state()
+            return viscera.snapshot(v)
+        except Exception:
+            return {}
 
     def log_hormones(self, now=None, min_interval=300.0):
         """采一条激素样本（默认 5 分钟一次），给控制台画趋势。
@@ -5453,6 +5542,7 @@ class MemoryCard:
         return out
 
     def assemble_context(self, query, identity="", recent_lines=None,
+                         touch=False,
                          budget=None, scene=None):
         """每次说话前，拼出四格上下文。装满就停，永远不会爆。
 
@@ -5473,6 +5563,12 @@ class MemoryCard:
         now = self.clock.now()
         used = 0
         out = []
+        # 快反应层：先让身体对这句话有反应，再拼上下文（顺序就是人的顺序）
+        if touch:
+            try:
+                self.viscera_touch(query or "")
+            except Exception:
+                pass
         sections = {}
         dropped = 0
 
@@ -5692,6 +5788,16 @@ class MemoryCard:
         #    人格 + 长期两格就变成稳定的前缀，缓存能从第一格一直命到
         #    「想起」之前 —— 只有尾巴要重算。
         #    这句话本身很短（二三十字），重算它几乎不花钱。
+        # ⑤.5 身体（快反应层）：一句话就能动的那一层。
+        #     放在【此刻】前面 —— 生理反应比情绪先来，顺序本身也是信息。
+        try:
+            vtxt = self.viscera_line() if touch else ""
+        except Exception:
+            vtxt = ""
+        if vtxt:
+            out.append("【身体】\n" + vtxt)
+            sections["viscera"] = len(vtxt)
+
         state = self._state_line()
         if state:
             out.append("【此刻】\n" + state)

@@ -316,7 +316,7 @@ class Mind(object):
                     self.tl.note_talk(str(message))
                 except Exception:
                     pass
-            ctx = self.card.assemble_context(message, recent_lines=recent, **kw)
+            ctx = self.card.assemble_context(message, recent_lines=recent, touch=True, **kw)
             hits = self.card.recall(message, top_k=5, access=True)
             assoc = getattr(self.card, "_last_assoc_ids", set())
             return {
@@ -809,6 +809,14 @@ class Handler(BaseHTTPRequestHandler):
                 import cardslot as _slot
                 return self._send(200, {"ok": True, "cardslot": _slot.status()})
 
+            if method == "GET" and path == "/viscera":
+                # 内分泌 + 自主神经 + 躯体体征（数字给控制台看，不进口语上下文）
+                try:
+                    return self._send(200, {"ok": True,
+                                            "viscera": m.card.viscera_snapshot()})
+                except Exception as e:
+                    return self._fail(500, "viscera_read", str(e))
+
             if method == "POST":
                 body = self._body()
                 if path == "/context":
@@ -835,6 +843,18 @@ class Handler(BaseHTTPRequestHandler):
                     except Exception as _e:
                         return self._fail(500, "chat_cfg_write", str(_e))
                     return self._send(200, {"ok": True, "cfg": _cfg})
+                if path == "/viscera/stim":
+                    # 手动给一记刺激（测试/调试用）：只动身体，不写记忆
+                    try:
+                        _kinds = body.get("events") or ["chat"]
+                        if isinstance(_kinds, str):
+                            _kinds = [_kinds]
+                        _strength = float(body.get("strength") or 1.0)
+                        m.card.viscera_stimulate(_kinds, _strength)
+                        return self._send(200, {"ok": True,
+                                                "viscera": m.card.viscera_snapshot()})
+                    except Exception as _e:
+                        return self._fail(500, "viscera_stim", str(_e))
                 if path == "/talk/set":
                     # 2026-11-06：这个老接口现在也走 chatcfg（单一事实来源），
                     # 免得控制台上两个地方各存一份、各自以为自己是准的。
@@ -854,6 +874,19 @@ class Handler(BaseHTTPRequestHandler):
                     return self._send(200, {"ok": True,
                             "cfg": {"cap": _cc["freq.daily_cap"],
                                     "cooldown_min": _cc["freq.cooldown_min"]}})
+                if path == "/viscera/stim":
+                    # 手动给一记刺激（测试/调试用）：不写记忆，只动身体
+                    try:
+                        kinds = body.get("events") or ["chat"]
+                        if isinstance(kinds, str):
+                            kinds = [kinds]
+                        strength = float(body.get("strength") or 1.0)
+                        for _k in kinds:
+                            self.card.viscera_touch(str(_k), emotion=strength)
+                        return self._send(200, {"ok": True,
+                                                "viscera": self.card.viscera_snapshot()})
+                    except Exception as e:
+                        return self._fail(500, "viscera_stim", str(e))
                 if path == "/report":
                     um = (body.get("user_message") or "").strip()
                     if not um:
