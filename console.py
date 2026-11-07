@@ -1472,6 +1472,15 @@ function lineChart(cv, series, opts){
   }
   var n=0;
   series.forEach(function(s){ n=Math.max(n, s.pts.length); });
+  /* 横轴默认按「第几个点」等距。可身体曲线不是等距采的 —— 测的时候
+     一串密集点会把整张图占满，看着像前半段有、后半段是直线。
+     给了 xs（时间戳）就按真实时间排布。 */
+  var XS=(opts.xs&&opts.xs.length===n)?opts.xs:null;
+  function xAt(i){ 
+    if(XS){ var t0=XS[0], t1=XS[n-1], sp=(t1-t0)||1;
+      return padL+iw*Math.max(0,Math.min(1,(XS[i]-t0)/sp)); }
+    return padL+iw*i/Math.max(1,n-1);
+  }
   if(n<2){
     g.fillStyle="#4d5665"; g.textAlign="center";
     g.fillText("样本还不够画线（每 5 分钟采一个点）", W/2, H/2);
@@ -1482,14 +1491,14 @@ function lineChart(cv, series, opts){
     if(pts.length<2) return;
     g.beginPath();
     for(var i=0;i<pts.length;i++){
-      var x=padL+iw*i/(Math.max(1,pts.length-1));
+      var x=xAt(i);
       var v=(pts[i]-lo)/span;
       var y=padT+ih*(1-Math.max(0,Math.min(1,v)));
       i?g.lineTo(x,y):g.moveTo(x,y);
     }
     g.strokeStyle=s.color; g.lineWidth=1.7; g.lineJoin="round"; g.stroke();
     if(s.fill!==false && !opts.noFill){
-      g.lineTo(padL+iw, padT+ih); g.lineTo(padL, padT+ih); g.closePath();
+      g.lineTo(xAt(pts.length-1), padT+ih); g.lineTo(xAt(0), padT+ih); g.closePath();
       g.fillStyle=s.color+"22"; g.fill();
     }
   });
@@ -2981,17 +2990,29 @@ function viewEmo(){
 }
 function drawEmo(){
   var d=S.data||{}, em=(d.emotion||[]);
+  var X=em.map(function(x){ return x.ts; });
   function pts(k){ return em.map(function(x){ return x[k]; }); }
   var cv=$("#cvEHR");
-  if(cv) lineChart(cv, [
-    {color:"#ff5f6d", pts:pts("hr")},
-    {color:"#57c8f0", pts:em.map(function(x){ return (x.resp||0)*5; })}
-  ], {height:cvh(cv,150), min:55, max:130});
+  if(cv){
+    /* 纵轴跟数据走：窗口里只有静息时，固定 55~130 会把起伏压成一条直线。
+       窗口里有过大波动（被骂、被夸）就按数据撑开，宁可抖也不假平。 */
+    var hrv=pts("hr").filter(function(x){ return x!=null && isFinite(x); });
+    var lo=55, hi=130;
+    if(hrv.length){
+      var mn=Math.min.apply(null,hrv), mx=Math.max.apply(null,hrv);
+      if(mx-mn < 18){ var mid=(mn+mx)/2; lo=mid-9; hi=mid+9; }
+      else { lo=Math.min(55,mn-4); hi=Math.max(130,mx+4); }
+    }
+    lineChart(cv, [
+      {color:"#ff5f6d", pts:pts("hr")},
+      {color:"#57c8f0", pts:em.map(function(x){ return (x.resp||0)*5; })}
+    ], {xs:X, height:cvh(cv,150), min:Math.round(lo), max:Math.round(hi)});
+  }
   var ca=$("#cvEAP");
   if(ca) lineChart(ca, [
     {color:"#e8b44a", pts:pts("sym")},
     {color:"#5fb3d4", pts:pts("para")}
-  ], {height:cvh(ca,150), min:0, max:1});
+  ], {xs:X, height:cvh(ca,150), min:0, max:1});
   var ch=$("#cvEH");
   if(ch) lineChart(ch, [
     {color:"#2fd07d", pts:pts("dopa")},
@@ -2999,10 +3020,10 @@ function drawEmo(){
     {color:"#57c8f0", pts:pts("sero")},
     {color:"#ff5f6d", pts:pts("cort")},
     {color:"#9d8bff", pts:pts("oxy")}
-  ], {height:cvh(ch,180), min:0, max:100});
+  ], {xs:X, height:cvh(ch,180), min:0, max:100});
   var cp=$("#cvEP");
   if(cp) lineChart(cp, [{color:"#c78bb8", pts:pts("rpe")}],
-    {height:cvh(cp,130), min:-1, max:1});
+    {xs:X, height:cvh(cp,130), min:-1, max:1});
   var cs=$("#cvES");
   if(cs) lineChart(cs, [{color:"#66c08a", pts:em.map(function(x){
       return (x.safety!=null && x.safety>=0)? x.safety : null; })}],
@@ -3045,7 +3066,7 @@ function drawEmo(){
     {color:"#9d8bff", pts:em.map(function(x){ var p=x.params||{}; return p.mood; })},
     {color:"#5fb3d4", pts:em.map(function(x){ return (x.safety!=null&&x.safety>=0)?x.safety:null; })},
     {color:"#c78bb8", pts:em.map(function(x){ var p=x.params||{}; return (p.rpe==null?null:(p.rpe+1)/2); })}
-  ], {height:cvh(cpm,170), min:0, max:1});
+  ], {xs:X, height:cvh(cpm,170), min:0, max:1});
   /* 当前读数走 /viscera：那里用的是卡自己的 viscera 模块，控制台不重写公式 */
   API("/viscera").then(function(j){
     var v=(j&&j.viscera)||{}, b=v.body||{}, e=v.emotion||{};
