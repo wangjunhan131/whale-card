@@ -1587,6 +1587,62 @@ _RE_MTYPE_INST = re.compile(
     "(用中文|中文回答|简洁一点|详细一点|不要提|别提|别写|格式改成)")
 
 
+# ---------- 相对时间锚定（2026-11-07 晚）----------
+# 为什么在「渲染时」做、而不是改写原文：
+#   raw 是他说过的原话，一个字都不能动（三条底线）。但「昨天」「明天」
+#   过几天就变成了错的 —— 真卡审计里 21 条含相对时间、17 条已经过期
+#   （最典型的是 13 天前那句「明天给你账号嘻嘻」）。
+#   所以每次「想起来」的时候，按这条记忆自己的 create_ts 现场换算成
+#   绝对日期。**存的是相对，读的是绝对**：不改历史，也不会记串。
+_ANCHOR_WORDS = [
+    ("大前天", -3), ("大后天", 3),
+    ("前天", -2), ("后天", 2),
+    ("昨天", -1),
+    ("今晚", 0), ("今早", 0), ("今天", 0), ("今儿", 0),
+    ("明晚", 1), ("明早", 1), ("明天", 1),
+    ("去年", "year-1"), ("明年", "year+1"),
+]
+_RE_ANCHOR = re.compile("|".join(w for w, _ in _ANCHOR_WORDS))
+
+
+def _anchor_date(ts, delta_days=0):
+    t = time.localtime(ts + delta_days * 86400.0)
+    return "%d年%d月%d日" % (t.tm_year, t.tm_mon, t.tm_mday)
+
+
+def anchor_relative_time(text, ts):
+    """把一句话里的「昨天/今天/明天…」按 create_ts 换成绝对日期。
+
+    纯函数、可单测。传进来的 ts 是这条记忆自己的时间戳 —— 同一个词在
+    不同条目里会换成不同的日期，这正是我们要的（防记串）。
+
+    🔴 只用于「显示/拼上下文」，绝不回写 raw。
+    """
+    if not text or not ts:
+        return text or ""
+    if not _RE_ANCHOR.search(text):
+        return text
+    table = dict(_ANCHOR_WORDS)
+
+    def _rep(m):
+        key = m.group(0)
+        d = table.get(key)
+        if d is None:
+            return key
+        if isinstance(d, str):
+            y = time.localtime(ts).tm_year + (-1 if d == "year-1" else 1)
+            return "%d年" % y
+        day = _anchor_date(ts, d)
+        # 「今晚/今早/明晚/明早」别把时段吃掉：「11月8日」比「11月8日早上」少一半信息
+        if key.endswith("晚"):
+            return day + "晚上"
+        if key.endswith("早"):
+            return day + "早上"
+        return day
+
+    return _RE_ANCHOR.sub(_rep, text)
+
+
 def guess_speaker(text):
     """猜这句话是谁说的。返回 'user' / 'self'。
 
@@ -2103,6 +2159,7 @@ class MemoryCard:
         self._load_mood()
         self._load_hormones()
         self._load_viscera()
+        self._load_viscera_profile()
         try:
             self._ensure_hist_cols()
         except Exception:
@@ -2255,6 +2312,55 @@ class MemoryCard:
             self.db.commit()
         except Exception:
             pass
+
+    # ---------- 身体参数外置（2026-11-07）----------
+    # 性格在 core_zone，身体参数以前只在源码里 —— 换机器代码版本不同，
+    # 同一个人就会长出不同的身体。现在参数的「家」是这张卡：
+    #   meta['viscera_profile'] = {"H_BASE": {...}, "REST_SYMP": 0.10, ...}
+    # 卡里没有就沿用代码默认值，老卡行为完全不变。
+    def _load_viscera_profile(self):
+        try:
+            row = self.db.execute(
+                "SELECT val FROM meta WHERE key='viscera_profile'").fetchone()
+            if row is not None and row["val"]:
+                ok, why = viscera.apply_profile(json.loads(row["val"]))
+                if not ok:
+                    print("[mind] 卡里的身体参数被拒：%s（沿用默认值）" % why)
+        except Exception as e:
+            print("[mind] 身体参数读取失败（沿用默认值）：%s" % e)
+
+    def set_viscera_profile(self, patch):
+        """把一组参数写进卡并立刻生效。返回 (ok, why)。
+
+        先验证再落库：脏参数绝不进门，也不做「尽力而为」的折中。
+        """
+        ok, why = viscera.validate_profile(patch)
+        if not ok:
+            return False, why
+        cur = viscera.current_profile()
+        if "H_BASE" in patch:
+            cur["H_BASE"].update({k: float(v) for k, v in patch["H_BASE"].items()})
+            cur["H_BASE"] = {k: cur["H_BASE"][k] for k in viscera.H_BASE}
+        if "HALFLIFE_H" in patch:
+            cur["HALFLIFE_H"].update(
+                {k: float(v) for k, v in patch["HALFLIFE_H"].items()})
+            cur["HALFLIFE_H"] = {k: cur["HALFLIFE_H"][k] for k in viscera.HALFLIFE_H}
+        for k in viscera.PROFILE_SCALARS:
+            if k in patch:
+                cur[k] = float(patch[k])
+        ok, why = viscera.apply_profile(cur)
+        if not ok:
+            return False, why
+        try:
+            c = self.db.cursor()
+            c.execute(
+                "INSERT INTO meta(key,val) VALUES('viscera_profile',?)"
+                " ON CONFLICT(key) DO UPDATE SET val=excluded.val",
+                (json.dumps(cur, ensure_ascii=False),))
+            self.db.commit()
+        except Exception as e:
+            return False, "写卡失败：%s" % e
+        return True, ""
 
     def _emotion(self):
         """懒加载认知层（预期误差 → 调质脉冲）。挂了就是 None。
@@ -5635,6 +5741,11 @@ class MemoryCard:
         if parts["MODIFIER"]:
             bits.append("，还说「" + parts["MODIFIER"][0] + "」")
         s = "".join(bits)
+        # 🔧 2026-11-07：渲染时把「昨天/明天」按这条记忆自己的 create_ts
+        #    换成绝对日期。raw 一个字不动，只是「想起来的时候」算准。
+        _ts = mem_row["create_ts"] if "create_ts" in mem_row.keys() else None
+        if _ts:
+            s = anchor_relative_time(s, _ts)
         if weight < 0.35:
             return "我记得好像有这么回事：" + s + "。（具体记不清了）"
         if weight < 0.60:

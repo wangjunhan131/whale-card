@@ -145,9 +145,57 @@ LESSON_HINTS = ("记住", "下次", "以后别", "教训", "明白了", "懂了"
 # 素材目录别无限长：老的滚掉（素材本来就是会忘的东西）
 TODO_MAX_LINES = 4000
 
+# 🔧 2026-11-07：群聊「当场就不记」的闸（批评文档 1-4 的正确解法）
+#
+# 为什么不在「事后压 salience」：压到最后还是会被淘汰，而淘汰本身就是
+# 一次写库 + 一条墓碑。真正的毛病是**不该进门的进了门** ——
+# 真卡 24 小时里 qq-group 250 条、占七成写量，其中大量是「草」「233」
+# 「笑死」和复读。这些东西对「她记得什么」零贡献，却把每一天的预算占满。
+#
+# 拦三类：太短、没有字（纯表情/符号）、复读（和这个群最近 20 条里某条
+# 几乎一样）。只对群聊生效 —— 私聊一个字都不拦（他说的每句话都算数）。
+GROUP_NOISE_MIN_CHARS = 3      # <=3 个字的不进卡（"草""嗯""233"）
+GROUP_DUP_JACCARD = 0.82       # 和最近某条重合到这个程度就算复读
+GROUP_RECENT_KEEP = 20
+
 # 漏回复提醒：未回超过这么多条、且最早那条已经放了一天多，就吱一声
 OVERDUE_N = 20
 OVERDUE_HOURS = 26.0
+
+
+def _bigrams(s):
+    t = "".join(ch for ch in (s or "") if not ch.isspace())
+    if len(t) < 2:
+        return set(t)
+    return {t[i:i + 2] for i in range(len(t) - 1)}
+
+
+def _sim(a, b):
+    """字符二元组 Jaccard。两个空串算 0（不是 1）—— 空消息不该因此去重。"""
+    A, B = _bigrams(a), _bigrams(b)
+    if not A or not B:
+        return 0.0
+    return len(A & B) / float(len(A | B))
+
+
+def group_noise(text, recent=()):
+    """群里这条消息值不值得进卡。返回 (是噪音, 理由)。
+
+    纯函数、可单测。宁放过不误伤：判不准就让它进（漏一条噪音的代价
+    远小于把一句真话拦在门外）。
+    """
+    t = (text or "").strip()
+    if not t:
+        return True, "空消息"
+    # 只数「有意义的字」：中文/字母/数字。表情、标点、空格都不算。
+    body = [ch for ch in t if ch.isalnum() or "\u4e00" <= ch <= "\u9fff"]
+    if len(body) <= GROUP_NOISE_MIN_CHARS:
+        return True, "太短（%d 个字）" % len(body)
+    for prev in recent:
+        if _sim(t, prev) >= GROUP_DUP_JACCARD:
+            return True, "复读"
+    return False, ""
+
 
 
 def decide(text, at_me=False):
@@ -575,6 +623,9 @@ def poll_once(seen, verbose=True):
     q = quota_load()
     groups = list_groups()
     friends = list_friends()
+    # 每个群最近说过的话（本轮内），用来判「复读」。跨轮不保留：
+    # 换一轮再看，同一句「草」如果中间隔了别的话，本来也不该算复读。
+    _g_recent = {}
     # 每轮把群的顺序打散：永远按 group_id 升序去读，
     # 抓包一看就是一条固定序列，和"人挨个点开看看"不一样。
     random.shuffle(groups)
@@ -629,6 +680,14 @@ def poll_once(seen, verbose=True):
             mem_id = None
             if keep and sal < mem_floor():
                 keep, why = False, "重要度 %.2f 低于门槛" % sal
+            # 群聊当场不记（@ 我的例外：那是冲我来的，哪怕只有两个字）
+            if keep and not pinged:
+                _noise, _nwhy = group_noise(text, _g_recent.get(gid, ()))
+                if _noise:
+                    keep, why = False, "群聊噪音：" + _nwhy
+            _rq = _g_recent.setdefault(gid, [])
+            _rq.append(text)
+            del _rq[:-GROUP_RECENT_KEEP]
             if keep and bool(cfg_get("mem.write_group", True)):
                 r = remember("[%s] %s：%s" % (gname, name, text),
                              source="qq-group", speaker="other",

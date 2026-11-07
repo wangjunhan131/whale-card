@@ -2973,11 +2973,11 @@ function viewEmo(){
   out+=cardHTML("c12","ALL HORMONES / 24 种激素（后台全量，对话里永不出现）",
     '<canvas id="cvE24" style="height:300px"></canvas>',
     "8 × 3 · 每格独立纵轴 · 括号里是基线");
-  out+=cardHTML("c12","OVERLAY / 24 条激素叠在一张表上（相对各自基线的偏差 %）",
+  out+=cardHTML("c12","激素总览 / 24 条激素叠在一张表上（相对各自基线的偏差 %）",
     '<canvas id="cvEOV" style="height:300px"></canvas>'
       +'<div id="emoHormLegend" style="display:flex;flex-wrap:wrap;gap:8px;margin-top:8px;'
       +'font:11px sans-serif;color:#b9c6d6"></div>',
-    "0% 线 = 出厂基线 · 手动连戳会堆到上限，真实对话每轮隔几分钟会回落");
+    "纵轴按窗口里的真实幅度自动缩放 · 0% = 出厂基线 · 每轮的脉冲会回落");
   out+=cardHTML("c12","PARAMS / 这一轮引擎内部算了什么",
     '<canvas id="cvEPM" style="height:170px"></canvas>'
       +'<div id="emoParams" style="display:flex;flex-wrap:wrap;gap:8px;margin-top:10px"></div>',
@@ -2993,6 +2993,11 @@ function viewEmo(){
   out+=cardHTML("c12","HOW IT WORKS / 这一层怎么接的",
     '<div id="emoHow" style="display:flex;flex-direction:column;gap:6px;color:#8b95a5;font:12px sans-serif"></div>',"说明");
   return out;
+}
+function _p95(arr){
+  var v=arr.filter(function(x){ return x!=null && isFinite(x); }).sort(function(a,b){ return a-b; });
+  if(!v.length) return null;
+  return v[Math.min(v.length-1, Math.round(0.95*(v.length-1)))];
 }
 function drawEmo(){
   var d=S.data||{}, em=(d.emotion||[]);
@@ -3018,18 +3023,28 @@ function drawEmo(){
     ], {xs:X, height:cvh(cv,150), min:Math.round(lo), max:Math.round(hi)});
   }
   var ca=$("#cvEAP");
-  if(ca) lineChart(ca, [
-    {color:"#e8b44a", pts:pts("sym")},
-    {color:"#5fb3d4", pts:pts("para")}
-  ], {xs:X, height:cvh(ca,150), min:0, max:1});
+  if(ca){
+    /* 静息时交感 0.05、副交感 0.02，固定 0~1 就是贴着底边一条线。
+       按窗口里的真实峰值缩放（最小 0.3），这样「刚被骂完那一阵子的抬升」看得见。 */
+    var apMax=Math.max(0.30, Math.ceil((_p95(pts("sym").concat(pts("para")))||0)*1.35*100)/100);
+    lineChart(ca, [
+      {color:"#e8b44a", pts:pts("sym")},
+      {color:"#5fb3d4", pts:pts("para")}
+    ], {xs:X, height:cvh(ca,150), min:0, max:apMax});
+  }
   var ch=$("#cvEH");
-  if(ch) lineChart(ch, [
-    {color:"#2fd07d", pts:pts("dopa")},
-    {color:"#e8b44a", pts:pts("nora")},
-    {color:"#57c8f0", pts:pts("sero")},
-    {color:"#ff5f6d", pts:pts("cort")},
-    {color:"#9d8bff", pts:pts("oxy")}
-  ], {xs:X, height:cvh(ch,180), min:0, max:100});
+  if(ch){
+    /* 五条调质平时都在 10~45 之间，固定 0~100 会全部挤在下半截。
+       用 0→「峰值上浮 15%」看波形；真实值仍然标在 PARAMS 卡里。 */
+    var hMax=Math.max(60, Math.ceil((_p95(pts("dopa").concat(pts("nora"),pts("sero"),pts("cort"),pts("oxy")))||0)*1.15));
+    lineChart(ch, [
+      {color:"#2fd07d", pts:pts("dopa")},
+      {color:"#e8b44a", pts:pts("nora")},
+      {color:"#57c8f0", pts:pts("sero")},
+      {color:"#ff5f6d", pts:pts("cort")},
+      {color:"#9d8bff", pts:pts("oxy")}
+    ], {xs:X, height:cvh(ch,180), min:0, max:hMax});
+  }
   var cp=$("#cvEP");
   if(cp) lineChart(cp, [{color:"#c78bb8", pts:pts("rpe")}],
     {xs:X, height:cvh(cp,130), min:-1, max:1});
@@ -3122,7 +3137,10 @@ function drawEmo(){
 }
 function drawHormoneOverlay(cv, em){
   /* 24 条叠一张表：纵轴是「相对自己基线的偏差百分数」。
-     绝对值没法同轴 —— 皮质醇 18 和血清素 55 放一起，只有一条看得见。 */
+     绝对值没法同轴 —— 皮质醇 18 和血清素 55 放一起，只有一条看得见。
+     纵轴**按窗口里的真实幅度自适应**：原来写死 −90~200，平时那点 ±5% 的
+     生理抖动全贴在零线上，只有我手动连戳 stim 才会顶到 180。
+     自适应之后，静息那一小段起伏也能铺满图，而大脉冲照样看得见（超出就夹住）。 */
   var dpr=window.devicePixelRatio||1;
   var W=cv.clientWidth||900, H=cv.clientHeight||300;
   cv.width=W*dpr; cv.height=H*dpr;
@@ -3136,25 +3154,11 @@ function drawHormoneOverlay(cv, em){
   var base=(em[em.length-1]||{}).params||{}; base=base.base||{};
   var PAD={l:52,r:10,t:12,b:18};
   var pw=W-PAD.l-PAD.r, ph=H-PAD.t-PAD.b;
-  var lo=-90, hi=200;                       /* 偏差%的显示范围 */
-  /* 网格与刻度 */
-  g.strokeStyle="rgba(255,255,255,0.06)"; g.lineWidth=1; g.font="10px ui-monospace,monospace";
-  [-90,-45,0,45,90,135,180].forEach(function(v){
-    var y=PAD.t+ph*(1-(v-lo)/(hi-lo));
-    g.beginPath(); g.moveTo(PAD.l,y); g.lineTo(PAD.l+pw,y); g.stroke();
-    g.fillStyle = (v===0)? "rgba(232,180,74,0.85)" : "#5c6675";
-    g.fillText(v+"%", 6, y+3);
-  });
-  if(true){ /* 0% 基线更醒目一点 */
-    var y0=PAD.t+ph*(1-(0-lo)/(hi-lo));
-    g.strokeStyle="rgba(232,180,74,0.35)"; g.setLineDash([4,4]);
-    g.beginPath(); g.moveTo(PAD.l,y0); g.lineTo(PAD.l+pw,y0); g.stroke();
-    g.setLineDash([]);
-  }
   var PAL=["#57c8f0","#2fd07d","#9d8bff","#e8b44a","#ff5f6d","#5f9ea0","#c78bb8","#7fd1ae",
            "#f2a65a","#8ab6f9","#b6e36a","#e07be0","#63d2c0","#f0d264","#a3a3ff","#ff8f6b",
            "#4fc3f7","#8bc34a","#ba68c8","#ffb74d","#4db6ac","#f06292","#9575cd","#aed581"];
-  var chips=[];
+  /* 第一遍：算出所有偏离值，用来定纵轴 */
+  var series=[], pos=[], neg=[];
   keys.forEach(function(k,idx){
     var b0=(base[k]!=null)? Number(base[k])
            : ((typeof HBASE!=="undefined" && HBASE[k]!=null)? Number(HBASE[k]) : null);
@@ -3163,21 +3167,53 @@ function drawHormoneOverlay(cv, em){
       if(v==null || !b0) return null;
       return (v-b0)/b0*100;
     });
-    var col=PAL[idx%PAL.length];
-    g.strokeStyle=col; g.lineWidth=1.2; g.globalAlpha=0.85;
+    vals.forEach(function(v){ if(v!=null && isFinite(v)){ (v>=0?pos:neg).push(Math.abs(v)); } });
+    series.push({k:k, vals:vals, col:PAL[idx%PAL.length]});
+  });
+  function q(arr,f){ if(!arr.length) return null;
+    var v=arr.slice().sort(function(a,b){ return a-b; });
+    return v[Math.min(v.length-1, Math.round(f*(v.length-1)))]; }
+  /* 用 90% 分位而不是最大值：一两个极端脉冲不该把整张图重新压平 */
+  var up=Math.max(12, Math.ceil((q(pos,0.90)||0)*1.30));
+  var dn=Math.max(10, Math.ceil((q(neg,0.90)||0)*1.30));
+  var lo=-dn, hi=up;
+  function Y(v){ return PAD.t+ph*(1-(Math.max(lo,Math.min(hi,v))-lo)/(hi-lo)); }
+  /* 刻度：自适应之后步长也得跟着变，不然写死的 −90/−45 就出画了 */
+  var raw=(hi-lo)/4, mag=Math.pow(10, Math.floor(Math.log(raw)/Math.LN10));
+  var step=[1,2,2.5,5,10].map(function(m){ return m*mag; })
+    .filter(function(s){ return s>=raw; })[0] || raw;
+  g.font="10px ui-monospace,monospace";
+  for(var v=Math.ceil(lo/step)*step; v<=hi+1e-9; v+=step){
+    var y=Y(v);
+    g.strokeStyle="rgba(255,255,255,0.06)"; g.lineWidth=1;
+    g.beginPath(); g.moveTo(PAD.l,y); g.lineTo(PAD.l+pw,y); g.stroke();
+    g.fillStyle = (Math.abs(v)<1e-9)? "rgba(232,180,74,0.85)" : "#5c6675";
+    g.fillText((v>0?"+":"")+Math.round(v)+"%", 6, y+3);
+  }
+  var y0=Y(0);
+  g.strokeStyle="rgba(232,180,74,0.35)"; g.setLineDash([4,4]);
+  g.beginPath(); g.moveTo(PAD.l,y0); g.lineTo(PAD.l+pw,y0); g.stroke();
+  g.setLineDash([]);
+  /* 第二遍：画线 */
+  var chips=[];
+  series.forEach(function(s){
+    g.strokeStyle=s.col; g.lineWidth=1.2; g.globalAlpha=0.85;
     g.beginPath(); var started=false;
-    vals.forEach(function(v,i){
+    s.vals.forEach(function(v,i){
       if(v==null || !isFinite(v)){ started=false; return; }
       var x=PAD.l+pw*(em.length<2?0.5:i/(em.length-1));
-      var y=PAD.t+ph*(1-(Math.max(lo,Math.min(hi,v))-lo)/(hi-lo));
+      var y=Y(v);
       if(!started){ g.moveTo(x,y); started=true; } else { g.lineTo(x,y); }
     });
     g.stroke(); g.globalAlpha=1;
-    var fin=vals.filter(function(v){ return v!=null; });
+    var fin=s.vals.filter(function(v){ return v!=null; });
     var cur=fin.length? fin[fin.length-1] : null;
-    var nmp=(typeof HNAME!=="undefined" && HNAME[k]) || [k,""];
-    chips.push({k:k, c:col, n:nmp[0], en:nmp[1], v:cur});
+    var nmp=(typeof HNAME!=="undefined" && HNAME[s.k]) || [s.k,""];
+    chips.push({k:s.k, c:s.col, n:nmp[0], en:nmp[1], v:cur});
   });
+  /* 把当前缩放写在左上角：图变了必须让人知道为什么变 */
+  g.fillStyle="rgba(185,198,214,0.65)"; g.font="10px ui-monospace,monospace";
+  g.fillText("纵轴 "+Math.round(lo)+"% ~ +"+Math.round(hi)+"%（按数据自适应）", PAD.l+6, PAD.t+11);
   var lg=$("#emoHormLegend");
   if(lg){
     lg.innerHTML = chips.map(function(t){

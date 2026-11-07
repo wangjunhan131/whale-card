@@ -48,6 +48,7 @@ sys.path.insert(0, HERE)
 
 from card2 import MemoryCard          # noqa: E402
 import hormone as hormone_mod          # noqa: E402
+import viscera                        # noqa: E402
 import timeline as timeline_mod        # noqa: E402
 
 VERSION = "1.0"
@@ -828,6 +829,16 @@ class Handler(BaseHTTPRequestHandler):
                 import cardslot as _slot
                 return self._send(200, {"ok": True, "cardslot": _slot.status()})
 
+            if method == "GET" and path == "/viscera/profile":
+                # 身体参数（哪些是出厂值、哪些是这张卡自己定的）
+                try:
+                    return self._send(200, {"ok": True,
+                                            "profile": viscera.current_profile(),
+                                            "ranges": {k: list(v) for k, v in
+                                                       viscera._PROFILE_RANGE.items()}})
+                except Exception as e:
+                    return self._fail(500, "viscera_profile", str(e))
+
             if method == "GET" and path == "/viscera":
                 # 内分泌 + 自主神经 + 躯体体征（数字给控制台看，不进口语上下文）
                 try:
@@ -862,6 +873,17 @@ class Handler(BaseHTTPRequestHandler):
                     except Exception as _e:
                         return self._fail(500, "chat_cfg_write", str(_e))
                     return self._send(200, {"ok": True, "cfg": _cfg})
+                if path == "/viscera/profile":
+                    # 改身体参数（写进卡，不是改源码）
+                    try:
+                        _patch = body.get("profile") or {}
+                        _ok, _why = m.card.set_viscera_profile(_patch)
+                        if not _ok:
+                            return self._fail(400, "bad_viscera_profile", _why)
+                        return self._send(200, {"ok": True,
+                                                "profile": viscera.current_profile()})
+                    except Exception as _e:
+                        return self._fail(500, "viscera_profile_write", str(_e))
                 if path == "/viscera/stim":
                     # 手动给一记刺激（测试/调试用）：只动身体，不写记忆
                     try:
@@ -1506,6 +1528,38 @@ class ExclusiveServer(ThreadingHTTPServer):
     request_queue_size = 128
 
 
+def _start_viscera_sampler(mind):
+    """后台定时「采样此刻」的身体状态。
+
+    为什么需要它：原来只有对话（/context、/report）和手动 stim 才会写
+    viscera_hist。控制台的时间窗里，没有对话的那几个小时就是一片空白，
+    曲线看上去「后面变成平行线」——不是她不动，是没人采样。
+    这里每 120 秒衰减一次 + 加一点静息噪声，把真实的静息起伏记下来。
+    只读自己、不读消息、不触发任何发言，也不需要大模型。
+    """
+    try:
+        sec = float(os.environ.get("WHALE_VISCERA_SAMPLE_SEC", "120"))
+    except Exception:
+        sec = 120.0
+    if sec <= 0:
+        return None
+
+    def _loop():
+        import time as _t
+        while True:
+            _t.sleep(sec)
+            try:
+                with mind.lock:
+                    mind.card.viscera_sample(force=True)
+            except Exception as e:
+                print("[mind] 身体采样失败：%s" % e, file=sys.stderr)
+
+    th = threading.Thread(target=_loop, name="viscera-sampler", daemon=True)
+    th.start()
+    print("[mind] 身体采样：每 %.0f 秒记一次静息状态" % sec)
+    return th
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description="小鲸鱼数字生命卡 · 心智服务")
     ap.add_argument("--host", default="127.0.0.1")
@@ -1538,6 +1592,7 @@ def main(argv=None):
     print("[mind] %d 条记忆 / %d 条细节 / 盖章=%s"
           % (st["total"], st["details"], mind.sealed))
     print("[mind] 听在 http://%s:%d  （Ctrl+C 退出）" % (a.host, a.port))
+    _start_viscera_sampler(mind)
     sys.stdout.flush()
     try:
         srv.serve_forever()

@@ -136,8 +136,14 @@ def settle(state, dt_hours):
 # 只做 settle（一路衰减回基线）采出来是一条直线。那不是平静，是这个人没在活。
 # 真实的静息心率本来就有几拍上下的起伏（呼吸性窦性心律不齐），
 # 几条第慢激素也不会精确停在出厂值上。
-REST_SYMP = 0.08   # 静息仍有一点点交感张力，不是 0
-REST_PARA = 0.12
+REST_SYMP = 0.10   # 静息仍有一点点交感张力，不是 0
+REST_PARA = 0.10
+# 🔧 2026-11-07 晚：原来的抖动只有 ±2%（心率起伏不到 1 拍），控制台上
+#    静息那一段几乎是直线。真实静息也有 3~5 拍的呼吸性起伏，所以把
+#    随机幅度提到「看得见但不夸张」：心率 ±3 拍、激素 ±3% 基线上下的游走。
+REST_SIG_SYMP = 0.065
+REST_SIG_PARA = 0.055
+REST_SIG_HORMONE = 0.030
 
 
 def restless(state, rng=None):
@@ -148,13 +154,13 @@ def restless(state, rng=None):
     # settle 会把交感拉到 0，这里再把它拉回「静息也有的一点点张力」：
     # 只写 0.08 + (x-0.08)*0.94 的话，x=0 只会得到 0.005，永远回不来。
     s["symp"] = _clamp(s["symp"] * 0.40 + REST_SYMP * 0.60
-                       + rng.gauss(0.0, 0.055), 0.0, 1.0)
+                       + rng.gauss(0.0, REST_SIG_SYMP), 0.0, 1.0)
     s["para"] = _clamp(s["para"] * 0.40 + REST_PARA * 0.60
-                       + rng.gauss(0.0, 0.040), 0.0, 1.0)
+                       + rng.gauss(0.0, REST_SIG_PARA), 0.0, 1.0)
     for k in ("cort", "dopa", "sero", "nora", "oxy"):
         b = H_BASE.get(k, 20.0)
         s["h"][k] = _clamp(b + (s["h"][k] - b) * 0.985
-                           + rng.gauss(0.0, 0.020 * b), 0.35 * b, 2.5 * b)
+                           + rng.gauss(0.0, REST_SIG_HORMONE * b), 0.35 * b, 2.5 * b)
     return s
 
 
@@ -494,3 +500,89 @@ def snapshot(state):
     return {"h": {k: round(v, 2) for k, v in s["h"].items()},
             "symp": round(s["symp"], 3), "para": round(s["para"], 3),
             "body": body(s), "pad": pad_hint(s), "text": describe(s)}
+
+
+# ---------------------------------------------------------------- 参数外置（V5.3.1）
+# 为什么要有这一段：
+#   性格（persona / 三条底线）早就存在卡里的 core_zone，可**身体参数**还写死在
+#   源码里。换一台机器、代码版本差一点，同一个人就会长出不同的身体 ——
+#   基线差 5 点，心率能差十几拍。
+#   所以把「可调的那几组」搬进 card.meta['viscera_profile']：
+#   卡里没有就用代码里的默认值（老卡完全不受影响），有就照卡里的来。
+PROFILE_SCALARS = ("REST_SYMP", "REST_PARA", "REST_SIG_SYMP",
+                   "REST_SIG_PARA", "REST_SIG_HORMONE",
+                   "INJECT_SCALE", "SYMP_DECAY_H", "PARA_DECAY_H", "HR_CAP")
+PROFILE_DICTS = ("H_BASE", "HALFLIFE_H")
+
+# 允许的范围：挡的是「调参调到不像人」，不是不让调。
+_PROFILE_RANGE = {
+    "REST_SYMP": (0.0, 1.0), "REST_PARA": (0.0, 1.0),
+    "REST_SIG_SYMP": (0.0, 0.5), "REST_SIG_PARA": (0.0, 0.5),
+    "REST_SIG_HORMONE": (0.0, 0.3),
+    "INJECT_SCALE": (0.0, 60.0),
+    "SYMP_DECAY_H": (0.01, 24.0), "PARA_DECAY_H": (0.01, 24.0),
+    "HR_CAP": (90.0, 190.0),
+}
+
+
+def current_profile():
+    """当前生效的参数（含默认值）。给控制台和 /viscera/profile 用。"""
+    p = {k: float(globals()[k]) for k in PROFILE_SCALARS}
+    p["H_BASE"] = dict(H_BASE)
+    p["HALFLIFE_H"] = dict(HALFLIFE_H)
+    return p
+
+
+def validate_profile(p):
+    """白名单 + 范围检查。返回 (ok, why)。脏值一律拒绝，不做「尽力而为」。"""
+    if not isinstance(p, dict):
+        return False, "profile 必须是对象"
+    for k, v in p.items():
+        if k in PROFILE_SCALARS:
+            try:
+                fv = float(v)
+            except (TypeError, ValueError):
+                return False, "%s 不是数字" % k
+            lo, hi = _PROFILE_RANGE[k]
+            if not (lo <= fv <= hi):
+                return False, "%s 超出范围 %.3g~%.3g（给的是 %s）" % (k, lo, hi, v)
+        elif k in PROFILE_DICTS:
+            if not isinstance(v, dict):
+                return False, "%s 必须是 {名字: 数字}" % k
+            known = H_BASE if k == "H_BASE" else HALFLIFE_H
+            for name, val in v.items():
+                if name not in known:
+                    return False, "%s 里没有 %s 这个变量" % (k, name)
+                try:
+                    fv = float(val)
+                except (TypeError, ValueError):
+                    return False, "%s.%s 不是数字" % (k, name)
+                if k == "H_BASE" and not (0.0 <= fv <= 100.0):
+                    return False, "H_BASE.%s 必须在 0~100（给的是 %s）" % (name, val)
+                if k == "HALFLIFE_H" and not (0.05 <= fv <= 5000.0):
+                    return False, "HALFLIFE_H.%s 必须在 0.05~5000 小时" % name
+        else:
+            return False, "未知参数：%s" % k
+    return True, ""
+
+
+def apply_profile(p):
+    """把卡里的参数盖到模块全局上。返回 (ok, why)。
+
+    🔴 只改内存里的默认值，不写库 —— 写库是 card2 的事。
+       process 重启后由 card2 在 __init__ 里再 apply 一次。
+    """
+    ok, why = validate_profile(p)
+    if not ok:
+        return False, why
+    for k in PROFILE_SCALARS:
+        if k in p:
+            globals()[k] = float(p[k])
+    if "H_BASE" in p:
+        for name, val in p["H_BASE"].items():
+            H_BASE[name] = float(val)
+    if "HALFLIFE_H" in p:
+        for name, val in p["HALFLIFE_H"].items():
+            HALFLIFE_H[name] = float(val)
+    return True, ""
+
