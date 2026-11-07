@@ -294,6 +294,25 @@ def mem_floor():
 
 
 
+# 别家 AI 的痕迹（V5.3.4）。群里一半的话是另一个 AI 说的 —— 卡里得留痕，
+# 不然「谁说的」全靠猜，几个月后会把它的口吻当成某个群友的。
+_BOT_HINTS = ("作为 AI", "作为AI", "我是一个 AI", "我是一个AI", "我是语言模型",
+              "我是人工智能", "AI 助手", "AI助手",
+              "很高兴为你服务", "有什么可以帮你", "有什么我可以帮",
+              "希望这对你有帮助", "如有需要随时", "请问还有什么")
+
+
+def looks_like_bot(text):
+    t = (text or "")
+    for h in _BOT_HINTS:
+        if h in t:
+            return True
+    # 「首先…其次…」三段式 + 一次说完 200 字，也是典型机器口吻
+    if len(t) >= 200 and "首先" in t and "其次" in t:
+        return True
+    return False
+
+
 def remember(text, source, speaker="other", region="episode", salience=0.5,
              about_uid="", pool="long"):
     """把一条消息写进卡。失败不抛 —— 值守不能因为卡忙就停。
@@ -689,8 +708,11 @@ def poll_once(seen, verbose=True):
             _rq.append(text)
             del _rq[:-GROUP_RECENT_KEEP]
             if keep and bool(cfg_get("mem.write_group", True)):
+                _src = "qq-bot" if looks_like_bot(text) else "qq-group"
+                if _src == "qq-bot":
+                    sal = min(sal, 0.45)   # 别家 AI 的话不配占同样的位置
                 r = remember("[%s] %s：%s" % (gname, name, text),
-                             source="qq-group", speaker="other",
+                             source=_src, speaker="other",
                              region=region, salience=sal,
                              about_uid=str(uid or ""))
                 mem_id = (r or {}).get("mem_id")
@@ -762,8 +784,11 @@ def poll_once(seen, verbose=True):
             if keep and sal < mem_floor():
                 keep, why = False, "重要度 %.2f 低于门槛" % sal
             if keep and bool(cfg_get("mem.write_private", True)):
+                _src = "qq-bot" if looks_like_bot(text) else "qq"
+                if _src == "qq-bot":
+                    sal = min(sal, 0.45)
                 r = remember("[私聊] %s：%s" % (name, text),
-                             source="qq", speaker="other",
+                             source=_src, speaker="other",
                              region=region, salience=sal,
                              about_uid=str(uid or ""))
                 mem_id = (r or {}).get("mem_id")

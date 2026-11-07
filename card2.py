@@ -1690,6 +1690,11 @@ REGION_BOOST = 1.25
 # 默认值来自 10-30 在 20 条真实查询上的网格搜索；10-31 修好候选集/分区/BLAS 后
 # 由 eval_weights.py 重新扫描一遍确认（见那个脚本开头的说明）。
 SCORE_W = (0.35, 0.30, 0.20, 0.10)
+# 对象倾向：同一个人 ×1.10，明确属于别人 ×0.92（软加权，见 recall）
+OBJECT_BOOST_SAME = 1.10
+OBJECT_BOOST_OTHER = 0.92
+# 低置信：top1 分数低于这个数就明说「记不太清」，别把猜的当成真记得
+CONF_WEAK = 0.34
 # 🔧 2026-11-07：情绪强度对「能不能想起来」的影响。
 #    人在回忆时不是按时间戳检索的：一件让人心里一紧的事，
 #    隔十年也比昨天的琐事更容易跳出来。卡里 emotion 列一直有，
@@ -2153,6 +2158,7 @@ class MemoryCard:
         self._init_schema()
         self._migrate()
         self._ensure_soft_cols()
+        self._ensure_cond_table()
         # 运行时配置表（V5.0 §10.9）：场景权重能热改，不用重启服务。
         # 建表在这里而不是 ctxweight 里自己管 —— 卡的所有 schema 只在一个地方建，
         # 否则备份/恢复/老库迁移时总有一处会漏。
@@ -3745,6 +3751,19 @@ class MemoryCard:
             c.execute("INSERT INTO detail(parent_id,kind,text,weight,last_touch)"
                       " VALUES(?,?,?,?,?)", (mid, kind, txt, ww, at))
         self.db.commit()
+        # 共现：这条和「上一条」连一笔（同一个人优先，没有就按全局）
+        try:
+            _au2 = str(about_uid or "")
+            _prev = c.execute(
+                "SELECT region FROM mem WHERE id<? AND COALESCE(dead,0)=0 "
+                "AND (?='' OR COALESCE(about_uid,'')=?) "
+                "ORDER BY id DESC LIMIT 1",
+                (mid, _au2, _au2)).fetchone()
+            if _prev and _prev[0]:
+                self._bump_expected(c, _prev[0], region, at)
+                self.db.commit()
+        except Exception:
+            pass
         self._invalidate_idf()    # 库变了，攒够 20 条再重算（不每次清空）
         self._save_oxy()          # 全局依恋落盘
         # 🔧 2026-11-06（V5.2）：记一条负载，供「今天挤不挤」用。
@@ -4238,6 +4257,44 @@ class MemoryCard:
                 db.execute("ALTER TABLE mem ADD COLUMN %s INTEGER DEFAULT 0" % col)
             except sqlite3.OperationalError:
                 pass
+
+    def _ensure_cond_table(self, c=None):
+        """condition_expected：A 之后常跟着 B 的共现计数（V5.3.4）。
+
+        只记「分区 → 分区」，不记原文。这张表是用来**猜接下来常发生什么**，
+        不是用来复述 —— 粒度再细（按事件标签）就得让 LLM 标注，那又回到
+        「解释不清为什么这么判断」的老问题上了。
+        """
+        c = c or self.db.cursor()
+        c.execute("CREATE TABLE IF NOT EXISTS condition_expected ("
+                  "  a TEXT NOT NULL, b TEXT NOT NULL,"
+                  "  n INTEGER NOT NULL DEFAULT 0,"
+                  "  last_ts REAL, PRIMARY KEY (a, b))")
+        self.db.commit()
+
+    def _bump_expected(self, c, a, b, at):
+        if not a or not b or a == b:
+            return
+        c.execute("INSERT INTO condition_expected (a,b,n,last_ts) "
+                  "VALUES (?,?,1,?) ON CONFLICT(a,b) DO UPDATE SET "
+                  "n=n+1, last_ts=excluded.last_ts", (a, b, at))
+
+    def expected_after(self, region, k=3):
+        """某种事之后常跟什么：[(region, 概率, 次数)]，概率 = n / 该前缀总数。"""
+        if not region:
+            return []
+        try:
+            rows = self.db.execute(
+                "SELECT b, n FROM condition_expected WHERE a=? "
+                "ORDER BY n DESC LIMIT ?", (region, max(1, int(k)))).fetchall()
+            tot = self.db.execute(
+                "SELECT SUM(n) FROM condition_expected WHERE a=?",
+                (region,)).fetchone()[0] or 0
+        except sqlite3.OperationalError:
+            return []
+        if not tot:
+            return []
+        return [(r[0], float(r[1]) / tot, int(r[1])) for r in rows]
 
     def forget(self, mid, mode="logical", reason=""):
         """三档删除语义（V5.3.3）。别把这三件事混成一句"删了"。
@@ -5448,7 +5505,7 @@ class MemoryCard:
         return None
 
     def recall(self, query, top_k=3, access=True, pools=None, regions=None,
-               assoc=True):
+               assoc=True, about_uid=None):
         """三因子：像不像 × 还清不清楚 × 多久没提
 
         🔧 第二期改进：
@@ -5587,7 +5644,16 @@ class MemoryCard:
                 #    ③ cover 保留全量实词（改 bigram 反而降到 10/12，
                 #       因为中文短查询 bigram 覆盖率太稀疏）。
                 s = (SCORE_W[0] * blended + SCORE_W[1] * cover
-                     + SCORE_W[2] * wn + SCORE_W[3] * recency) \
+                     + SCORE_W[2] * wn + SCORE_W[3] * recency)
+                # 对象倾向（V5.3.4）：不是硬过滤 —— 卡的 about_uid 覆盖率只有三成，
+                # 硬过滤会把七成记忆直接挡死。这里是「同一个人的更容易被想起」，
+                # 明确属于别人的那条往后退一档。
+                if about_uid:
+                    _ou = (r["about_uid"] if "about_uid" in r.keys() else "") or ""
+                    if _ou == str(about_uid):
+                        s *= OBJECT_BOOST_SAME
+                    elif _ou:
+                        s *= OBJECT_BOOST_OTHER \
                     * (0.85 + 0.30 * r["salience"])
                 # 情绪调制（2026-11-07）：不是加分，是放大 ——
                 # 「想不想得起来」×「这件事当时有多重」。
@@ -6210,7 +6276,7 @@ class MemoryCard:
 
     def assemble_context(self, query, identity="", recent_lines=None,
                          touch=False,
-                         budget=None, scene=None):
+                         budget=None, scene=None, about_uid=None):
         """每次说话前，拼出四格上下文。装满就停，永远不会爆。
 
         🔧 V5.0 T3-3：配额不再是写死的 600/1800/2000/1200，
@@ -6370,7 +6436,8 @@ class MemoryCard:
 
         # ④ 此刻想起格（E 印象 + F 技能）
         used = 0
-        hits = self.recall(query, top_k=5, access=True)
+        hits = self.recall(query, top_k=5, access=True,
+                            about_uid=(about_uid or None))
         assoc_ids = getattr(self, "_last_assoc_ids", set())
         lines = []
         cap4 = used + q["recall"]
@@ -6437,7 +6504,13 @@ class MemoryCard:
             shown_ids.add(r["id"])
             used += len(line)
         if lines:
-            blk = "【这句话让我想起了】\n" + "\n".join(lines)
+            # 低置信：top1 分数太低就别硬装记得 —— 把「可能」写在脸上，
+            # 比编一条顺口的更接近三条底线。
+            _weak = bool(hits) and float(hits[0][0]) < CONF_WEAK
+            blk = "【这句话让我想起了】"
+            if _weak:
+                blk += "（这几条我不太确定，可能记岔了）"
+            blk += "\n" + "\n".join(lines)
             out.append(blk)
             sections["recall"] = used
 
