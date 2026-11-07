@@ -146,13 +146,40 @@ finally:
 
 print("\n== 六、--dry 不写盘、退出码 0 ==")
 import os.path as _osp
-_before = (os.path.getsize(_osp.join(F.ROOT, "card.db")),
-           _osp.getmtime(_osp.join(F.ROOT, "card.db")))
-rc = F.main(["--dry", "--no-browser", "--skip-probe"])
-_after = (os.path.getsize(_osp.join(F.ROOT, "card.db")),
-          _osp.getmtime(_osp.join(F.ROOT, "card.db")))
+import hashlib as _hl
+import shutil as _sh
+import tempfile as _tf
+
+# 拿一份**副本**试：真卡上可能正跑着服务，它在写 WAL；
+# 拿真卡比对字节，测的就不是「--dry 有没有写盘」，而是「别人有没有在写」。
+_tmp = _tf.mkdtemp(prefix="dry_", dir=_osp.join(F.ROOT, ".."))
+for _f in ("card.db", "anchor.json"):
+    _src = _osp.join(F.ROOT, _f)
+    if _osp.exists(_src):
+        _sh.copy2(_src, _osp.join(_tmp, _f))
+
+
+def _sig(pth):
+    with open(pth, "rb") as f:
+        return (_osp.getsize(pth), _hl.sha256(f.read()).hexdigest())
+
+
+_before = _sig(_osp.join(_tmp, "card.db"))
+_real_root, _old_env = F.ROOT, os.environ.get("WHALE_CARD_ROOT")
+F.ROOT = _tmp
+os.environ["WHALE_CARD_ROOT"] = _tmp
+try:
+    rc = F.main(["--dry", "--no-browser", "--skip-probe"])
+finally:
+    F.ROOT = _real_root
+    if _old_env is None:
+        os.environ.pop("WHALE_CARD_ROOT", None)
+    else:
+        os.environ["WHALE_CARD_ROOT"] = _old_env
+_after = _sig(_osp.join(_tmp, "card.db"))
 chk("--dry 退出码 0", rc == 0)
 chk("--dry 没动 card.db", _before == _after)
+_sh.rmtree(_tmp, ignore_errors=True)
 
 print("\n== 七、参数表 ==")
 import argparse

@@ -748,7 +748,16 @@ class Handler(BaseHTTPRequestHandler):
                 import ctxweight as _cw
                 with m.lock:
                     m.flow_time()
-                    ov = _console.overview(m.db_path)
+                    # 时间窗：/console_data?hours=5 分钟…168 小时，缺省 72。
+                    _hq = None
+                    try:
+                        from urllib.parse import parse_qs as _pqs
+                        _q = _pqs(self.path.split("?", 1)[1] if "?" in self.path else "")
+                        if _q.get("hours"):
+                            _hq = float(_q["hours"][0])
+                    except Exception:
+                        _hq = None
+                    ov = _console.overview(m.db_path, hours=_hq)
                     # 六维权重在这里现算，不让前端去调 /context ——
                     # 那会触发一次真实 recall、写 recall_event，
                     # 等于「打开控制台」这件事本身在改记忆权重。

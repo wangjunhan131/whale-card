@@ -858,7 +858,7 @@ def talk_state(db_path=DEFAULT_DB):
     }
 
 
-def overview(db_path=DEFAULT_DB):
+def overview(db_path=DEFAULT_DB, hours=None):
     """一整页要的数据，一次给齐 —— 前端只发一个请求。"""
     try:
         c = _conn(db_path)
@@ -893,7 +893,10 @@ def overview(db_path=DEFAULT_DB):
         # 情绪页：快反应层的曲线（心率/交感/五条调质/RPE/安全感）。
         # 当前这具身体的读数由前端再问一次 /viscera —— 那里走的是卡自己的
         # viscera 模块，控制台不重写第二份公式。
-        "emotion": emotion_series(db_path),
+        # 窗口越短越要看密度：5 分钟的窗口只给 600 个点等于「一秒一格」，
+        # 看着像没动 —— 小窗口把上限抬上去。
+        "emotion": emotion_series(db_path, hours=(float(hours) if hours else 72.0),
+                                  limit=(1500 if (hours and float(hours) <= 6) else 900)),
         "chat": {"cfg": _chatcfg.load_cfg(), "spec": _chatcfg.spec_json()},
         "generated": round(time.time(), 1),
     }
@@ -1049,6 +1052,13 @@ nav .tab{padding:0 14px;height:52px;display:flex;align-items:center;
   font-size:13px;color:var(--dim);cursor:pointer;border-bottom:2px solid transparent;
   transition:.14s;white-space:nowrap}
 nav .tab:hover{color:var(--fg)}
+.winwrap{display:flex;align-items:center;gap:4px;margin-right:10px}
+.winlab{color:#6d7d92;font-size:11px;letter-spacing:.5px;margin-right:2px}
+.wseg{background:transparent;border:1px solid #24313f;color:#8fa3ba;font-size:11px;
+      padding:2px 7px;border-radius:5px;cursor:pointer;line-height:1.5}
+.wseg:hover{border-color:#33506b;color:#c6d6e6}
+.wseg.on{background:#16303f;border-color:#2fd07d;color:#7ef0b0}
+.wseg.live.on{background:#3a1b22;border-color:#ff5f6d;color:#ff9aa3}
 .fsbtn{margin-left:12px;width:26px;height:26px;display:flex;align-items:center;
   justify-content:center;border:1px solid var(--line);border-radius:7px;
   color:var(--dim);cursor:pointer;font-size:13px;line-height:1}
@@ -1366,6 +1376,14 @@ body{font-family:"Inter","Segoe UI","Microsoft YaHei",system-ui,sans-serif;
       <div class="tab" data-t="talk">接话</div>
       <div class="tab" data-t="set">设置</div>
       <div class="sp"></div>
+      <span class="winwrap" id="winWrap">
+        <span class="winlab">窗口</span>
+        <button class="wseg" data-h="0.083">5 分</button>
+        <button class="wseg" data-h="1">1 时</button>
+        <button class="wseg on" data-h="24">24 时</button>
+        <button class="wseg" data-h="168">7 天</button>
+        <button class="wseg live" id="btnLive" title="实时：每 3 秒自己刷一格">实时</button>
+      </span>
       <span class="stamp" id="stamp">—</span>
       <span class="fsbtn" id="btnFull" title="全屏 / 退出全屏（F11）">⛶</span>
     </nav>
@@ -1385,7 +1403,7 @@ var HNAME=__HORMONE_LABELS__;
 var HBASE=__HORMONE_BASE__; /* 24 条出厂基线 */ /* 24 种激素：key → [中文, English] */
 "use strict";
 var API = function(p, o){ return fetch(p, o).then(function(r){ return r.json(); }); };
-var S = {data:null, tab:"dash", neb:null, resp:0};
+var S = {data:null, tab:"dash", neb:null, resp:0, hours:24, live:false};
 var $ = function(s){ return document.querySelector(s); };
 var RC = {episode:"#5b7fa6",fact:"#4f9d69",self:"#c9a227",habit:"#3fa8a0",
           preference:"#c47ba0",flash:"#c0504d"};
@@ -4305,7 +4323,7 @@ function refresh(){
   return Promise.all([
     API("/health"),
     API("/status"),
-    API("/console_data"),
+    API("/console_data?hours="+encodeURIComponent(S.hours)),
     API("/cardslot"),
     API("/timeline"),
     API("/disks"),
@@ -4426,6 +4444,23 @@ $("#dlgYes").onclick=function(){ $("#mask").classList.remove("on");
 
 /* ── 起 ── */
 refresh(); loadTail().then(render);
+/* 时间窗：一根旋钮管所有曲线。窗口越短，曲线越"活着"。 */
+function setWindow(h){
+  S.hours = Number(h) || 24;
+  S.live = (S.hours <= 0.25);
+  [].forEach.call(document.querySelectorAll(".wseg[data-h]"), function(b){
+    b.classList.toggle("on", Number(b.dataset.h) === S.hours);
+  });
+  var lv = $("#btnLive"); if(lv) lv.classList.toggle("on", S.live);
+  refresh();
+}
+[].forEach.call(document.querySelectorAll(".wseg[data-h]"), function(b){
+  b.addEventListener("click", function(){ setWindow(b.dataset.h); });
+});
+var lvBtn = $("#btnLive");
+if(lvBtn) lvBtn.addEventListener("click", function(){ setWindow(S.live ? 24 : 0.083); });
+/* 实时档：每 3 秒自己刷一格，曲线就真的在动 */
+setInterval(function(){ if(S.live) refresh(); }, 3000);
 setInterval(function(){ refresh(); }, 15000);
 setInterval(pollSys, 2000); pollSys();
 setInterval(function(){ loadTail(); }, 30000);
