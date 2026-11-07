@@ -904,6 +904,33 @@ class Handler(BaseHTTPRequestHandler):
                 import cardslot as _slot
                 return self._send(200, {"ok": True, "cardslot": _slot.status()})
 
+            if method == "GET" and path == "/people":
+                # 关系卡列表：按出现次数排。只记频次与分区，不记评价。
+                try:
+                    from urllib.parse import parse_qs as _pqs
+                    _pq = _pqs(self.path.split("?", 1)[1] if "?" in self.path else "")
+                    lim = int((_pq.get("limit") or ["30"])[0])
+                except Exception:
+                    lim = 30
+                try:
+                    return self._send(200, {"ok": True,
+                                            "people": m.card.people(limit=lim)})
+                except Exception as e:
+                    return self._fail(500, "people_read", str(e))
+
+            if method == "GET" and path == "/person":
+                # 一个人的关系卡。没有就是没有，不编。
+                from urllib.parse import parse_qs as _pqs2
+                _pq2 = _pqs2(self.path.split("?", 1)[1] if "?" in self.path else "")
+                uid = (_pq2.get("uid") or [""])[0]
+                try:
+                    p = m.card.person_card(uid)
+                except Exception as e:
+                    return self._fail(500, "person_read", str(e))
+                if not p:
+                    return self._send(404, {"ok": False, "reason": "not_found"})
+                return self._send(200, {"ok": True, "person": p})
+
             if method == "GET" and path == "/motiv":
                 # 动机层快照（驱力池 + 上一轮决策）
                 try:

@@ -3761,9 +3761,16 @@ class MemoryCard:
                 (mid, _au2, _au2)).fetchone()
             if _prev and _prev[0]:
                 self._bump_expected(c, _prev[0], region, at)
-                self.db.commit()
+            self.db.commit()
         except Exception:
             pass
+        # 关系卡：谁又出现了一次（只记频次与分区，不记评价）
+        try:
+            if about_uid:
+                self.person_touch(about_uid, self.person_layer_of(about_uid),
+                                  ts=float(ts or self.clock.now()), region=region)
+        except Exception as _pe:
+            print('[card2] 关系卡挂钩失败: %s' % _pe)
         self._invalidate_idf()    # 库变了，攒够 20 条再重算（不每次清空）
         self._save_oxy()          # 全局依恋落盘
         # 🔧 2026-11-06（V5.2）：记一条负载，供「今天挤不挤」用。
@@ -4242,6 +4249,89 @@ class MemoryCard:
                 budget -= 1
 
         return events
+
+    def _ensure_person_table(self):
+        """关系卡：一个人一行。只记关系和频次，不记评价（不做好感度打分）。"""
+        c = self.db.cursor()
+        c.execute("""CREATE TABLE IF NOT EXISTS person (
+            uid       TEXT PRIMARY KEY,
+            layer     TEXT NOT NULL DEFAULT '',
+            first_ts  REAL NOT NULL DEFAULT 0,
+            last_ts   REAL NOT NULL DEFAULT 0,
+            n         INTEGER NOT NULL DEFAULT 0,
+            regions   TEXT NOT NULL DEFAULT '{}'   -- {"chatter":3,"fact":1}
+        )""")
+        self.db.commit()
+
+    def person_touch(self, uid, layer="", ts=None, region=""):
+        """记一个人又出现了一次。uid 空则什么都不做。"""
+        uid = str(uid or "").strip()
+        if not uid:
+            return None
+        ts = float(ts or self.clock.now())
+        try:
+            self._ensure_person_table()
+            c = self.db.cursor()
+            row = c.execute("SELECT n, regions, first_ts FROM person WHERE uid=?",
+                            (uid,)).fetchone()
+            import json as _json
+            if not row:
+                regions = {}
+                first_ts = ts
+                n = 0
+            else:
+                n, rj, first_ts = int(row[0]), row[1] or "{}", float(row[2] or ts)
+                try:
+                    regions = _json.loads(rj) or {}
+                except Exception:
+                    regions = {}
+            n += 1
+            if region:
+                regions[region] = int(regions.get(region, 0)) + 1
+            c.execute("""INSERT INTO person(uid,layer,first_ts,last_ts,n,regions)
+                         VALUES(?,?,?,?,?,?)
+                         ON CONFLICT(uid) DO UPDATE SET
+                           layer=CASE WHEN excluded.layer<>'' THEN excluded.layer
+                                      ELSE person.layer END,
+                           first_ts=MIN(person.first_ts, excluded.first_ts),
+                           last_ts=excluded.last_ts, n=excluded.n,
+                           regions=excluded.regions""",
+                      (uid, layer or "", min(first_ts, ts), ts, n,
+                       _json.dumps(regions, ensure_ascii=False)))
+            self.db.commit()
+            return n
+        except Exception as e:
+            print("[card2] person_touch 失败: %s" % e)
+            return None
+
+    def person_card(self, uid):
+        """一个人的关系卡。没有记录就是没有，不编。"""
+        uid = str(uid or "").strip()
+        if not uid:
+            return None
+        self._ensure_person_table()
+        row = self.db.execute(
+            "SELECT uid,layer,first_ts,last_ts,n,regions FROM person WHERE uid=?",
+            (uid,)).fetchone()
+        if not row:
+            return None
+        import json as _json
+        try:
+            regions = _json.loads(row[5] or "{}")
+        except Exception:
+            regions = {}
+        top = sorted(regions.items(), key=lambda kv: -kv[1])[:3]
+        return {"uid": row[0], "layer": row[1] or "",
+                "first_ts": row[2], "last_ts": row[3], "n": row[4],
+                "regions": regions, "top_regions": top}
+
+    def people(self, limit=30):
+        self._ensure_person_table()
+        rows = self.db.execute(
+            "SELECT uid,layer,n,last_ts FROM person ORDER BY n DESC, last_ts DESC LIMIT ?",
+            (int(limit),)).fetchall()
+        return [{"uid": r[0], "layer": r[1] or "", "n": r[2], "last_ts": r[3]}
+                for r in rows]
 
     def _ensure_soft_cols(self, c=None):
         """V5.3.3：软删除与隔离区两列。
