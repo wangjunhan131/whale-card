@@ -951,6 +951,24 @@ class Handler(BaseHTTPRequestHandler):
                 except Exception as e:
                     return self._fail(500, "motiv_read", str(e))
 
+            if method == "GET" and path == "/impression":
+                # 印象层：谁在什么情境下常做什么。只读。
+                try:
+                    from urllib.parse import parse_qs as _pqsI
+                    _pqI = _pqsI(self.path.split("?", 1)[1] if "?" in self.path else "")
+                    subj = (_pqI.get("subject") or [""])[0] or None
+                    lim = int((_pqI.get("limit") or ["20"])[0])
+                    minw = float((_pqI.get("min_w") or ["0"])[0])
+                except Exception:
+                    subj, lim, minw = None, 20, 0.0
+                try:
+                    return self._send(200, {
+                        "ok": True,
+                        "impressions": m.card.impression_top(subject=subj, limit=lim, min_w=minw),
+                        "stat": m.card.impression_snapshot()})
+                except Exception as e:
+                    return self._fail(500, "impression_read", str(e))
+
             if method == "GET" and path == "/viscera/profile":
                 try:
                     return self._send(200, {"ok": True,

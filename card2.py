@@ -53,6 +53,7 @@ import ctxweight
 import skill
 import identity
 import habits as habits_mod
+import impression as impression_mod
 import synapse as synapse_mod
 # 🔧 T4-3：语义层。它是唯一需要 numpy 的模块，所以关在 semantic.py 里，
 #    这里只在用得到的时候碰它。拿不到（模型没下/numpy 没装）就退回字面匹配 ——
@@ -2123,6 +2124,10 @@ def _safe_json(txt):
         return {}
 
 
+# 印象层/重复短句判断共用：把标点、空白、语气尾巴剥掉再比
+_PUNCT_RE = re.compile(r"[\s，。！？、…~—\-（）()《》·「」【】]+")
+
+
 class MemoryCard:
     def __init__(self, db_path=":memory:", clock=None, card_dir=None):
         self.clock = clock or Clock()
@@ -2190,6 +2195,10 @@ class MemoryCard:
         self._load_viscera()
         self._load_viscera_profile()
         self._load_motiv()
+        try:
+            impression_mod.ensure(self.db)
+        except Exception as _ie:
+            print("[card2] 印象层建表失败: %s" % _ie)
         try:
             self._ensure_hist_cols()
         except Exception:
@@ -3839,6 +3848,18 @@ class MemoryCard:
             self._load_bump(region, now)
         except Exception:
             pass
+        # ---- 印象层：记一笔「谁在什么情境下说了什么」 --------------------
+        # 只记账、不判断值不值得：筛选是短期池的事，印象是"很多次剩下的形状"。
+        try:
+            impression_mod.observe(
+                self.db,
+                subject=(about_uid or ("user" if (speaker or "") == "user" else "")),
+                text=text, ts=(ts if ts is not None else self.clock.now()),
+                subject_kind=("person" if (about_uid or speaker) else "thing"),
+                now=self.clock.now())
+        except Exception as _ie:
+            print("[card2] 印象记账失败: %s" % _ie)
+
         return mid
 
     # ---------- 分区负载（V5.2，2026-11-06）----------
@@ -4009,15 +4030,18 @@ class MemoryCard:
         #    分区倍率决定"忘得多慢"，位置腾退决定"能给多少张桌子"。
         #    flash 区的记忆权重掉得慢，但它照样占着一张桌子 —— 让它赖 23 天，
         #    别的记忆就没地方坐了。两件事分开算，才是对的。
+        #    V5.5（2026-11-08 用户拍板）：改成**实时筛选** ——
+        #    进了短期池就每轮判一次海马分，够格当场进中期/长期；
+        #    不够格的留在短期池里按自己的曲线往下淡，满 7 天还没够格才删。
+        #    原来的写法只在「满 7 天」那一刻结算一次，于是够格的也要白坐七天。
         for r in c.execute(
                 "SELECT * FROM mem WHERE pool='short'").fetchall():
             age = now - r["t_anchor"]
-            if age > SHORT_MAX_TTL:
-                moved = self._consolidate(r, now)
-                if moved:
-                    events.append((r["id"], "consolidate", moved))
-                else:
-                    events.append((r["id"], "expire", None))
+            moved = self._consolidate(r, now)
+            if moved:
+                events.append((r["id"], "consolidate", moved))
+            elif age > SHORT_MAX_TTL:
+                events.append((r["id"], "expire", None))
 
         # 2) 收件层过期清理（V5.4）：只留 60 小时，没被挑中的到期就走
         try:
@@ -4162,6 +4186,16 @@ class MemoryCard:
     def _consolidate(self, r, now):
         """短期池到期：算海马分，够格进中期/长期，否则删"""
         score = self._hippocampus_score(r)
+        # 他本人说的话：+0.12，不是免筛。
+        # （免筛实测会把 133 条短期里的 103 条全塞进中期，短期池就形同虚设；
+        #   而海马分那三样——情绪/实体/被想起——对他随口一句全是零，
+        #   一点不加又等于在删他的话。加分是两头都顾得住的那个解。）
+        if (r["speaker"] or "") == "user":
+            score += self.USER_SPEECH_BONUS
+        # 重复短句（7 天内同句 ≥3 次）打折：价值在「他常这么说」的模式里，
+        # 不在这一条本身，让它留在短期按自己的曲线走完。
+        if self._is_repeat_short(r, now):
+            score *= self.REPEAT_SHORT_PENALTY
         c = self.db.cursor()
         # 🔧 2026-11-01 防污层：可信度太低的，只许进中期、不许进长期。
         #    它不是被删掉（"她被骗过"要留着），只是永远升不上去。
@@ -4191,24 +4225,22 @@ class MemoryCard:
         elif score >= THETA_MEDIUM:
             target, floor = POOL_MEDIUM, W_FLOOR_MEDIUM
         else:
-            # 🔧 2026-11-06：没上榜不再删，降级到中期，让它按自己的衰减曲线收场。
-            #    原逻辑是「海马判定没上榜 → 删」，于是池子一满就等于在删记忆：
-            #    墓碑 403 条里有 373 条写着「短期池到期，海马判定没上榜」，
-            #    大半都是被这条规则干掉的（其中一批还是已经判过"值得记"的群消息）。
+            # 🔧 2026-11-08（V5.5，用户拍板）：恢复「没进中期就留在短期，7 天忘光」。
+            #    2026-11-06 那版是「没上榜也降级到中期」，中期半衰期 29.7 天，
+            #    等于给本该忘掉的东西续命六倍，于是池子里几乎什么都不删。
             #
-            #    用户的意思很明确：「短期池的位置暂时不用设限制吧，或者让它
-            #    更多更大一点，写入特定区域可以，你觉得哪个更好？」——
-            #    我的答案是：**容量是注意力预算，不是寿命开关**。
-            #    桌子坐满了你得请人换个座，不能把人抹掉。
-            #    所以这里只换池名（→ medium），寿命交给 region 的 λ 决定；
-            #    只有已经淡到 CLARITY_GC 以下（真的没什么可留）才走遗忘。
-            if wn_row(r, now) < CLARITY_GC:
-                self._forget_row(c, r["id"], "短期池到期，已淡到看不清")
+            #    例外一：**他本人说的话**免筛直通中期 —— 海马分那三样
+            #    （情绪/实体/被想起）对他随口一句「今天好累」全是零，
+            #    按分数判就等于在删他的话。这是他 m36485 拍板要的。
+            #    例外二：**重复的短句**不给免筛 —— 他自己举的例子：
+            #    「我回来了」这种话每天都说，放进短期就够了，不该每次都占中期。
+            #    这类句子同时喂给印象模块计数（见 impression.py），
+            #    留下的是「他回来会说这句」，不是每一句本身。
+            age = now - r["t_anchor"]
+            if age > SHORT_MAX_TTL:
+                self._forget_row(c, r["id"], "短期池到期，没进中期")
                 return None
-            wn = max(wn_row(r, now), W_FLOOR_MEDIUM)
-            c.execute("UPDATE mem SET pool=?, w=?, t_anchor=?, tier=? WHERE id=?",
-                      (POOL_MEDIUM, wn, now, TIER_MID, r["id"]))
-            return POOL_MEDIUM
+            return None
         # 先按旧池结算，再抬到新池存活下限
         wn = wn_row(r, now)
         wn = max(wn, floor)
@@ -4216,6 +4248,56 @@ class MemoryCard:
         c.execute("UPDATE mem SET pool=?, w=?, t_anchor=?, tier=? WHERE id=?",
                   (target, wn, now, tier, r["id"]))
         return target
+
+    USER_SPEECH_BONUS = 0.12   # 他本人说的话，海马分上加一点
+    REPEAT_SHORT_PENALTY = 0.5 # 重复短句打折（价值在模式里，不在这一条）
+    REPEAT_SHORT_CHARS = 12      # 多短的句子算「随口一句」
+    REPEAT_SHORT_N = 3           # 7 天内出现几次算「经常说」
+    REPEAT_SHORT_WINDOW = 7 * DAY
+
+    def _is_repeat_short(self, r, now=None):
+        """这句是不是「经常说的短句」
+
+        用户 m36485 的原话：「我说一句我回来了，这句话会让你开心，但是这样的
+        话我会说很多遍，几乎每天都会说一次，所以说把它放进短期的应该够了吧」。
+
+        判据很小：文本（去标点空格）≤12 字，且 7 天内在卡里出现过 ≥3 次。
+        —— 不是判断它"没意义"，是判断它"重复"：重复的话，价值在模式里，
+        不在这一条里。所以它不享受「他说的免筛」，让它按短期自己的曲线走完。
+        """
+        txt = _PUNCT_RE.sub("", (r["raw"] or ""))
+        if not txt or len(txt) > self.REPEAT_SHORT_CHARS:
+            return False
+        now = now if now is not None else self.clock.now()
+        # 同名短句会被 remember() 去重合并成一条，次数记在 access_count 上 ——
+        # 所以"经常说"还有第二个证据来源：这条自己已经被重复写过/想起过几次。
+        try:
+            if int(r["access_count"] or 0) >= self.REPEAT_SHORT_N:
+                return True
+        except Exception:
+            pass
+        rows = self.db.execute(
+            "SELECT raw FROM mem WHERE speaker='user' AND create_ts > ?",
+            (now - self.REPEAT_SHORT_WINDOW,)).fetchall()
+        n = 0
+        for rr in rows:
+            t2 = _PUNCT_RE.sub("", (rr["raw"] or ""))
+            if t2 == txt:
+                n += 1
+        return n >= self.REPEAT_SHORT_N
+
+    # ---- 印象层对外接口 -------------------------------------------------
+    def impression_top(self, subject=None, limit=8, min_w=0.0):
+        return impression_mod.top(self.db, subject=subject, limit=limit, min_w=min_w)
+
+    def impression_hints(self, subject=None, limit=3, min_w=0.35):
+        return impression_mod.hint_lines(self.db, subject=subject, limit=limit, min_w=min_w)
+
+    def impression_snapshot(self):
+        return impression_mod.snapshot(self.db)
+
+    def impression_fade(self, now=None):
+        return impression_mod.fade(self.db, now=now if now is not None else self.clock.now())
 
     def _evict_short_overflow(self, now):
         """已停用：短期池不再按容量驱逐（V5.4，2026-11-07 用户拍板）
@@ -6828,6 +6910,19 @@ class MemoryCard:
         if vtxt:
             out.append("【身体】\n" + vtxt)
             sections["viscera"] = len(vtxt)
+
+        # ⑤.6 印象：他（或别人）在什么情境下常做什么。
+        #     放在【此刻】前面、【身体】后面 —— 它是背景知识，不是眼前这一刻。
+        #     只描述、不预测、不当台词：这里进来的每一句都必须是"发生过 N 次的事"，
+        #     而不是"他大概会怎样"。
+        try:
+            _ilines = self.impression_hints(limit=3)
+        except Exception:
+            _ilines = []
+        if _ilines:
+            _itxt = "\n".join("- " + x for x in _ilines)
+            out.append("【印象】\n" + _itxt)
+            sections["impression"] = len(_itxt)
 
         state = self._state_line()
         if state:

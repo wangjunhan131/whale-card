@@ -2016,3 +2016,30 @@ ender()（长期印象格与召回行）；「最近在聊」那格
 **教训**
 - ``ON CONFLICT ... layer=excluded.layer OR person.layer`` 里 ``OR`` 是逻辑或，
   不是拼接 —— 写成了会把 layer 变成 0。要合并字符串用 ``CASE WHEN``/``||``。
+
+## 2026-11-07 深夜｜V5.4：一张卡开始收下所有发生过的事（统一收件口 + 池子不设上限）
+
+**依据**：用户 m36184 拍板五条 —— ①我的记忆不只属于他一个人，收件层收所有人说的话 ②所有池都不设容量限制，「满了往中期沉淀」这个机制拿掉 ③时间线加成只作用在最近一个月、越近加得越多、超一个月归零，加在原衰减曲线之上 ④长篇文字（小说/长视频字幕）允许提炼主干+留几处细节 ⑤收件层保留 60 小时（m36190 又定短期窗口 = 7 天）。
+
+**新增**
+- `card2.py`：`inbox` 表（id/ts/source/channel/who/uid/gid/kind/text/kept/kept_mid/note + idx_inbox_ts）、`inbox_add / inbox_list / inbox_mark / inbox_gc / inbox_stats / _ensure_inbox`；`remember()` 写完立刻往收件层留一份 `kept=1`（私聊与本窗口「两条腿」，不再依赖我每轮记得调 /report）。
+- `card2.py`：`WINDOW_BONUS_DAYS=30`、`WINDOW_BONUS_MAX=0.06`、`WHALE_WINDOW_BONUS`（默认开）。加成只给 `speaker='user'`，`age<30 天` 时 `s *= 1 + 0.06*(1-age/span)`。
+- `mind_server.py`：`POST /intake`（统一收件口，任何来源都往这写）、`POST /inbox/mark`、`GET /inbox?limit=&hours=&unkept=&full=`；启动守卫：卡里 0 条记忆且没设 `WHALE_ALLOW_EMPTY=1` 就拒绝启动（盘没挂上时 SQLite 会替你新建一个空库，/health 还报 ok，这是最骗人的假绿灯）。
+- `tests/test_t114.py` 31/31。
+
+**修改**
+- `_evict_short_overflow()` 变成空操作（容量驱逐整个拿掉）；`tick()` 里换成 `inbox_gc()`。
+- 修掉一个我自己埋的 bug：`about_uid` 分支的 `elif` 让 `(0.85+0.30*salience)` 只作用于『别人』那一支，salience 乘子对同人/未标注的记忆一直没生效。
+- `tests/test_t92.py`「短期池容量腾退」改成「不再被削回去 + 7 天窗到期离开」。
+
+**评估（卡副本，eval_memory.py）** 关加成 R@1 75.0/R@3 75.0 → 12%/30天 62.5/87.5（太猛）→ **6%/30天 75.0/87.5（采用）**；EVID 100%。结论：加成 ≤6% 时第一命中不掉、前三多捞回一条。
+
+**验证** 全套 48 个测试文件 0 挂；真卡 1163 条 / 第 23 天 / chain_ok / anchor ok；`/intake` 200、`/inbox` 200、跨站 Origin 仍 403；冒烟写进真卡的 4 行 `source='smoke'` 已清。
+
+**教训**
+- `remember()` 里要先 `_ensure_inbox(c)` 再 INSERT，否则每次写入都刷 `no such table: inbox`。
+- 测试里灌 200 条短期记忆不能用 `remember()`（Jaccard 去重会把数字变化当重复并成十几条），得直接 INSERT `mem`（别忘了 `vec` 列 NOT NULL）。
+- `c.tick()` 要传 `dt_seconds`。
+- 交接时最容易漏的是「谁去调这个新接口」：`/intake` 建好了，但 `qq_guard`、B站、抖音三个出口还没改走它。
+
+**未完成**：①`qq_guard` / B站 / 抖音 三个 adapter 接到 `/intake` ②长文「提炼主干+细节」的工具 ③256G M.2 主卡迁移（文件系统未定）④重启 DSH 让 REA 拿到 Ghidra。

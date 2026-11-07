@@ -191,8 +191,10 @@ if HAVE:
     chk("脏增量不抛", isinstance(V.inject(s_zero, {"不存在": 1.0, "dopa": None}), dict))
 
 print("\n== 八、接进卡：身体真的会动 ==")
-tmp = os.path.join(os.environ.get("TEMP", "."), "t107_card")
-os.makedirs(tmp, exist_ok=True)
+# 用新的临时目录：情绪引擎的状态写在卡目录的 qq_state/emotion 下，
+# 复用同一个目录会让上一次测试的疲劳/适应带过来（被夸一次比一次平）。
+import tempfile
+tmp = tempfile.mkdtemp(prefix="t107_card_")
 dst = os.path.join(tmp, "card.db")
 _cardcopy.copy_card_db(os.path.join(ROOT, "card.db"), dst)
 c = card2.MemoryCard(dst)
