@@ -3072,6 +3072,22 @@ class MemoryCard:
 
     def touch_hormones(self, text):
         """一句话扰动四个激素（V5.0 §4.3），返回这次判定的事件类型"""
+        # 🔧 2026-11-09：先让激素朝基线回一点，再受这一句的扰动。
+        #    原来只有 apply_event / tone_nudge 在往上推，`hormone.regress()`
+        #    定义了却**从来没有被调用过** —— 于是多巴胺一路顶到 0.98 卡在天花板上，
+        #    语气提示永远是同一句「劲头足」，看着就是「情绪一成不变」。
+        #    稳态回归本来就是公式的一部分（h(t+dt)=h_base+(h-h_base)e^{-λdt}），
+        #    这里按「距上一次扰动过去了多久」补上这一步，λ 用 0.06/小时
+        #    （半衰期约 11.6 小时：一场好觉能淡掉，同一个下午不会自己掉光）。
+        try:
+            _now = time.time()
+            _dt_h = max(0.0, _now - float(getattr(self, "_h_ts", _now))) / 3600.0
+            if 0.0 < _dt_h <= 24.0 * 7:
+                _base = {k: hormone.H_BASE.get(k, 0.5) for k in hormone.H_KEYS}
+                self.h = hormone.regress_all(self.h, _dt_h, _base)
+            self._h_ts = _now
+        except Exception:
+            pass
         kind, s = hormone.classify_event(text)
         before = dict(self.h)
         if kind is not None:
