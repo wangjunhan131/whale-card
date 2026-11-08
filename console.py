@@ -2336,7 +2336,7 @@ function renderMiniLog(){
   box.innerHTML = rows.map(function(x){
     var k = x.kind;
     var cls = (k==="incident") ? " b" : (k.indexOf("sleep")===0 ? " w" : "");
-    /* note 里常带"他#951 使用者：整段原文"，一行放不下 —— 冒号前的人名/序号去掉，
+    /* note 里常带"他#951 使用者☭：整段原文"，一行放不下 —— 冒号前的人名/序号去掉，
        正文砍到 26 字，左栏只留"发生了什么" */
     var raw = String(x.note || "")
       .replace(/\[[^\]]{1,14}\]\s*/g, "")

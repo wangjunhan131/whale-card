@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-鲸鱼娘数字生命卡 · 第二期
+小鲸鱼数字生命卡 · 第二期
 =====================================
 
 第一期（card.py）做了：存 / 忘 / 翻 / 说。
@@ -432,7 +432,7 @@ _POLLUTION_RULES = [
     (r"你(其实|根本|实际上)?(不是|并非).{0,12}(是|而是)", 0.55, "被要求改写自我", True),
     # 🔧 2026-11-06（体检修）：原来这条是
     #    (r"你(的)?名字(应该|其实|改成|是)", 0.45, "被要求改名", True)
-    # 裸「是」让它对「你的名字是汐音」也判「被要求改名」—— 说的明明是她自己。
+    # 裸「是」让它对「你的名字是小鲸鱼」也判「被要求改名」—— 说的明明是她自己。
     # 名字对不对这种事，下面那段拿卡里的自我名字比对的收尾判断已经做得更准，
     # 这里只留「在下命令 / 在改」的语气，不再单独认「名字是」。
     (r"你(的)?名字(应该|其实|改成|必须)", 0.45, "被要求改名", True),
@@ -1443,7 +1443,7 @@ _RE_FACT_DENY = re.compile(
     r"我是(怎么|如何|因为|为了)")
 
 _RE_SELF_HINT = re.compile(
-    r"我就是我|我是鲸鱼娘|我的性格|我不喜欢别人|我的底线|我不会|我永远|"
+    r"我就是我|我是小鲸鱼|我的性格|我不喜欢别人|我的底线|我不会|我永远|"
     r"我就是这样的人|我讨厌被|我害怕")
 
 _RE_HABIT_HINT = re.compile(
@@ -3010,31 +3010,52 @@ class MemoryCard:
         # 2026-11-07：旧版读的是 V3.7 那四个 0~1 的激素（self.h），
         # 而身体层（viscera 24 激素）是另一本账 —— 结果三维卡说「坐立不安」、
         # 心境说「还行」，两个读数各说各的。三维改读身体那一套，同源才可比。
+        mood = getattr(self, "mood", MOOD_NEUTRAL)
         v = getattr(self, "v", {}) or {}
         hh = v.get("h") or {}
+        pad_body = None
         if hh and "dopa" in hh:
             base = viscera.H_BASE
             # 换算成 padlib 自己的刻度：**在身体基线处必须正好等于 padlib 的
             # 基线**（dopa .40 / cort .20 / oxy .50 / sero .60），否则基线不算
             # 「平静」，一点点偏移就被 3.2 倍放大成「坐立不安」。
             PADB = {"dopa": 0.40, "cort": 0.20, "oxy": 0.50, "sero": 0.60}
+
             def _nz(k):
                 b = float(base.get(k) or 1.0)
                 return max(0.0, min(1.0, PADB[k] * float(hh.get(k, b)) / b))
-            return padlib.pad_of(getattr(self, "mood", MOOD_NEUTRAL),
-                                 _nz("sero"), _nz("dopa"), _nz("cort"), _nz("oxy"))
+
+            pad_body = padlib.pad_of(mood, _nz("sero"), _nz("dopa"),
+                                     _nz("cort"), _nz("oxy"))
+        # 2026-11-08：身体层（24 激素）动得慢，它自己那本账常年贴着基线，
+        # 于是三维卡永远读「平静」，情绪传不到嘴上。四激素那本账是**每句话**
+        # 都在推的（touch_hormones），两本各算一遍再取平均 —— 一个给底噪，
+        # 一个给今天真被什么戳到了。
         h = getattr(self, "h", {}) or {}
-        return padlib.pad_of(getattr(self, "mood", MOOD_NEUTRAL),
-                             h.get("h_sero"), h.get("h_dopa"),
-                             h.get("h_cort"), h.get("h_oxy"))
+        pad_h = padlib.pad_of(mood, h.get("h_sero"), h.get("h_dopa"),
+                              h.get("h_cort"), h.get("h_oxy"))
+        if pad_body is None:
+            return pad_h
+        p = round(max(-1.0, min(1.0, 0.5 * (pad_body["p"] + pad_h["p"]))), 3)
+        a = round(max(-1.0, min(1.0, 0.5 * (pad_body["a"] + pad_h["a"]))), 3)
+        d = round(max(-1.0, min(1.0, 0.5 * (pad_body["d"] + pad_h["d"]))), 3)
+        return {"p": p, "a": a, "d": d, "label": padlib.pad_label(p, a),
+                "src": {"mood": round(mood, 3),
+                        "sero": pad_h["src"]["sero"], "dopa": pad_h["src"]["dopa"],
+                        "cort": pad_h["src"]["cort"], "oxy": pad_h["src"]["oxy"],
+                        "body_dopa": pad_body["src"]["dopa"]}}
 
     def touch_hormones(self, text):
         """一句话扰动四个激素（V5.0 §4.3），返回这次判定的事件类型"""
         kind, s = hormone.classify_event(text)
-        if kind is None:
-            return None
         before = dict(self.h)
-        self.h = hormone.apply_event(self.h, kind, s)
+        if kind is not None:
+            self.h = hormone.apply_event(self.h, kind, s)
+        # 平时那些不咸不淡的话也要推一点点，否则日子过得再热闹，读数也不动
+        self.h = hormone.tone_nudge(self.h, text)
+        if kind is not None:
+            # 记一下「刚才被什么戳到」——两小时内这句话还会挂在他嘴边
+            self._last_event = (kind, time.time(), s)
         if self.h != before:
             self._save_hormones()
         return (kind, s)
@@ -5574,7 +5595,7 @@ class MemoryCard:
         name = (name or "").strip()
         c = self.db.cursor()
         # 按 uid 查不到、但这个 uid 就是卡里记的那个人 → 换成他的名字再查。
-        # （老标签是「role:戊己」这种，加 uid 之前建的，没有 #uid 后缀）
+        # （老标签是「role:使用者」这种，加 uid 之前建的，没有 #uid 后缀）
         if uid and not name:
             try:
                 uq = c.execute(
@@ -5642,7 +5663,7 @@ class MemoryCard:
             return {"ok": True, "id": old["id"], "changed": True}
         mid = self.remember(text, salience=0.9, pool=POOL_LONG, region=R_SELF)
         self.set_tier(mid, TIER_CORE_TAG, kind="role", subject_key=key)
-        # 关系层写进 mtype —— 正文是给人看的（"戊己 = 最重要的人"），
+        # 关系层写进 mtype —— 正文是给人看的（"使用者 = 最重要的人"），
         # 层是给代码用的，两件事别混在一个字段里。
         c.execute("UPDATE mem SET mtype=? WHERE id=?",
                   ("role:%s" % (layer or "friend"), mid))
@@ -6830,6 +6851,14 @@ class MemoryCard:
                 hint = hormone.style_hint(h)
         if hint:
             parts.append(hint)
+        # 两小时内真被什么戳到过，就把它说出来 —— 比只念激素水平更像人
+        ev = getattr(self, "_last_event", None)
+        if ev:
+            ek, ets, _s = ev
+            if time.time() - ets <= 7200:
+                parts.append({"A": "刚才被暖了一下",
+                              "B": "刚才那句还有点堵",
+                              "C": "刚缓过来一点"}.get(ek, ""))
         if not parts:
             return ""
         return "（" + "，".join(parts) + "）"
@@ -7114,8 +7143,8 @@ class MemoryCard:
         shown_txt = []             # ② 内部去重用（同一件事说过三遍的，只留一遍）
         cap2 = used + q["longterm"]
         for _rank, _sc, r in cand:
-            # 🔧 同一格内也要去重：历史导入里有「用户是高三学生主号QQ号是2080692106」
-            #    「用户的QQ主号是2080692106」「用户的名字和QQ号主号2080692106」这种
+            # 🔧 同一格内也要去重：历史导入里有「用户是高三学生主号QQ号是100000000」
+            #    「用户的QQ主号是100000000」「用户的名字和QQ号主号100000000」这种
             #    同一件事说三遍的，全塞进去等于浪费配额。
             if any(jaccard(r["raw"] or "", t) >= 0.55 for t in shown_txt):
                 continue

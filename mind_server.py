@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""鲸鱼娘数字生命卡 · 心智服务（Mind Service）
+"""小鲸鱼数字生命卡 · 心智服务（Mind Service）
 
 T6-1：把卡变成一个「住在外面的进程」。
 
@@ -1878,7 +1878,7 @@ def _start_viscera_sampler(mind):
 
 
 def main(argv=None):
-    ap = argparse.ArgumentParser(description="鲸鱼娘数字生命卡 · 心智服务")
+    ap = argparse.ArgumentParser(description="小鲸鱼数字生命卡 · 心智服务")
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--port", type=int, default=DEFAULT_PORT)
     ap.add_argument("--db", default=DEFAULT_DB)

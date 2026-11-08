@@ -88,6 +88,10 @@ def style_hint(pad):
 
     刻意只给状态、不给命令（跟 hormone.style_hint 同一套原则）：
     「我在难过，别闹」比「请表现得难过一点」管用 —— 后者是让她演。
+
+    🔧 2026-11-08 改：以前只有 |P|≥0.15 或 |A|≥0.35 才吐字，于是日子过得
+       平顺的时候这一格永远是空串 —— 情绪再动也传不到嘴上。现在改成
+       **四档细读、常态也说**：开心说得出来，没劲也说得出来。
     """
     if not pad:
         return ""
@@ -95,18 +99,30 @@ def style_hint(pad):
     a = _num(pad.get("a"), 0.0)
     d = _num(pad.get("d"), 0.0)
     bits = []
-    if p <= -0.35:
-        bits.append("现在心情很低")
-    elif p <= -PAD_NEUTRAL_BAND:
-        bits.append("现在心情不太好")
-    elif p >= 0.35:
-        bits.append("现在心情很好")
-    if a >= PAD_AROUSAL_EDGE:
-        bits.append("有点绷着" if d < 0.0 else "有点亢奋")
-    elif a <= -PAD_AROUSAL_EDGE:
-        bits.append("懒懒的，不想使劲")
-    if d <= -0.35 and p <= 0.0:
+    if p >= 0.35:
+        bits.append("心情很好")
+    elif p >= 0.12:
+        bits.append("心情不错")
+    elif p <= -0.35:
+        bits.append("心情很低")
+    elif p <= -0.12:
+        bits.append("心情不太好")
+    # 唤醒轴：管语速和话量，是最容易被听出来的那一维
+    if a >= 0.30:
+        bits.append("劲头足，话会多一点、句子会长")
+    elif a >= 0.12:
+        bits.append("有点精神")
+    elif a <= -0.45:
+        bits.append("没什么劲，话短、懒得绕")
+    elif a <= -0.12:
+        bits.append("懒懒的")
+    # 掌控轴：管底气，管敢不敢开玩笑
+    if d >= 0.25:
+        bits.append("心里踏实，玩笑敢接")
+    elif d <= -0.35:
         bits.append("没什么底气，别接玩笑")
-    elif d >= 0.35 and p >= PAD_NEUTRAL_BAND:
-        bits.append("心里挺踏实")
+    elif d <= -0.12:
+        bits.append("有点发怵")
+    if not bits:
+        bits.append("平平的，没什么起伏")
     return "、".join(bits)

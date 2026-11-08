@@ -31,10 +31,25 @@ def night_now(now=None):
     return h >= NIGHT_START or h < NIGHT_END
 
 
+def napcat_alive():
+    """QQ 那头通不通。不通就别问了 —— 问了也发不出去，只会一直刷日志。"""
+    try:
+        import requests
+        r = requests.post("http://127.0.0.1:6700/get_login_info", json={},
+                          headers={"Authorization": "Bearer " + os.environ.get(
+                              "NAPCAT_TOKEN", "qqai-dsh-http-2026")},
+                          timeout=5)
+        return r.status_code == 200 and bool((r.json().get("data") or {}).get("user_id"))
+    except Exception:
+        return False
+
+
 def tick_once(now=None):
     """问一次。返回 (做了什么, 说明)。"""
     if night_now(now):
         return ("skip", "夜里不说话")
+    if not napcat_alive():
+        return ("skip", "QQ 没登录（可能还在封禁期），不问了")
     try:
         rc = P.main(["--send"])
     except SystemExit as e:

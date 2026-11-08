@@ -182,9 +182,14 @@ def status():
     elif has_backup and not has_agents:
         state = "broken"
         note = "⚠ 藏起来的那份还在，但 AGENTS.md 没了 —— 需要还原"
+    elif has_backup and cur and cur == (_sha256_file(BACKUP) or ""):
+        # 人设搬进卡以后，AGENTS.md 本来就该和「通道规矩」长得不一样。
+        # 跟备份的指纹比一下，才分得清「没插卡」和「人自己改过」。
+        state = "unloaded"
+        note = "没插卡：AGENTS.md 是原来那份（自带人设）"
     elif has_backup:
-        state = "unknown"
-        note = "⚠ AGENTS.md 跟卡里的规矩对不上，可能被人改过"
+        state = "custom"
+        note = "卡在、AGENTS.md 是人自己改过的版本（人设写在卡里，这样没问题）"
     elif has_agents:
         state = "unloaded"
         note = "没插卡：AGENTS.md 是原来的（DSH 自带人设）"

@@ -25,8 +25,8 @@
       serverName: whale
       transport: stdio
       command: python
-      args: ['-X', 'utf8', 'whale-card\\whale_mcp.py']
-      cwd: whale-card
+      args: ['-X', 'utf8', '<卡目录>\\whale_mcp.py']   # 换成你这台机器上的实际路径
+      cwd: <卡目录>
       toolCallTimeoutMs: 60000
       failOnStartupError: false
 

@@ -19,6 +19,18 @@ import sys
 
 import numpy as np
 
+
+class SemanticUnavailable(Exception):
+    """语义层不可用：没有模型、模型坏了、或者被显式关掉。
+
+    为什么必须定义它：这个文件里有 7 处 `raise SemanticUnavailable(...)` 和
+    1 处 `except SemanticUnavailable`，但类从来没定义过 —— 平时装了模型走不到
+    失败分支，一旦触发就是未捕获的 NameError，`encode_many` 的兜底也接不住。
+    （2026-11-07 别人提的 issue 里唯一一条真 bug，就是它。）
+    """
+    pass
+
+
 MODEL_DIR_NAME = os.path.join('models', 'bge-small-zh-v1.5')
 
 # 🔧 2026-10-30：支持 bge-base-zh-v1.5（768 维）。

@@ -45,10 +45,14 @@ def chk(name, cond, extra=""):
         print("  ❌ %s  %s" % (name, extra))
 
 
+T0 = 1_700_000_000.0   # 真实的写入时刻。别传 0：card2 里 `if not t_anchor: return w0`
+                       # （锚点未知 = 不衰减）会让所有分区都永远返回 1.0，测不出任何东西。
+
+
 def first_decay_day(region):
     """返回这条记忆"第一次开始掉"是第几天（整数）"""
     for d in range(1, 1200):
-        if card2.weight_now(1.0, card2.POOL_LONG, 0.0, d * DAY, region) < 0.99999:
+        if card2.weight_now(1.0, card2.POOL_LONG, T0, T0 + d * DAY, region) < 0.99999:
             return d
     return None
 
