@@ -1422,7 +1422,7 @@ var RC = {episode:"#5b7fa6",fact:"#4f9d69",self:"#c9a227",habit:"#3fa8a0",
           preference:"#c47ba0",flash:"#c0504d"};
 var RN = {episode:"事件",fact:"事实",self:"自我",habit:"习惯",
           preference:"偏好",flash:"闪光"};
-var POOLN = {short:"短期",medium:"中期",long:"长期",archive:"归档",deep:"深眠"};
+var POOLN = {short:"短期",short_warm:"短期小池",medium:"中期",medium_warm:"中期小池",long:"长期",archive:"归档",deep:"深眠"};
 /* 分区名（2026-11-06 起短期池下面按区拆开看） */
 var REGIONN = {chatter:"闲聊",play:"娱乐",study:"学习",work:"工作",
                episode:"事件",flash:"闪光",fact:"事实",preference:"偏好",
@@ -2336,7 +2336,7 @@ function renderMiniLog(){
   box.innerHTML = rows.map(function(x){
     var k = x.kind;
     var cls = (k==="incident") ? " b" : (k.indexOf("sleep")===0 ? " w" : "");
-    /* note 里常带"他#951 使用者☭：整段原文"，一行放不下 —— 冒号前的人名/序号去掉，
+    /* note 里常带"他#951 使用者：整段原文"，一行放不下 —— 冒号前的人名/序号去掉，
        正文砍到 26 字，左栏只留"发生了什么" */
     var raw = String(x.note || "")
       .replace(/\[[^\]]{1,14}\]\s*/g, "")
@@ -2547,7 +2547,9 @@ function viewDash(){
   /* ── ⑦ 五池水位 ── */
   var pools=(m.pools||[]).map(function(p){
     return {k:p.k, label:POOLN[p.k]||p.k, n:p.n,
-            color:(p.k==="short"?"#e8b44a":p.k==="long"?"#57c8f0":"#2fd07d")};
+            color:(p.k==="short"?"#e8b44a":p.k==="short_warm"?"#f0a25a":
+                   p.k==="medium_warm"?"#8fdccc":
+                   p.k==="long"?"#57c8f0":"#2fd07d")};
   });
   var poolTot=0; pools.forEach(function(p){ poolTot+=p.n; });
   /* 短期池下面按区拆开：这 4 条是闲聊还是学习，寿命差 30 倍，得分开看 */
@@ -2921,7 +2923,11 @@ function viewMem(){
       return {k:e.k, label:e.k, n:e.n, aw:e.aw}; }),
       {fmt:function(it){ return it.n+"<em>条</em>"; }}),
     ((m.synapse||{}).edges||0)+" EDGES / 总");
-  out+=cardHTML("c12","QUERY / 查一句话会想起什么",
+    /* ── 印象（V5.5）：同一情境下反复出现的反应，才叫印象 ── */
+  out+=cardHTML("c4","IMPRESSION / 印象",
+    '<div id="impList" class="legend">加载中…</div>',
+    "同一情境反复出现同一种反应 · 覆盖要靠更多证据");
+out+=cardHTML("c12","QUERY / 查一句话会想起什么",
     '<div style="display:flex;gap:8px;margin-bottom:10px">'+
     '<input id="qIn" placeholder="比如：白米饭" style="flex:1;background:#0e131a;'+
     'border:1px solid #242c37;border-radius:7px;padding:8px 11px;color:#d5dbe4;'+
@@ -3012,6 +3018,22 @@ function _p95(arr){
   if(!v.length) return null;
   return v[Math.min(v.length-1, Math.round(0.95*(v.length-1)))];
 }
+function loadImpression(){
+  var box=document.getElementById("impList");
+  if(!box) return;
+  API("/impression?limit=8").then(function(r){
+    var list=(r&&r.impressions)||[];
+    if(!list.length){ box.innerHTML="<span style='color:#3f5164'>还没有攒够的印象（同一情境至少出现 3 次）</span>"; return; }
+    box.innerHTML=list.map(function(it){
+      var bars="";
+      for(var i=0;i<5;i++){ bars+='<i style="display:inline-block;width:6px;height:8px;margin-right:2px;background:'+(i<Math.round(Number(it.w||0)*5)?'#2fd07d':'#2a3648')+'"></i>'; }
+      return '<div style="margin:5px 0;line-height:1.5"><span style="color:#e8b44a">'+esc(it.subject||"?")+'</span> · '+
+        esc(it.scene||"")+' → '+esc(it.reaction||"")+
+        ' <span style="color:#6f7b8a">×'+esc(String(it.n||0))+'</span> <span style="color:#8ea3bb">w='+Number(it.w||0).toFixed(2)+'</span> '+bars+'</div>';
+    }).join("");
+  }).catch(function(){ box.textContent="印象接口没打开"; });
+}
+
 function drawEmo(){
   var d=S.data||{}, em=(d.emotion||[]);
   /* 早期没有定时采样，那几个零散老点会把横轴撑开一大片空白、把纵轴也撑高，

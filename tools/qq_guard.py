@@ -343,6 +343,31 @@ def remember(text, source, speaker="other", region="episode", salience=0.5,
         return {"ok": False, "error": str(e)}
 
 
+def intake(text, source="qq", channel="private", who="", uid="", gid="",
+           kind="text", ts=None, note=""):
+    """把一条原文推进收件层（/intake）。
+
+    这一层**只收、只除杂**：不判断值不值得记，也不摘要 —— 判断放到
+    短期池那边做。失败不抛，值守不能因为收件层忙就停。
+    """
+    if not (text or "").strip():
+        return {"ok": False, "error": "empty"}
+    body = {"text": text, "source": source, "channel": channel,
+            "who": who or "", "uid": str(uid or ""), "gid": str(gid or ""),
+            "kind": kind, "note": note}
+    if ts:
+        body["ts"] = float(ts)
+    try:
+        req = urllib.request.Request(
+            MIND + "/intake",
+            data=json.dumps(body).encode("utf-8"),
+            headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=15) as r:
+            return json.loads(r.read().decode("utf-8"))
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
 # ---------------------------------------------------------------- 配额器
 def quota_load():
     _ensure()
@@ -707,6 +732,10 @@ def poll_once(seen, verbose=True):
             _rq = _g_recent.setdefault(gid, [])
             _rq.append(text)
             del _rq[:-GROUP_RECENT_KEEP]
+            # 收件层：不管最后记不记，原文先落一份（群里别人的话也收）
+            intake(text, source="qq", channel="group", who=name, uid=str(uid),
+                   gid=str(gid), ts=ts,
+                   note="bot" if looks_like_bot(text) else "")
             if keep and bool(cfg_get("mem.write_group", True)):
                 _src = "qq-bot" if looks_like_bot(text) else "qq-group"
                 if _src == "qq-bot":
@@ -783,6 +812,10 @@ def poll_once(seen, verbose=True):
             mem_id = None
             if keep and sal < mem_floor():
                 keep, why = False, "重要度 %.2f 低于门槛" % sal
+            # 收件层：私聊原文也先落一份（收件层的活只有"装下"）
+            intake(text, source="qq", channel="private", who=name,
+                   uid=str(uid), ts=ts,
+                   note="bot" if looks_like_bot(text) else "")
             if keep and bool(cfg_get("mem.write_private", True)):
                 _src = "qq-bot" if looks_like_bot(text) else "qq"
                 if _src == "qq-bot":

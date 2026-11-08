@@ -437,14 +437,14 @@ whale-card/
 - 截图：`docs_dash_live_20261101.png`、`docs_live_bottom_20261101.png`
 - 补：HORMONE NOW 的皮质醇那行只显示 0.16、后面的加减号被切掉 —— .hb 第三列只有 62px，放不下被卡片 overflow:hidden 剪掉。加宽到 96px + white-space:nowrap，并把「变化极小」的符号从 = 改成 ±0.00（截图 docs_hormone_now_20261101.png）
 - 新增 `启动控制台.bat`：先 `python bridge.py health`（服务不在就自动拉起，冷启约 30 秒），再用 `msedge --app=... --start-fullscreen` 开一个无地址栏的全屏窗口；桌面快捷方式「小鲸鱼控制台.lnk」指向它。服务是 DETACHED 独立进程，关浏览器窗口不影响。
-- 开源准备（用户 m03800）：新建脱敏仓库 `whale-card-oss`，用 `_build_oss.py` 从本目录复制 46 个 py + 21 个验收测试并做文本脱敏（QQ 号→100000000/100000001、昵称→使用者、绝对路径→whale-card/workspace/~/workspace），补写 README / LICENSE(MIT) / .gitignore / requirements / docs/ARCHITECTURE.md / tools/make_demo_card.py（26 条假记忆 + 人设 + 盖章 + 锚清理）
+- 开源准备（用户 m03800）：新建脱敏仓库 `D:\workspace (3)\whale-card-oss`，用 `_build_oss.py` 从本目录复制 46 个 py + 21 个验收测试并做文本脱敏（QQ 号→100000000/100000001、昵称→使用者、绝对路径→whale-card/workspace/~/workspace），补写 README / LICENSE(MIT) / .gitignore / requirements / docs/ARCHITECTURE.md / tools/make_demo_card.py（26 条假记忆 + 人设 + 盖章 + 锚清理）
   - 验证：示例卡能起服务（`WHALE_DB=demo\demo_card.db`），`/health` 链完好、出生证完好、锚 ok；`/context` 能拼出【我是谁】+ 召回；控制台/记忆页/星云页用假身份「小鲸鱼 / 使用者·100000000」截图存 `docs/`
   - 坑：示例卡重建后锚会打架（`anchor.json` 落在仓库根、按卡绝对路径派生），`make_demo_card.py` 改成扫描并删掉 `db` 字段指向本卡的锚；同一秒内二次启动会让 timeline 的 boot 去重，出现「锚 replaced」，隔几秒重启即 ok
   - 本地 git 已 init，三次提交（首版 + 两张截图 + 记忆页截图），57 个跟踪文件、7.7 MB；待用户给 GitHub 用户名/仓库名与推送方式
 
 ### 11-01 夜｜开源上线（用户 m04118）
 - 仓库：https://github.com/wangjunhan131/whale-card （public，默认分支 main，MIT，topics: agent-memory/ai-companion/chinese/llm/memory/sqlite）
-- release：v0.1.0；57 个文件、5 次提交；本地目录 `whale-card-oss`
+- release：v0.1.0；57 个文件、5 次提交；本地目录 `D:\workspace (3)\whale-card-oss`
 - 网络坑：本机解析到的 github.com(20.205.243.166) 443 连不通 → 先临时改 hosts 到 140.82.112.3 完成 gh 设备码登录，随后把推送通道换成 SSH over 443（`~/.ssh/config` 里 github.com → ssh.github.com:443），最后恢复 hosts
 - 凭据：gh 登录 wangjunhan131；`gh auth setup-git` 后 git 走 gh 的凭据助手
 
@@ -843,7 +843,7 @@ whale-card/
 ### 11-04 下午（四）｜QQ 值守 qq_guard.py：听群 + 进卡 + 已回/未回分栏 + 配额
 - 用户 m11456「之前我们不是做过守夜人系统，还有收件箱这样的系统吗直接把我们之前做的连QQ的系统搬过来」→ 盘点 `deploy\qq_bridge\`：`keeper.ps1`（常驻守夜人）+ `watch_main.ps1`（听筒，轮询 NapCat）+ `qq_inbox.ps1`（WinForms 收件箱窗口）+ `tick.ps1`（看票器）+ `read_inbox.ps1` / `mark_replied.ps1`（游标读 / 打已回标）。**它们当时都在跑**（keeper 每 2 分钟一张唤醒票）。
 - 老系统的三个硬伤：①只写 `inbox.jsonl`，**不进卡** —— 群里发生的事"听见了但没记住"（没出生证、不衰减、不参与召回）②群只盯 `1094740311` 一个，另两个群根本没听 ③没有配额，热闹起来能把会话刷成永动机。
-- 新写 `whale-card\tools\qq_guard.py`（约 19 KB）：
+- 新写 `D:\workspace (3)\whale-card\tools\qq_guard.py`（约 19 KB）：
   - **进卡**：每条新消息走 `POST /remember`（source=`qq-group`/`qq`，speaker=other，region=episode），走正式记忆通道（有出生证、有信任分、会衰减），不是旁路
   - **全群听**：`get_group_list()` 自动拿所有已加入的群，不再写死一个；好友走 `get_friend_list()`
   - **已回/未回分栏**（用户 m11497 要求）：`qq_state/status.json` 记 `{message_id: {st: unreplied|replied, at, by}}`；`mark()` / `mark_many()` 是唯一写入口；`_mark_if_new()` 入队时打「未回」但**绝不把已回的打回未回**；`read_todo(only_unreplied=True)` 按 message_id 去重后只给未回；`summary()` 给一行账
@@ -2043,3 +2043,78 @@ ender()（长期印象格与召回行）；「最近在聊」那格
 - 交接时最容易漏的是「谁去调这个新接口」：`/intake` 建好了，但 `qq_guard`、B站、抖音三个出口还没改走它。
 
 **未完成**：①`qq_guard` / B站 / 抖音 三个 adapter 接到 `/intake` ②长文「提炼主干+细节」的工具 ③256G M.2 主卡迁移（文件系统未定）④重启 DSH 让 REA 拿到 Ghidra。
+## 2026-11-08 凌晨｜V5.5 池子阶梯修回原样 + 印象层
+
+用户核对出两件事：①"满了往中期沉"这个容量机制不该存在（池子不设限）②短期池应该
+**实时筛选**，够格的当场进中期，不够格的留到 7 天忘干净删掉。第①条 V5.4 已做；
+第②条查出来是我 11-06 改错的：	ick() 只在 7 天到期时结算，else 分支还把不够格的
+UPDATE pool=medium（等于续命 6 倍）。
+
+**改（card2.py）**：	ick() 短期循环改每轮实时调 _consolidate()；_consolidate()
+的 else 分支恢复 7 天忘光（_forget_row(..., "短期池到期，没进中期")）；
+USER_SPEECH_BONUS=0.12（他说的话海马分 +0.12，**不是免筛**——免筛会让 133 条里
+103 条全进中期）；REPEAT_SHORT_PENALTY=0.5 + _is_repeat_short()（≤12 字且 7 天内
+同句 ≥3 次，或该条 access_count≥3；去重会把重复句合成一条，所以次数记在 access_count）。
+
+**印象层（新文件 impression.py，不调 LLM）**：主体×情境（时间桶/事件桶/我的状态）×反应；
+w = min(0.98, 1-0.5^(n/6))；覆盖要件是"比被看到的次数更多"——
+max(3, ceil(n_old*1.5)) 次新反应才打折（*0.6），跌到 0.06 退休留档；
+90 天半衰期淡出；每主体 40 条；近义反应按 difflib 0.72 合并（"我回来了/我回来啦"）。
+接进 ssemble_context 的【印象】格（只描述、不预测、不当台词）+ GET /impression。
+
+**教训**：①覆盖公式第一版写成 
+_old*0.6（方向反了），回灌一次把 593 条印象打死；
+②lt_n 曾用来记"当前攒到多少"，结果永远差一点推不翻，改成只记"上次推翻时的证据数"；
+③回灌不能把 mem 全量塞进印象——时间桶太粗，半夜每句话都会进同一个筐，
+必须有事件桶且跳过群消息（[群名] 前缀），1177 条里只留下 19 条真的算印象。
+测试：t115 36/36、t92 12/12、t107 54/54、全套 **49 个测试文件 0 挂**。
+提交 c2ab77a / 1d57994。
+
+## 2026-11-08 上午｜V5.6 两个小池 + 统一收件口打通三个出口
+
+用户要的是：「在短期池加一个**小池**，被反复召回的东西进去，遗忘时间更长；在小池里
+又被经常提起就转中期。中期同理也加一个。」我第一遍理解成"给池子挂个 warm 标记"，
+被纠正：**是真加一个独立池**，有自己的寿命和进出条件。
+
+**新结构**：
+短期池 7 天 ──被想起≥2 次且跨≥2 天──▶ 短期小池 21 天 ──再跨 3 天被想起──▶ 中期池
+（半衰期 29.7 天）──被想起≥3 次且跨≥3 天──▶ 中期小池 90 天 ──再跨 7 天被想起──▶ 长期池
+
+**改（card2.py，260420 → 265218 字节）**：新增池常量 POOL_SHORT_WARM / POOL_MEDIUM_WARM
+与参数 SHORT_WARM_TTL=21d、MEDIUM_WARM_TTL=90d、WARM_SLOW=1/3、WARM_SHORT_DAYS=2、
+WARM_SHORT_RECALL=2、WARM_UP_DAYS=3、WARM_UP_RECALL=3、WARM_MEDIUM_DAYS=3、
+WARM_LONG_DAYS=7；weight_now() 加两个小池分支（λ 乘 WARM_SLOW，因为小池 TTL 21 天而
+短期 λ 半衰期只有 4.5 天，不乘等于"寿命更长"是空话）；stage_factor 补两项；
+tick() 扩成三段流转；新增 _warm_ready / _to_warm / _promote_warm；stats() 补两个池。
+
+**V5.6 最关键的一课：权重基准与寿命基准必须分开记。**
+第一版为了"想起不续命"把 t_anchor 的推进删了 → 权重失去基准，每次都从原始锚点重算，
+w 越用越轻（test_t90 的 [B] 直接挂：400 天后 w=0.0757）。正确拆法：
+t_anchor = 权重的参考点（被想起就推到此刻）；**新增列 pool_in_ts = 进当前这个池的时刻**，
+只在换池时改，tick() 里 age = now - pool_in_ts。于是"想起只涨权重、不延长池内寿命"
+由 pool_in_ts 保证。_migrate() 加幂等回填 UPDATE mem SET pool_in_ts=t_anchor
+WHERE COALESCE(pool_in_ts,0)=0。
+
+**一步跨两级**：tick() 里 short_warm→medium 之后同一轮 medium 循环又把它抓进
+medium_warm。加 moved_ids 集合，每处搬家登记，后续循环跳过。
+
+**验收**：tests/test_t116.py 22/22（小池衰减更慢、21 天还看得见、召回不延长池内年龄
+但会推 t_anchor、同日两条只加固一次、跨日 +1 天、短期→小池、小池→中期、21/90 天到期
+被忘且墓碑写明"小池"、中期也有自己的小池、stats 两个键）；test_t90.py 40/40 回到全绿；
+全套 ALL TESTS OK。
+
+**三个出口接收件口**：tools/qq_guard.py 新增 intake()（POST /intake，失败不抛）；
+群消息在写入判定**之前**落一份（channel=group、带 gid、note=bot 标别家 AI），
+私聊也在写入判定之前落一份（channel=private）——不管最后记不记，**原文先进收件层**。
+
+**长文提炼**：tools/intake.py（--text/--file/--source/--kind/--full/--list/--dry）。
+condense() 是确定性规则：按段落切→每段第一句当主干（最多 14 行）→再挑带数字/引号/
+英文词的最多 6 句当细节→末尾标原文字数。1200 字以上自动提炼，--full 强制整篇。
+对话原文永不提炼（用户 11-08 明确），只有"我看完的长文"可以。
+
+**控制台**：POOLN 补 short_warm:"短期小池"、medium_warm:"中期小池"，五池水位给两个
+小池配暖色；记忆页尾部新增 IMPRESSION / 印象 卡（async 拉 GET /impression，公式不复制
+到前端）。
+
+**真卡**：重启后 /health ok、1188 条、第 23 天、chain_ok；/console_data?hours=24 的池子
+变 long 889 / medium 250 / short 49 —— 实时筛选生效，够格的当场搬去中期，且没有删除。

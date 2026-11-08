@@ -89,6 +89,15 @@ LAM_L = 2.16e-8      # 长期池（半衰期 ~371 天）
 
 S_SHORT_PHASE = 3 * DAY   # 短期池慢段的长度
 SHORT_MAX_TTL = 7 * DAY   # 短期池最多待 7 天，之后必须巩固或淘汰
+SHORT_WARM_TTL = 21 * DAY     # 短期小池：7 天的三倍
+MEDIUM_WARM_TTL = 90 * DAY    # 中期小池：约三个月
+WARM_SLOW = 1.0 / 3.0         # 小池里的衰减放慢到三分之一
+WARM_SHORT_DAYS = 2           # 进短期小池：跨 2 个不同日子被想起
+WARM_SHORT_RECALL = 2         #   且累计被想起 2 次
+WARM_UP_DAYS = 3              # 从小池往上走：跨 3 天
+WARM_UP_RECALL = 3            #   且累计 3 次
+WARM_MEDIUM_DAYS = 3          # 进中期小池：跨 3 天、3 次
+WARM_LONG_DAYS = 7            # 中期小池 → 长期：7 天、7 次
 
 # --- 短期池容量上限（V3.7 §3.2，V5.0 补回）---
 # 时间到了会巩固，容量满了也要巩固 —— 两条路都必须走海马判定，不能直接 pop。
@@ -323,6 +332,11 @@ BUDGET_RECENT = 2000         # 最近对话格
 BUDGET_RECALL = 1200         # 此刻想起格
 
 POOL_SHORT, POOL_MEDIUM, POOL_LONG = "short", "medium", "long"
+# 🔧 2026-11-08（V5.6，用户拍板）：短期池和中期池各有一个附属小池。
+#    被反复想起的东西先搬进小池（寿命更长、衰减更慢），在小池里继续被想起
+#    才往上走一层。它是"加深"，不是"延期" —— 所以是独立的池、自己的时钟。
+POOL_SHORT_WARM = "short_warm"
+POOL_MEDIUM_WARM = "medium_warm"
 
 # 🔧 2026-11-05：召回加固的权重天花板（按池分）。
 # 为什么必须有上界：weight 的存储形态是 (w, t_anchor)，每次召回要把 w 重写成
@@ -1905,6 +1919,10 @@ def stage_factor(pool):
     """
     if pool == POOL_SHORT:
         return 1.0
+    if pool == POOL_SHORT_WARM:
+        return WARM_SLOW
+    if pool == POOL_MEDIUM_WARM:
+        return (LAM_M * WARM_SLOW) / LAM_S1
     if pool == POOL_MEDIUM:
         return LAM_M / LAM_S1
     if pool == POOL_LONG:
@@ -2066,6 +2084,13 @@ def weight_now(w0, pool, t_anchor, now, region=None, tier=None,
         return w0 * math.exp(-lam * age)
     if region:
         age *= region_decay_scale(region)
+    # 🔧 V5.6：小池的衰减放慢到三分之一。
+    #    为什么不能沿用主池的 λ：小池 TTL 21 天，而短期 λ 半衰期只有 4.5 天，
+    #    那样到第 14 天 w 已经趋零 —— "寿命更长"就成了一句空话。
+    if pool == POOL_SHORT_WARM:
+        return w0 * math.exp(-LAM_S1 * WARM_SLOW * age)
+    if pool == POOL_MEDIUM_WARM:
+        return w0 * math.exp(-LAM_M * WARM_SLOW * age)
     if pool == POOL_SHORT:
         if age <= S_SHORT_PHASE:
             return w0 * math.exp(-LAM_S1 * age)
@@ -3361,6 +3386,14 @@ class MemoryCard:
         self.db.commit()
 
     def _migrate(self):
+        # V5.6：老行没有 pool_in_ts，用 t_anchor 顶上（幂等）
+        try:
+            self.db.execute(
+                "UPDATE mem SET pool_in_ts=t_anchor"
+                " WHERE COALESCE(pool_in_ts,0)=0")
+            self.db.commit()
+        except Exception:
+            pass
         """老库（card.py 建的）升级：加列 + 老数据按 k 归池"""
         c = self.db.cursor()
         cols = {r["name"] for r in c.execute("PRAGMA table_info(mem)")}
@@ -3409,6 +3442,13 @@ class MemoryCard:
             "valid_until": "REAL NOT NULL DEFAULT 0",
             # recall_n：被想起来的次数（长期晋升要验票，不只看权重）
             "recall_n": "INTEGER NOT NULL DEFAULT 0",
+        # recall_days：被想起过几个**不同日子**。进小池靠它，不靠总次数 ——
+        # 同一场对话里被翻来覆去想十次，说明的是"这一句当时要紧"，
+        # 不能说明"这件事反复回来找我"。
+        "recall_days": "INTEGER NOT NULL DEFAULT 0",
+        # pool_in_ts：进当前这个池的时刻。只管"还剩多久"，
+        # 与 t_anchor（权重的参考点）分开 —— 见 _settle_recall_events 注释。
+        "pool_in_ts": "REAL NOT NULL DEFAULT 0",
             # t_last_recall：上次被想起的时刻，长期记忆的"召回保护期"用它
             "t_last_recall": "REAL NOT NULL DEFAULT 0",
             # 🔧 2026-11-01 防污层（Anti-Pollution，吸收自网友八层方案）：
@@ -4034,13 +4074,66 @@ class MemoryCard:
         #    进了短期池就每轮判一次海马分，够格当场进中期/长期；
         #    不够格的留在短期池里按自己的曲线往下淡，满 7 天还没够格才删。
         #    原来的写法只在「满 7 天」那一刻结算一次，于是够格的也要白坐七天。
+        # 同一轮里搬过家的不要再算一次：否则 short_warm → medium 之后
+        # 紧接着又被 medium → medium_warm 抓一遍，一步跨两级。
+        moved_ids = set()
+        # 池内年龄按 pool_in_ts 算（不是 t_anchor）：被想起只会涨权重，
+        # 不会让这条记忆在池子里重新排队 —— 续命只能靠搬进小池。
         for r in c.execute(
                 "SELECT * FROM mem WHERE pool='short'").fetchall():
-            age = now - r["t_anchor"]
+            age = now - float(r["pool_in_ts"] or r["t_anchor"])
+            # 先看要不要搬进小池：跨了不同日子还被反复想起的，才算"反复回来找我"
+            if self._warm_ready(r, WARM_SHORT_DAYS, WARM_SHORT_RECALL):
+                moved = self._to_warm(c, r, now, POOL_SHORT_WARM)
+                moved_ids.add(r["id"])
+                events.append((r["id"], "warm_up", moved))
+                continue
             moved = self._consolidate(r, now)
             if moved:
                 events.append((r["id"], "consolidate", moved))
             elif age > SHORT_MAX_TTL:
+                events.append((r["id"], "expire", None))
+
+        # 1.1) 短期小池：再被想起就往上走，到期没动静就忘
+        for r in c.execute(
+                "SELECT * FROM mem WHERE pool=?", (POOL_SHORT_WARM,)).fetchall():
+            if r["id"] in moved_ids:
+                continue
+            age = now - float(r["pool_in_ts"] or r["t_anchor"])
+            if self._warm_ready(r, WARM_UP_DAYS, WARM_UP_RECALL):
+                moved = self._promote_warm(c, r, now)
+                moved_ids.add(r["id"])
+                events.append((r["id"], "warm_up", moved))
+            elif age > SHORT_WARM_TTL:
+                self._forget_row(c, r["id"], "短期小池到期，还是没被再想起")
+                events.append((r["id"], "expire", None))
+
+        # 1.2) 中期池：同样有它自己的小池
+        for r in c.execute(
+                "SELECT * FROM mem WHERE pool=?", (POOL_MEDIUM,)).fetchall():
+            if r["id"] in moved_ids:
+                continue
+            if self._warm_ready(r, WARM_MEDIUM_DAYS, WARM_UP_RECALL):
+                moved = self._to_warm(c, r, now, POOL_MEDIUM_WARM)
+                moved_ids.add(r["id"])
+                events.append((r["id"], "warm_up", moved))
+
+        # 1.3) 中期小池：够格进长期，否则到期淡出
+        for r in c.execute(
+                "SELECT * FROM mem WHERE pool=?", (POOL_MEDIUM_WARM,)).fetchall():
+            if r["id"] in moved_ids:
+                continue
+            age = now - float(r["pool_in_ts"] or r["t_anchor"])
+            if (self._warm_ready(r, WARM_LONG_DAYS, WARM_LONG_DAYS)
+                    and self._hippocampus_score(r) >= THETA_LONG_STRICT
+                    and self._long_ticket_ok(r)):
+                wn2 = max(wn_row(r, now), W_FLOOR_LONG)
+                c.execute("UPDATE mem SET pool=?, w=?, t_anchor=?, tier=?,"
+                          " pool_in_ts=? WHERE id=?",
+                          (POOL_LONG, wn2, now, TIER_MID, now, r["id"]))
+                events.append((r["id"], "promote_long", POOL_LONG))
+            elif age > MEDIUM_WARM_TTL:
+                self._forget_row(c, r["id"], "中期小池到期，自然淡出")
                 events.append((r["id"], "expire", None))
 
         # 2) 收件层过期清理（V5.4）：只留 60 小时，没被挑中的到期就走
@@ -4217,8 +4310,8 @@ class MemoryCard:
             if wn_row(r, now) < CLARITY_GC:
                 self._forget_row(c, r["id"], "闲聊到期，自然淡出")
                 return None
-            c.execute("UPDATE mem SET pool=? WHERE id=?",
-                      (POOL_MEDIUM, r["id"]))
+            c.execute("UPDATE mem SET pool=?, pool_in_ts=? WHERE id=?",
+                      (POOL_MEDIUM, now, r["id"]))
             return POOL_MEDIUM
         if (not _dirty) and score >= THETA_LONG_STRICT and self._long_ticket_ok(r):
             target, floor = POOL_LONG, W_FLOOR_LONG
@@ -4245,8 +4338,9 @@ class MemoryCard:
         wn = wn_row(r, now)
         wn = max(wn, floor)
         tier = TIER_MID
-        c.execute("UPDATE mem SET pool=?, w=?, t_anchor=?, tier=? WHERE id=?",
-                  (target, wn, now, tier, r["id"]))
+        c.execute("UPDATE mem SET pool=?, w=?, t_anchor=?, tier=?,"
+                  " pool_in_ts=? WHERE id=?",
+                  (target, wn, now, tier, now, r["id"]))
         return target
 
     USER_SPEECH_BONUS = 0.12   # 他本人说的话，海马分上加一点
@@ -4269,13 +4363,11 @@ class MemoryCard:
         if not txt or len(txt) > self.REPEAT_SHORT_CHARS:
             return False
         now = now if now is not None else self.clock.now()
-        # 同名短句会被 remember() 去重合并成一条，次数记在 access_count 上 ——
-        # 所以"经常说"还有第二个证据来源：这条自己已经被重复写过/想起过几次。
-        try:
-            if int(r["access_count"] or 0) >= self.REPEAT_SHORT_N:
-                return True
-        except Exception:
-            pass
+        # ⚠️ 不要拿 access_count 当"他常这么说"的证据：那本账记的是**被想起**
+        # 的次数（recall 一次就 +1），跟"他重复说"是两回事。
+        # 2026-11-08 修：之前这里有个 access_count >= 3 的分支，于是
+        # 「一句被我想起过三次的话」会被当成"他常说的口头禅"打折 —— 正好打反。
+        # 现在只认「同一句在卡里出现过几次」这一条证据。
         rows = self.db.execute(
             "SELECT raw FROM mem WHERE speaker='user' AND create_ts > ?",
             (now - self.REPEAT_SHORT_WINDOW,)).fetchall()
@@ -4298,6 +4390,43 @@ class MemoryCard:
 
     def impression_fade(self, now=None):
         return impression_mod.fade(self.db, now=now if now is not None else self.clock.now())
+
+    @staticmethod
+    def _warm_ready(r, need_days, need_recall):
+        """够不够格进小池（或从小池往上走）
+
+        判据是「跨了几个不同日子」而不是总次数 —— 用户 m36716 说的是
+        "在短期里被反复召回"，反复指的是隔了些时候又回来，不是一句话里连点十下。
+        """
+        try:
+            days = int(r["recall_days"] or 0)
+            n = int(r["recall_n"] or 0)
+        except Exception:
+            return False
+        return days >= need_days and n >= need_recall
+
+    def _to_warm(self, c, r, now, target):
+        """搬进小池：换池、抬到存活下限、锚改成此刻"""
+        wn = max(wn_row(r, now), W_FLOOR_MEDIUM)
+        c.execute("UPDATE mem SET pool=?, w=?, t_anchor=?, tier=?,"
+                  " pool_in_ts=? WHERE id=?",
+                  (target, wn, now, TIER_MID, now, r["id"]))
+        return target
+
+    def _promote_warm(self, c, r, now):
+        """从小池往上走：够长期票就进长期，否则进中期"""
+        score = self._hippocampus_score(r)
+        if (score >= THETA_LONG_STRICT and self._long_ticket_ok(r)
+                and float(r["trust"] or 1.0) >= TRUST_BLOCK_PROMOTE
+                and int(r["conflict"] or 0) != 1):
+            target, floor = POOL_LONG, W_FLOOR_LONG
+        else:
+            target, floor = POOL_MEDIUM, W_FLOOR_MEDIUM
+        wn = max(wn_row(r, now), floor)
+        c.execute("UPDATE mem SET pool=?, w=?, t_anchor=?, tier=?,"
+                  " pool_in_ts=? WHERE id=?",
+                  (target, wn, now, TIER_MID, now, r["id"]))
+        return target
 
     def _evict_short_overflow(self, now):
         """已停用：短期池不再按容量驱逐（V5.4，2026-11-07 用户拍板）
@@ -6312,10 +6441,16 @@ class MemoryCard:
                 #    不是「加固了几次」。同一段对话里被翻来覆去想起 10 次，
                 #    加固只该算一次，但这 10 次确实是注意力的证据。
                 n_ev = len(evs_day)
+                # 🔧 V5.6：t_anchor 仍然推进（它是**权重**的参考点，
+                #    不推的话每次结算都从原始锚点重算衰减，w 会越用越轻）。
+                #    「想起不能续命」这件事改由 pool_in_ts 负责：
+                #    那个时间只在换池时动，池子的年龄永远按它算。
                 c.execute(
                     "UPDATE mem SET w=?, t_anchor=?,"
                     " access_count=access_count+?,"
-                    " recall_n=COALESCE(recall_n,0)+?, t_last_recall=?,"
+                    " recall_n=COALESCE(recall_n,0)+?,"
+                    " recall_days=COALESCE(recall_days,0)+1,"
+                    " t_last_recall=?,"
                     " last_active_ts=? WHERE id=?",
                     (min(_ceil, wn + g), ts, n_ev, n_ev, ts, ts, mid))
                 c.execute(
@@ -6995,8 +7130,8 @@ class MemoryCard:
         now = self.clock.now()
         c = self.db.cursor()
         by_pool = {}
-        for p in (POOL_SHORT, POOL_MEDIUM, POOL_LONG,
-                  POOL_ARCHIVE, POOL_DEEP):
+        for p in (POOL_SHORT, POOL_SHORT_WARM, POOL_MEDIUM,
+                  POOL_MEDIUM_WARM, POOL_LONG, POOL_ARCHIVE, POOL_DEEP):
             rows = c.execute(
                 "SELECT pool,w,t_anchor,region,tier FROM mem WHERE pool=?",
                 (p,)).fetchall()
