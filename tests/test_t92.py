@@ -82,8 +82,12 @@ try:
     # 2026-11-07 用户拍板：「所有池都不设置容量限制」——
     # 所以短期池不再有 N_SHORT_MAX 这道闸，超了也全留着，
     # 去留只由 7 天时间窗决定。
-    chk("短期池**不再**被容量上限削回去（超了也留着）",
-        short_n > card2.N_SHORT_MAX, (short_n, card2.N_SHORT_MAX))
+    # 2026-11-08（V5.6.3）：短期池改成「每轮实时筛选 + 到期沉到中期」，
+    # 所以 tick 之后短期里剩多少不再说明问题；该验的是**没人因为容量被丢**。
+    _still = c.db.execute(
+        "SELECT count(*) FROM mem WHERE raw LIKE '验收条目 %'").fetchone()[0]
+    chk("超上限的条目一条没丢（只是被筛走了，不是被挤掉）",
+        _still == over, (_still, over))
 
     n_after = c.db.execute(
         "SELECT count(*) FROM mem WHERE raw LIKE '验收条目 %'").fetchone()[0]

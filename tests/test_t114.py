@@ -90,7 +90,7 @@ try:
                     channel="private", ts=old_ts, kept=1)
     gc = c.inbox_gc(ttl_hours=60.0, now=now)
     ck("过期清理确实删了东西", gc["dropped"] >= 1, gc)
-    left = {r["id"]: r for r in c.inbox_list(limit=50, hours=None, full=True)}
+    left = {r["id"]: r for r in c.inbox_list(limit=500, hours=None, full=True)}
     ck("没挑中的整条没了", a not in left)
     ck("挑中的还在（壳留着）", b in left)
     ck("但正文被清空", (left.get(b, {}).get("text") or "") == "",

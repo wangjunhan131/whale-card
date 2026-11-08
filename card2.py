@@ -275,7 +275,8 @@ W_EXIT_DEEP = 0.0002         # 深层痕迹：低于它 → 压成 TRACE 计数
 SINK_BATCH = 200             # 每次 tick 最多下沉多少条（防止大库卡住）
 
 # --- 去重 ---
-DEDUPE_JACCARD = 0.72   # 跟已有记忆这么像，就算「同一件事又说了一遍」
+DEDUPE_JACCARD = 0.92   # 跟已有记忆这么像，才算「同一件事又说了一遍」
+                         # （V5.6.3：0.72 会把「同一件事的细节不同」揉成一条，改成 0.92）
 
 # --- 记忆分区（V4.1）---
 # 六类：事实 / 情景 / 自图式 / 习惯 / 偏好 / 闪光灯
@@ -330,6 +331,20 @@ BUDGET_IDENTITY = 600        # 人格格
 BUDGET_LONGTERM = 1800       # 长期印象格
 BUDGET_RECENT = 2000         # 最近对话格
 BUDGET_RECALL = 1200         # 此刻想起格
+RAW_LINE_CHARS = 110          # 想起格里每条附带的原话截断长度（V5.6.2）
+RAW_LINE_MAX = 8              # 最多给几条附原话（V5.6.2）
+RECALL_DEDUP = 1.01           # 想起格内两条原话相似度超过它就只留一条（V5.6.2-F：实测 0.72 略降，先关）
+_WIDE_WORDS = ("多久", "什么时候", "哪天", "几号", "几天", "几次", "以前", "之前",
+               "去年", "上个月", "上周", "后来", "最后", "还有", "另外", "分别",
+               "都说了", "一共", "加起来", "先后", "经过")
+WIDE_TOP_K = 5                # 时间型/多事实型问题上多端几条（V5.6.2-G：8 实测中性，先与基线一致）
+WIDE_BUDGET_K = 1.0           # 同时把这一格的预算放大（V5.6.2-G：1.4 实测中性，先关）
+MULTIHOP_ON = False           # 多跳：第二跳只留实词再召一遍（V5.6.2-H：实测更差，先关）
+MULTIHOP_K = 3                # 第二跳最多补几条
+_HOP_STOP = set("我你他她它们的了吗呢吧啊呀是在有和就都也很还这那个什么谁哪怎么为时候说过话上下前后")
+NEIGHBOR_HOURS = 36.0          # 邻居取多宽的时段（V5.6.2-B）
+NEIGHBOR_PER_HIT = 2           # 每条召回最多带几个邻居
+NEIGHBOR_MAX = 0               # 邻居总数上限（V5.6.2：实测零收益/挤掉正主，先关）
 
 POOL_SHORT, POOL_MEDIUM, POOL_LONG = "short", "medium", "long"
 # 🔧 2026-11-08（V5.6，用户拍板）：短期池和中期池各有一个附属小池。
@@ -1033,6 +1048,19 @@ def normalize_time(text, ref_ts=None):
 # 惊讶度高 → 是新信息，权重抬升；惊讶度低 → 重复，压一压。
 # 这一条能防止「同一件事说三次变成三条独立记忆」。
 # ============================================================
+def _hop_terms(q):
+    """把问句里的虚词剥掉，只留实词当第二跳的查询。太短就不跳。"""
+    if not q:
+        return ""
+    kept = []
+    for ch in q:
+        if ch in _HOP_STOP or not ("\u4e00" <= ch <= "\u9fff" or ch.isalnum()):
+            continue
+        kept.append(ch)
+    t = "".join(kept)
+    return t if len(t) >= 2 else ""
+
+
 def jaccard(a, b):
     if not a or not b:
         return 0.0
@@ -4277,7 +4305,7 @@ class MemoryCard:
         return n >= need
 
     def _consolidate(self, r, now):
-        """短期池到期：算海马分，够格进中期/长期，否则删"""
+        """短期池结算：算海马分，够格进中期/长期；不够格的到期沉到中期（V5.6.3 起不再删）"""
         score = self._hippocampus_score(r)
         # 他本人说的话：+0.12，不是免筛。
         # （免筛实测会把 133 条短期里的 103 条全塞进中期，短期池就形同虚设；
@@ -4290,6 +4318,11 @@ class MemoryCard:
         if self._is_repeat_short(r, now):
             score *= self.REPEAT_SHORT_PENALTY
         c = self.db.cursor()
+        # 🔧 2026-11-08（V5.6.3）：权重已经被时间磨到看不见的，不必等分数判 ——
+        #    它什么都不剩了，抬进中期只是给它续命。先判这一刀，再谈晋升。
+        if wn_row(r, now) < CLARITY_GC:
+            self._forget_row(c, r["id"], "池子里淡到看不见了")
+            return None
         # 🔧 2026-11-01 防污层：可信度太低的，只许进中期、不许进长期。
         #    它不是被删掉（"她被骗过"要留着），只是永远升不上去。
         _trust = float(r["trust"] if "trust" in r.keys() else 1.0)
@@ -4329,10 +4362,17 @@ class MemoryCard:
             #    「我回来了」这种话每天都说，放进短期就够了，不该每次都占中期。
             #    这类句子同时喂给印象模块计数（见 impression.py），
             #    留下的是「他回来会说这句」，不是每一句本身。
-            age = now - r["t_anchor"]
+            # 🔧 2026-11-08（V5.6.3，用户拍板「A」）：到期不再删，改成「沉底」。
+            #    依据：714 题里答不出的 304 题，**278 题的证据在库里根本没有**
+            #    （只有 3 题是「有但没召到」）；运行卡上写进去的四分之一到一半
+            #    被 7 天结算删掉。会忘这件事该发生在中期→长期那段（半衰期 29.7 天），
+            #    不该发生在第七天那一刻。沉底只换池名，w 与 t_anchor 一律不动，
+            #    让它接着按自己的曲线往下走；真淡到看不见了才删。
+            age = now - float(r["t_anchor"] or now)
             if age > SHORT_MAX_TTL:
-                self._forget_row(c, r["id"], "短期池到期，没进中期")
-                return None
+                c.execute("UPDATE mem SET pool=?, pool_in_ts=? WHERE id=?",
+                          (POOL_MEDIUM, now, r["id"]))
+                return POOL_MEDIUM
             return None
         # 先按旧池结算，再抬到新池存活下限
         wn = wn_row(r, now)
@@ -4343,7 +4383,7 @@ class MemoryCard:
                   (target, wn, now, tier, now, r["id"]))
         return target
 
-    USER_SPEECH_BONUS = 0.12   # 他本人说的话，海马分上加一点
+    USER_SPEECH_BONUS = 0.30   # 他本人说的话，海马分上加一点（V5.6.2-D：0.12→0.30）
     REPEAT_SHORT_PENALTY = 0.5 # 重复短句打折（价值在模式里，不在这一条）
     REPEAT_SHORT_CHARS = 12      # 多短的句子算「随口一句」
     REPEAT_SHORT_N = 3           # 7 天内出现几次算「经常说」
@@ -7055,12 +7095,36 @@ class MemoryCard:
 
         # ④ 此刻想起格（E 印象 + F 技能）
         used = 0
-        hits = self.recall(query, top_k=5, access=True,
+        # 🔧 V5.6.2-G：时间型 / 多事实型问题，一条事实拼不出来，得多端几条。
+        #    其余问题保持 5 条 —— 无差别加宽会把噪音也端上来，实测掉分。
+        _q = query or ""
+        _wide = any(w in _q for w in _WIDE_WORDS)
+        _topk = WIDE_TOP_K if _wide else 5
+        hits = self.recall(query, top_k=_topk, access=True,
                             about_uid=(about_uid or None))
+
+        # 🔧 V5.6.2-H：多跳。原句召一遍保语义，实词再召一遍保字面，
+        #    两组按 id 合并 —— 分散在几条聊天里的线索，一条向量是拼不回的。
+        if MULTIHOP_ON and _q:
+            _t2 = _hop_terms(_q)
+            if _t2 and _t2 != _q:
+                try:
+                    _h2 = self.recall(_t2, top_k=MULTIHOP_K, access=False,
+                                      about_uid=(about_uid or None))
+                except Exception:
+                    _h2 = []
+                _ids = set((h[2]["id"] if h[2]["id"] else 0) for h in hits)
+                for _h in _h2:
+                    _mid = _h[2]["id"]
+                    if _mid in _ids:
+                        continue
+                    _ids.add(_mid)
+                    hits.append(_h)
         assoc_ids = getattr(self, "_last_assoc_ids", set())
         lines = []
-        cap4 = used + q["recall"]
+        cap4 = used + (int(q["recall"] * WIDE_BUDGET_K) if _wide else q["recall"])
         n_direct = 0
+        n_raw = 0            # 已经附了几条原话（V5.6.2）
 
         # 🔧 去重：②「我一直记得的事」里已经列过的，这里不再说一遍 ——
         #    同一句话在一格里出现两次，读起来就像卡带。
@@ -7074,6 +7138,55 @@ class MemoryCard:
                              for t in shown_txt)]
         if not fresh:
             fresh = hits[:2]
+
+        # 🔧 V5.6.2-F：同一件事说三遍的，只占一个位置。
+        #    714 题里有很多"把同一句说三次"的样本，原来 5 条召回能全是它的三种说法，
+        #    真正要的另一条永远挤不进来。这里只去重、不放宽任何门槛。
+        _dd = []
+        _dtext = []
+        for _h in fresh:
+            _t = (_h[2]["raw"] or "")
+            if any(jaccard(_t, _x) >= RECALL_DEDUP for _x in _dtext):
+                continue
+            _dd.append(_h)
+            _dtext.append(_t)
+        if len(_dd) >= 3:
+            fresh = _dd
+
+        # 🔧 V5.6.2-B：把「同一时段的邻居」也捞进来。
+        #    考题里最难的一类是「分散在不同聊天里的信息能不能拼起来」——
+        #    计划在周三说、结果在周五说，语义检索只抓到其中一条，
+        #    另一条永远进不来。人是靠"翻那两天的账"拼起来的，不是靠相似度。
+        #    只从 top-3 命中的时间窗里取，且必须不是已经出现过的。
+        try:
+            _nb = []
+            _seen_ids = set(h[2]["id"] for h in hits) | set(shown_ids)
+            for _h in hits[:3]:
+                _t0 = float(_h[2]["create_ts"] or 0)
+                if not _t0:
+                    continue
+                _rows = self.db.cursor().execute(
+                    "SELECT * FROM mem WHERE ABS(create_ts - ?) <= ? "
+                    "AND COALESCE(dead,0)=0 AND COALESCE(quarantine,0)=0 "
+                    "ORDER BY w DESC LIMIT 12",
+                    (_t0, NEIGHBOR_HOURS * 3600.0)).fetchall()
+                _got = 0
+                for _r in _rows:
+                    if _r["id"] in _seen_ids:
+                        continue
+                    if len(_r["raw"] or "") < 6:
+                        continue
+                    _nb.append(_r)
+                    _seen_ids.add(_r["id"])
+                    _got += 1
+                    if _got >= NEIGHBOR_PER_HIT or len(_nb) >= NEIGHBOR_MAX:
+                        break
+                if len(_nb) >= NEIGHBOR_MAX:
+                    break
+            for _r in _nb:
+                fresh.append((0.0, float(_r["w"] or 0.0), _r))
+        except Exception:
+            pass
 
         # 🔧 V5.3.2 统一时间线（用户 m34990）：想起的东西按**时间线 seq** 排，
         #    并在行首挂一个短日期。三个用处：
@@ -7089,8 +7202,9 @@ class MemoryCard:
             return (0 if _sq is None else 1, _sq or 0, _r["create_ts"] or 0)
 
         _direct = [h for h in fresh if h[2]["id"] not in assoc_ids]
+        _direct.sort(key=lambda h: (-(float(h[0]) or 0.0), _seqk(h)))
         _assoc = [h for h in fresh if h[2]["id"] in assoc_ids]
-        _direct.sort(key=_seqk)
+        _direct.sort(key=lambda h: (0 if (float(h[0]) or 0.0) > 0 else 1, _seqk(h)))
         _assoc.sort(key=_seqk)
         fresh = _direct + _assoc
 
@@ -7112,10 +7226,27 @@ class MemoryCard:
                 body = "（顺带想起）" + self.render(r, wn)
             else:
                 n_direct += 1
-                if n_direct > 5:
+                if n_direct > (_topk if _wide else 5):
                     break
                 body = self.render(r, wn)
             line = ("- %s｜%s" % (_tag, body)) if _tag else ("- " + body)
+            # 🔧 V5.6.2：除了加工过的句子，再端一份原话。
+            #    render() 为了让句子读起来顺，会做时间锚定、去壳、去引号，
+            #    改写后的句子常常丢掉考题要的那几个字（人名/日期/数字）。
+            #    原话只在**确实被改写**时才附，不然就是白白占预算。
+            if n_raw < RAW_LINE_MAX:
+                try:
+                    _raw = (r["raw"] or "").strip()
+                except Exception:
+                    _raw = ""
+                if _raw and _raw != body and jaccard(_raw, body) < 0.92:
+                    _snip = _raw[:RAW_LINE_CHARS]
+                    if len(_raw) > RAW_LINE_CHARS:
+                        _snip += "…"
+                    _cand = line + "（原话：" + _snip + "）"
+                    if used + len(_cand) <= cap4:
+                        line = _cand
+                        n_raw += 1
             if used + len(line) > cap4:
                 dropped += 1
                 break

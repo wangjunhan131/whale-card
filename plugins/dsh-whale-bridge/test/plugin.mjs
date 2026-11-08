@@ -47,7 +47,7 @@ chk('导出 apply 是函数', typeof mod.apply === 'function');
 chk('default 也有 apply', typeof mod.default?.apply === 'function');
 
 console.log('== 2. 装进假 ctx ==');
-mod.apply(fakeCtx, { port: 8848, cardDir: 'D:\\新建文件夹 (3)\\whale-card' });
+mod.apply(fakeCtx, { port: 8848, cardDir: 'workspace (3)\\whale-card' });
 chk('注册了 8 个工具', registered.length === 8, `${registered.length} 个`);
 const names = registered.map((t) => t.name).sort();
 console.log(`  工具：${names.join(', ')}`);

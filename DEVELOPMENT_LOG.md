@@ -437,14 +437,14 @@ whale-card/
 - 截图：`docs_dash_live_20261101.png`、`docs_live_bottom_20261101.png`
 - 补：HORMONE NOW 的皮质醇那行只显示 0.16、后面的加减号被切掉 —— .hb 第三列只有 62px，放不下被卡片 overflow:hidden 剪掉。加宽到 96px + white-space:nowrap，并把「变化极小」的符号从 = 改成 ±0.00（截图 docs_hormone_now_20261101.png）
 - 新增 `启动控制台.bat`：先 `python bridge.py health`（服务不在就自动拉起，冷启约 30 秒），再用 `msedge --app=... --start-fullscreen` 开一个无地址栏的全屏窗口；桌面快捷方式「小鲸鱼控制台.lnk」指向它。服务是 DETACHED 独立进程，关浏览器窗口不影响。
-- 开源准备（用户 m03800）：新建脱敏仓库 `D:\workspace (3)\whale-card-oss`，用 `_build_oss.py` 从本目录复制 46 个 py + 21 个验收测试并做文本脱敏（QQ 号→100000000/100000001、昵称→使用者、绝对路径→whale-card/workspace/~/workspace），补写 README / LICENSE(MIT) / .gitignore / requirements / docs/ARCHITECTURE.md / tools/make_demo_card.py（26 条假记忆 + 人设 + 盖章 + 锚清理）
+- 开源准备（用户 m03800）：新建脱敏仓库 `workspace`，用 `_build_oss.py` 从本目录复制 46 个 py + 21 个验收测试并做文本脱敏（QQ 号→100000000/100000001、昵称→使用者、绝对路径→whale-card/workspace/~/workspace），补写 README / LICENSE(MIT) / .gitignore / requirements / docs/ARCHITECTURE.md / tools/make_demo_card.py（26 条假记忆 + 人设 + 盖章 + 锚清理）
   - 验证：示例卡能起服务（`WHALE_DB=demo\demo_card.db`），`/health` 链完好、出生证完好、锚 ok；`/context` 能拼出【我是谁】+ 召回；控制台/记忆页/星云页用假身份「小鲸鱼 / 使用者·100000000」截图存 `docs/`
   - 坑：示例卡重建后锚会打架（`anchor.json` 落在仓库根、按卡绝对路径派生），`make_demo_card.py` 改成扫描并删掉 `db` 字段指向本卡的锚；同一秒内二次启动会让 timeline 的 boot 去重，出现「锚 replaced」，隔几秒重启即 ok
   - 本地 git 已 init，三次提交（首版 + 两张截图 + 记忆页截图），57 个跟踪文件、7.7 MB；待用户给 GitHub 用户名/仓库名与推送方式
 
 ### 11-01 夜｜开源上线（用户 m04118）
 - 仓库：https://github.com/wangjunhan131/whale-card （public，默认分支 main，MIT，topics: agent-memory/ai-companion/chinese/llm/memory/sqlite）
-- release：v0.1.0；57 个文件、5 次提交；本地目录 `D:\workspace (3)\whale-card-oss`
+- release：v0.1.0；57 个文件、5 次提交；本地目录 `workspace`
 - 网络坑：本机解析到的 github.com(20.205.243.166) 443 连不通 → 先临时改 hosts 到 140.82.112.3 完成 gh 设备码登录，随后把推送通道换成 SSH over 443（`~/.ssh/config` 里 github.com → ssh.github.com:443），最后恢复 hosts
 - 凭据：gh 登录 wangjunhan131；`gh auth setup-git` 后 git 走 gh 的凭据助手
 
@@ -843,7 +843,7 @@ whale-card/
 ### 11-04 下午（四）｜QQ 值守 qq_guard.py：听群 + 进卡 + 已回/未回分栏 + 配额
 - 用户 m11456「之前我们不是做过守夜人系统，还有收件箱这样的系统吗直接把我们之前做的连QQ的系统搬过来」→ 盘点 `deploy\qq_bridge\`：`keeper.ps1`（常驻守夜人）+ `watch_main.ps1`（听筒，轮询 NapCat）+ `qq_inbox.ps1`（WinForms 收件箱窗口）+ `tick.ps1`（看票器）+ `read_inbox.ps1` / `mark_replied.ps1`（游标读 / 打已回标）。**它们当时都在跑**（keeper 每 2 分钟一张唤醒票）。
 - 老系统的三个硬伤：①只写 `inbox.jsonl`，**不进卡** —— 群里发生的事"听见了但没记住"（没出生证、不衰减、不参与召回）②群只盯 `1094740311` 一个，另两个群根本没听 ③没有配额，热闹起来能把会话刷成永动机。
-- 新写 `D:\workspace (3)\whale-card\tools\qq_guard.py`（约 19 KB）：
+- 新写 `workspace\tools\qq_guard.py`（约 19 KB）：
   - **进卡**：每条新消息走 `POST /remember`（source=`qq-group`/`qq`，speaker=other，region=episode），走正式记忆通道（有出生证、有信任分、会衰减），不是旁路
   - **全群听**：`get_group_list()` 自动拿所有已加入的群，不再写死一个；好友走 `get_friend_list()`
   - **已回/未回分栏**（用户 m11497 要求）：`qq_state/status.json` 记 `{message_id: {st: unreplied|replied, at, by}}`；`mark()` / `mark_many()` 是唯一写入口；`_mark_if_new()` 入队时打「未回」但**绝不把已回的打回未回**；`read_todo(only_unreplied=True)` 按 message_id 去重后只给未回；`summary()` 给一行账
@@ -908,7 +908,7 @@ whale-card/
 - **把「TIMELINE LOG / 最近」从网格挪到左栏**：它原来单独占一行 c4、右边一大片空，看着像"堵在那儿"。挪到底部空白处，压成紧凑 10~24 行：
   - 相邻同 kind 合并（连着几条 `boot` 显示成 `启动 ×5`），省下来的行给有内容的 `mem`
   - kind 翻成中文（boot→启动、mem→记、alive→心跳、unlearn→解封…）
-  - note 里"他#951 [群名] 使用者☭：整段原文"那种前缀去掉 + 正文砍到 26 字，否则一行撑爆还不出省略号（flex 子项要 `min-width:0` 省略号才生效）
+  - note 里"他#951 [群名] 使用者：整段原文"那种前缀去掉 + 正文砍到 26 字，否则一行撑爆还不出省略号（flex 子项要 `min-width:0` 省略号才生效）
   - `flex:1` 吃掉剩余空白，多了就裁掉，不做滚动条
 - **一键启动换成无窗口启动器**（用户：之前那个点不开、桌面和开始菜单都要、图标用蓝发鲸鱼）：
   - `启动控制台.vbs`：wscript 跑、**不闪黑框**；先 `bridge.py health`（服务没起就拉起）→ 再找 Edge（`%ProgramFiles(x86)%` 兜底）→ `--new-window --start-fullscreen http://127.0.0.1:8848/console`
@@ -2147,3 +2147,85 @@ condense() 是确定性规则：按段落切→每段第一句当主干（最多
 **验收**：tests/test_t117.py 全绿（噪声四条规则 / 三条实内容过线 / 重复降权 /
 bot 降权 / commit 回填 kept / 进的是 short 池 / raw 一字不改 / 挑过不重挑 / gc 只清
 没挑中的）。全套测试 ALL TESTS OK。
+
+---
+
+## 2026-11-08 下午｜评测复测与 V5.6.3：把「原话」端到桌上（R@1 之外第一次有外部尺子）
+
+外部评测 `github.com/Ornn8/chat-memory-benchmark`：714 题、六个人物、跨半年，公开了我们旧版的逐题卷子
+（`results/2026-11-08-whale-card-summary.json`）。旧版整题通过 217/711 = 30.5%，成本 ¥0.51。
+分档看得很清楚：0 天 73.5%、3 天 23.9%、15 天 9.8%、45 天 10.2% —— 不是「忘得慢」，是「过了当天就找不回来」。
+
+在这个仓库里搭了一个零模型调用的检索适配器（`whale-lab/bench/adapt_retrieval.py`），
+每个 persona 建全新空卡、逐轮 remember、到题目时间点取上下文，量三件事：
+`ret5/10/20`（按记忆 id 的召回）、`hit12`（上下文里有没有锚点原话 12 字）、
+`cov`（判分 required 的证据有没有到眼前）。四类「该说不知道」的题单独剔除，否则尺子会把正确拒答算成没记住。
+
+### 试过但更差的（全部回滚，数字留在这里）
+
+| 改动 | P01 事实类 | P12 事实类 |
+|---|---|---|
+| 基线 V5.6.1 | 40.9% | 19.0% |
+| 放宽晋升门槛（θ_medium 0.18 / θ_long 0.50 / 长期票 2） | 36.4% | 16.5% |
+| 只加召回条数（top_k 10 + 预算 2000） | 30.6% | 25.5% |
+| 邻居扩展（36 小时窗、每条 2 个） | 47.2% | — |
+| 想起格内去重（jaccard 0.72） | 66.7% | — |
+| 问句类型加宽（WIDE_TOP_K 8） | 68.1% | 42.6% |
+| 短期池 7→14 天 | 66.7% | 42.6% |
+| 多跳（剥虚词再召回一次） | 61.1% | 29.8% |
+| 本人话语加分 0.30→0.55 | 66.7% | 42.6% |
+
+结论：**「多留」「多端」不等于「记得更多」**。门槛一松，噪音进中期池，召回反而把真东西挤下去。
+
+### 真正有效的两处
+
+1. **原话进上下文**（`RAW_LINE_CHARS=110`、`RAW_LINE_MAX=8`）：想起格每条后面附
+   「（原话：…）」，条件是 `raw != body` 且 jaccard < 0.92。根因是 `render()` 做时间锚定与去壳时
+   会丢掉考题要的人名、日期、数字。→ P01 40.9% → **63.9%**，P12 19.0% → **40.4%**。
+2. **本人话语加分**（`USER_SPEECH_BONUS` 0.12 → 0.30）：他亲口说的东西海马分抬一点。
+   → P01 **68.1%**，P12 **44.7%**。
+
+### V5.6.3：到期不硬删 + 去重放宽（用户 m37518「听你的…AB 同时做也可以」）
+
+- A：`_consolidate()` 的 else 分支不再 `_forget_row`，到期改成 `pool=medium, pool_in_ts=now`
+  （w 与 t_anchor 都不动，接着按中期 29.7 天半衰期走）。理由：缺证据的 304 题里
+  **278 题证据在库里根本没有**（只有 3 题是「有但没召到」），而运行卡上写进去的 ¼~½ 被 7 天结算删掉；
+  会忘该发生在中期→长期那段，不该发生在第七天那一刻。
+- B：`DEDUPE_JACCARD 0.72 → 0.92`，0.72 会把「同一件事的细节不同」揉成一条。
+- 顺手修：`_consolidate()` 的「权重磨到看不见就遗忘」提到晋升判断之前，否则 w=0 的行会被海马分抬回中期续命。
+
+### 六 persona 终版（V5.6.3，ladder）
+
+| persona | 整题 | 事实类 |
+|---|---|---|
+| P01 | 47/88 = 53.4% | 47/72 = 65.3% |
+| P12 | 21/79 = 26.6% | 21/47 = 44.7% |
+| P14 | 31/82 = 37.8% | 31/54 = 57.4% |
+| P16 | 31/123 = 25.2% | 30/87 = 34.5% |
+| P17 | 53/172 = 30.8% | 48/130 = 36.9% |
+| P20 | 47/170 = 27.6% | 47/123 = 38.2% |
+| **合计** | **230/714 = 32.2%** | **224/513 = 43.7%** |
+
+对比：V5.6.2 是 31.8% / 42.9%，基线 V5.6.1 事实类 25.0%。A+B 对总分只 +0.4pp，
+但 P20 从 34.1% 抬到 38.2%（+4.1pp）——说明「到期沉中期」对最长的那批对话有用。
+注意尺子不同：官方 30.5% 判的是「整题作答对不对」，我们量的是「证据有没有到眼前」，所以 32.2% 不等于最终分数。
+
+### 仍然最弱的三处（需要动写入侧，不是参数）
+
+1. 45 天档：P12 5%、P14 19%、P17 23%——长期池的票据条件（w≥0.60 且召回≥3）在评测卡上几乎没人达标。
+2. 别人的事记到用户头上 2/29：`remember()` 里凡 `speaker=user` 就挂 `about_uid=user`，
+   「我妈生日」这种说的是别人，也被挂到他头上。
+3. 分散线索 3/56：要跨多条拼，靠一次 top-5 召回做不到。
+
+### 测试
+
+`tests/test_t114.py`（收件层）31/31、`tests/test_t115.py` 35/35、`tests/test_t92.py` 12/12、`tests/test_t116.py` 22/22，
+全套 **51 个测试文件 0 挂**。两处断言跟着语义改：
+t114 的 `inbox_list(limit=50)` 是测试自己截断了历史行（改 500）；
+t115 的墓碑理由与「到期沉中期」都按 V5.6.3 重写。
+
+### 教训
+
+- 评测分数要先确认「尺子量的是什么」：我们量证据到眼前，官方量整题作答，两个数不能直接比。
+- 参数只能小修；真正的提升来自「把原话端上来」这一处代码（+23pp），而它一开始被我漏了。
+- 复测要用空卡副本，绝不能在真卡上跑（跑一次会写进上千条假记忆，还要靠墓碑清）。

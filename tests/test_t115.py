@@ -174,14 +174,20 @@ def main():
         ck("实时筛选：他说的那句已进中期",
            mid_user not in rows or rows[mid_user]["pool"] != "short",
            rows.get(mid_user) and rows[mid_user]["pool"])
+        # 2026-11-08（V5.6.3，用户拍板）：到期不再一律删 —— 够不着晋升线就沉到中期，
+        # 只有「权重已经被时间磨到看不见」才真走，且墓碑要写明是哪一刀。
         gone = mid_fade not in rows
-        ck("超期没够格的走了", gone, rows.get(mid_fade))
         if gone:
             tomb = card.db.execute(
                 "SELECT reason FROM mem_tomb WHERE mid=?", (mid_fade,)).fetchone()
             _rsn = (tomb["reason"] if tomb is not None else "(无墓碑)")
-            ck("墓碑写明理由（%s）" % _rsn,
-               tomb is not None and ("短期池" in (_rsn or "") or "闲聊" in (_rsn or "")), _rsn)
+            ck("真走的那条有墓碑、且写明理由（%s）" % _rsn,
+               tomb is not None and ("池子里" in (_rsn or "")
+                                     or "短期池" in (_rsn or "")
+                                     or "闲聊" in (_rsn or "")), _rsn)
+        else:
+            ck("超期没够格的沉到中期（不硬删）",
+               rows[mid_fade]["pool"] == "medium", rows[mid_fade]["pool"])
         rep = [r for r in card.db.execute(
             "SELECT id, pool, raw FROM mem WHERE raw='我回来啦啊啊'").fetchall()]
         ck("重复短句不升长期（重复的话价值在模式里，不在这一条）",

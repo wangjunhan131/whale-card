@@ -13,7 +13,7 @@ const args = process.argv.slice(2);
 const doWrite = args.includes('--write');
 const client = new CardClient({
   port: Number(process.env.WHALE_MIND_PORT || 8848),
-  cardDir: process.env.WHALE_CARD_DIR || 'D:\\新建文件夹 (3)\\whale-card',
+  cardDir: process.env.WHALE_CARD_DIR || 'workspace (3)\\whale-card',
 });
 
 let pass = 0;
