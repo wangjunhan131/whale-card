@@ -1670,9 +1670,42 @@ def anchor_relative_time(text, ts):
     """
     if not text or not ts:
         return text or ""
-    if not _RE_ANCHOR.search(text):
+    if not (_RE_ANCHOR.search(text)
+            or re.search(r"(上|这|本|下)?周[一二三四五六日天]", text)
+            or re.search(r"([0-9]{1,2}|[一两二三四五六七八九十]{1,2})\s*天(后|前)", text)):
         return text
     table = dict(_ANCHOR_WORDS)
+
+    # 「上周三」这类光靠词表换算不出来 —— 得知道今天是周几。
+    def _week(m):
+        which, dd = m.group(1) or "", m.group(2)
+        idx = "一二三四五六日".find(dd)
+        if idx < 0:
+            idx = 6  # 「周天」
+        cur = time.localtime(ts).tm_wday  # 0 = 周一
+        delta = idx - cur
+        if which == "上":
+            delta -= 7
+        elif which == "下":
+            delta += 7
+        return _anchor_date(ts, delta)
+
+    text = re.sub(r"(上|这|本|下)?周([一二三四五六日天])", _week, text)
+    # 「三天后」「两天前」
+    _cn = {"一": 1, "两": 2, "二": 2, "三": 3, "四": 4, "五": 5,
+           "六": 6, "七": 7, "八": 8, "九": 9, "十": 10}
+
+    def _days(m):
+        raw = m.group(1)
+        try:
+            n = int(raw)
+        except ValueError:
+            n = _cn.get(raw, 0)
+            if not n:
+                return m.group(0)
+        return _anchor_date(ts, n * (1 if m.group(2) == "后" else -1))
+
+    text = re.sub(r"([0-9]{1,2}|[一两二三四五六七八九十]{1,2})\s*天(后|前)", _days, text)
 
     def _rep(m):
         key = m.group(0)
@@ -3945,7 +3978,7 @@ class MemoryCard:
             _n_fact, _ = (0, []) if os.environ.get("WHALE_FACTS", "1") == "0" else facts_mod.record(
                 self.db_path, mid, text,
                 ts=(ts if ts is not None else self.clock.now()),
-                speaker=(speaker or "user"))
+                speaker=(speaker or "user"), source=(source or ""))
             if _n_fact:
                 pass
         except Exception as _fe:
@@ -6218,11 +6251,21 @@ class MemoryCard:
                 "AS tseq FROM mem m ")
         # T5-1：ARCHIVE 是潜意识，不参与实时检索；只有显式点名要它才翻。
         _LIVE = "COALESCE(m.dead,0)=0 AND COALESCE(m.quarantine,0)=0"
-        if pools:
-            rows = c.execute(_SEL + "WHERE " + _LIVE).fetchall()
-        else:
-            rows = c.execute(_SEL + "WHERE m.pool != ? AND " + _LIVE,
+        def _query_rows():
+            if pools:
+                return c.execute(_SEL + "WHERE " + _LIVE).fetchall()
+            return c.execute(_SEL + "WHERE m.pool != ? AND " + _LIVE,
                              (POOL_ARCHIVE,)).fetchall()
+
+        try:
+            rows = _query_rows()
+        except sqlite3.OperationalError as _e:
+            # 没挂时间线的库：补一张空的出生证表，seq 一律取不到，按 create_ts 兜底
+            if "mem_birth" not in str(_e):
+                raise
+            c.execute("CREATE TABLE IF NOT EXISTS mem_birth("
+                      "mid INTEGER PRIMARY KEY, hash TEXT, seq INTEGER, ts REAL)")
+            rows = _query_rows()
 
         # ---- T4-2 时间窗预筛 ----
         # 问「今天」就别翻三年前的；问「以前」就不限。
@@ -6470,6 +6513,13 @@ class MemoryCard:
             net = getattr(self, "synapse", None)
             if net is None:
                 return hits
+            # 🔴 2026-11-08：这里以前从不 ensure —— 内存里 _adj 是 None 就直接 spread，
+            #    结果任何「新开一张卡」的库一条联想都出不来（全量 714 题里 0 条）。
+            #    载入是懒的，第一次想起来的时候顺手建一次边，几十毫秒。
+            try:
+                net.ensure()
+            except Exception:
+                pass
             seeds = [(r["id"], s) for s, _wn, r, _sim, _cov in hits]
             # 归一化电势：最高分 → 1.0
             top = max((p for _m, p in seeds), default=0.0) or 1.0
@@ -7182,6 +7232,7 @@ class MemoryCard:
         lines = []
         cap4 = used + (int(q["recall"] * WIDE_BUDGET_K) if _wide else q["recall"])
         n_direct = 0
+        n_assoc = 0
         n_raw = 0            # 已经附了几条原话（V5.6.2）
 
         # 🔧 去重：②「我一直记得的事」里已经列过的，这里不再说一遍 ——
@@ -7290,8 +7341,12 @@ class MemoryCard:
             if r["superseded_by"]:
                 _tag = (_tag + "｜旧说法") if _tag else "旧说法"
             if r["id"] in assoc_ids:
-                if n_direct >= 5:
+                # 联想最多再补 2 条；但它排在直接命中之后，所以不能因为
+                # 「正事已经满了」就整段丢掉 —— 以前就是这里直接 break，
+                # 五个直接命中之后，联想一条都摆不上来。
+                if n_assoc >= 2:
                     break
+                n_assoc += 1
                 body = "（顺带想起）" + self.render(r, wn)
             else:
                 n_direct += 1

@@ -123,6 +123,7 @@ _Q_PRED_KW = {
     "喜欢": ("喜欢", "爱吃", "爱听", "爱看", "爱喝"),
     "讨厌": ("讨厌", "不喜欢", "受不了", "忌口", "不吃", "反感"),
     "打算": ("打算", "计划", "准备", "想要"),
+    "承诺": ("答应", "承诺", "说过什么", "你答应"),
     "约定": ("约好", "说好", "定在", "改到", "约"),
     "叫": ("叫什么", "名字", "全名", "昵称"),
     "年级": ("几年级", "年级", "高几", "初几"),
@@ -394,6 +395,67 @@ def extract(text, ts=None):
     return out
 
 
+# ---------- 永久区的内容边界（V5.9，2026-11-08 定调）----------------------
+# 不衰减的那一层只收「以后还会被问、而且答错会出事」的结构化事实；
+# 其它一律留在事件记忆里，让它按衰减曲线自然淡掉。
+# 判据：①说清楚是谁的 ②换个说法也还是同一件事 ③答错了会真的伤到人
+_CATEGORY = {
+    "叫": ("identity", 1), "年龄": ("identity", 1), "生日": ("identity", 1),
+    "住处": ("identity", 1), "年级": ("identity", 1),
+    "喜欢": ("preference", 1), "讨厌": ("preference", 1),
+    "身体": ("health", 1),
+    "欠账": ("obligation", 1), "归还": ("obligation", 1),
+    "约定": ("commitment", 1),
+    "接送": ("schedule", 1), "排班": ("schedule", 1), "考试": ("schedule", 1),
+    "单价": ("transaction", 1), "买": ("transaction", 1),
+    "物件状态": ("possession", 1),
+    "打算": ("plan", 1), "工作变动": ("plan", 1),
+    # 今天在哪、作业写没写——过两天就没意义了，别进永久区
+    "在哪": ("transient", 0), "作业": ("transient", 0),
+}
+
+# 转述/猜测不落户：她说可能、我听说是、大概也许——这类写进永久区就是给未来埋错。
+_HEARSAY = re.compile(r"(听说|据说|可能|也许|好像|大概|不确定|是不是|说是)")
+
+# 再收一道：真正允许进永久区的谓词。接送、排班、单价、约定、打算这些时间性太强，
+# 换天就过期，留在事件记忆里让它自己褪掉反而更诚实。
+_PERMANENT_OK = {"叫", "年龄", "生日", "住处", "欠账", "归还"}
+
+
+def _perm_ok(it, text, source):
+    pred = it.get("predicate")
+    obj = (it.get("object") or "").strip()
+    if not _CATEGORY.get(pred, ("other", 0))[1]:
+        return False
+    if pred not in _PERMANENT_OK:
+        return False
+    if _HEARSAY.search(text or "") or not _source_ok(source):
+        return False
+    if not (2 <= len(obj) <= 24):
+        return False
+    if obj[0] in "替进这上端把让给被不没都很就到":
+        return False
+    if it.get("subject_kind") == "other" and not (it.get("subject") or "").strip():
+        return False
+    if not re.search(r"[\u4e00-\u9fa5]", obj):
+        return False
+    return True
+
+
+# 哪些来源配进永久区：人和人的对话（QQ/DSH/正常聊天）。
+# 施工汇报、评测卡、群聊扫描是「记录」不是「生活」，抽出来的三元组一旦永久化，
+# 以后每次问「我讨厌什么」都可能把「45天档掉了」端上来。
+# 我自己说过的话：答应、说好、下次讲——这些是「欠他的」，跟他说的话一样要能查。
+_SELF_COMMIT = re.compile(r"(答应|说好|承诺|下次讲|明天给你|会跟你说|改天)")
+
+
+_NON_LIFE_SOURCE = re.compile(r"(report|bench|probe|scan|digest|^log)", re.I)
+
+
+def _source_ok(source):
+    return not _NON_LIFE_SOURCE.search(source or "")
+
+
 # ---------- 存储 ----------
 
 _SCHEMA = """
@@ -407,7 +469,9 @@ CREATE TABLE IF NOT EXISTS fact(
     speaker TEXT,           -- user / self
     ts REAL,
     text TEXT,              -- 原句（截断），方便回看
-    status TEXT DEFAULT 'active'   -- active / superseded
+    status TEXT DEFAULT 'active',   -- active / superseded
+    category TEXT,          -- identity / preference / health / obligation …
+    permanent INTEGER DEFAULT 1     -- 1 = 不衰减的永久区
 );
 CREATE INDEX IF NOT EXISTS idx_fact_ts ON fact(ts);
 CREATE INDEX IF NOT EXISTS idx_fact_subject ON fact(subject_kind, subject);
@@ -424,6 +488,10 @@ def ensure(db):
         cols = {r[1] for r in c.execute("PRAGMA table_info(fact)").fetchall()}
         if "status" not in cols:
             c.execute("ALTER TABLE fact ADD COLUMN status TEXT DEFAULT 'active'")
+        if "category" not in cols:
+            c.execute("ALTER TABLE fact ADD COLUMN category TEXT")
+        if "permanent" not in cols:
+            c.execute("ALTER TABLE fact ADD COLUMN permanent INTEGER DEFAULT 1")
         c.commit()
     finally:
         c.close()
@@ -443,7 +511,7 @@ def _common_run(a, b):
     return 0
 
 
-def save(db, mem_id, items, speaker="user", text=""):
+def save(db, mem_id, items, speaker="user", text="", source=""):
     """把抽出来的事实写进表。返回写入条数。
 
     「会变的状态」谓词：同一主体同一谓词有了新的一条，旧的自动标 superseded。
@@ -500,10 +568,12 @@ def save(db, mem_id, items, speaker="user", text=""):
                     (it["subject_kind"], it.get("subject") or ""),
                 )
             c.execute(
-                "INSERT INTO fact(mem_id,subject_kind,subject,predicate,object,speaker,ts,text,status)"
-                " VALUES(?,?,?,?,?,?,?,?,'active')",
+                "INSERT INTO fact(mem_id,subject_kind,subject,predicate,object,speaker,ts,text,status,"
+                "category,permanent) VALUES(?,?,?,?,?,?,?,?,'active',?,?)",
                 (mem_id, it["subject_kind"], it.get("subject") or "", it["predicate"],
-                 it["object"], speaker, it["ts"], (text or "")[:160]),
+                 it["object"], speaker, it["ts"], (text or "")[:160],
+                 _CATEGORY.get(it["predicate"], ("other", 0))[0],
+                 (1 if _perm_ok(it, text, source) else 0)),
             )
             n += 1
         c.commit()
@@ -512,12 +582,66 @@ def save(db, mem_id, items, speaker="user", text=""):
         c.close()
 
 
-def record(db, mem_id, text, ts=None, speaker="user"):
-    """一步到位：抽 + 存。返回 (抽到的条数, 事实列表)。"""
+def _prev_subject(db, mem_id, ts=None, window=900.0):
+    """上一条对话里说的是谁。
+
+    「腰不好\\n久坐得垫个小枕头」这种句子没有主语，之前一律记成用户本人的，
+    可实际上它是跟着上一句「我爸……」说的。只在本人没出现、且真的从上一两条
+    里找到一个第三方名字时才继承 —— 宁可漏，不要错怪。
+    """
+    try:
+        c = sqlite3.connect("file:%s?mode=ro" % str(db).replace("\\", "/"),
+                            uri=True, timeout=20.0)
+        rows = c.execute(
+            "SELECT raw, t_anchor FROM mem WHERE id < ? ORDER BY id DESC LIMIT 4",
+            (mem_id,)).fetchall()
+        c.close()
+    except Exception:
+        return None
+    names = []
+    for raw, ta in rows:
+        if ts is not None and ta:
+            try:
+                if abs(float(ta) - float(ts)) > window:
+                    continue
+            except Exception:
+                pass
+        for kind, name in _q_subjects(raw or ""):
+            if kind == "other" and name:
+                names.append(name)
+        if names:
+            break
+    uniq = list(dict.fromkeys(names))
+    return uniq[0] if len(uniq) == 1 else None
+
+
+def record(db, mem_id, text, ts=None, speaker="user", source=""):
+    """一步到位：抽 + 存。返回 (抽到的条数, 事实列表)。
+
+    source 决定这条能不能进永久区：只有"人真的说过的话"才配不衰减。
+    施工汇报、评测卡、群聊扫描这些是记录，不是生活，抽错了会一直错下去。
+    """
     items = extract(text, ts=ts)
+    # 没主语的「腰不好 / 不吃芹菜」，跟着上一句的主语走（见 _prev_subject）
+    if items and "我" not in (text or ""):
+        subj = _prev_subject(db, mem_id, ts)
+        if subj:
+            for it in items:
+                if (it.get("subject_kind") == "user" and not it.get("subject")
+                        and it.get("predicate") in ("身体", "喜欢", "讨厌")):
+                    it["subject_kind"] = "other"
+                    it["subject"] = subj
+    # 助手自己说出去的话也要落一条：他问「你答应过我什么」时，得答得出来。
+    if (speaker or "") == "self" and _SELF_COMMIT.search(text or ""):
+        m = _SELF_COMMIT.search(text)
+        snippet = (text[max(0, m.start() - 6):m.start() + 40] or "").strip()
+        items.append({
+            "subject_kind": "self", "subject": "", "predicate": "承诺",
+            "object": snippet[:60], "ts": ts if ts is not None else __import__("time").time(),
+        })
     if not items:
         return 0, []
-    return save(db, mem_id, items, speaker=speaker, text=text), items
+    return save(db, mem_id, items, speaker=speaker, text=text, source=source), items
 
 
 # ---------- 查询 ----------
@@ -583,7 +707,7 @@ def recall(db, query, limit=5):
     c = sqlite3.connect("file:%s?mode=ro" % str(db).replace("\\", "/"), uri=True, timeout=30.0)
     try:
         rows = c.execute(
-            "SELECT id,mem_id,subject_kind,subject,predicate,object,speaker,ts"
+            "SELECT id,mem_id,subject_kind,subject,predicate,object,speaker,ts,category,permanent"
             " FROM fact WHERE COALESCE(status,'active')!='superseded'").fetchall()
     except sqlite3.Error:
         return []
@@ -629,6 +753,9 @@ def recall(db, query, limit=5):
         # 问的是「哪两天」，答案就得是日子：宾语里带周X/几号的那条往上抬
         if time_q and _TIME_OBJ.search(r[5] or ""):
             score += 1.3
+        # 永久区的条目更可信、更该先摆出来；临时性的往后排
+        if len(r) > 9 and r[9]:
+            score += 0.4
         if score < 1.0:
             continue
         scored.append((score, r))
@@ -639,8 +766,9 @@ def recall(db, query, limit=5):
         if key in seen:
             continue
         seen.add(key)
-        out.append(dict(zip(("id", "mem_id", "subject_kind", "subject", "predicate",
-                             "object", "speaker", "ts"), r)))
+        d = dict(zip(("id", "mem_id", "subject_kind", "subject", "predicate",
+                      "object", "speaker", "ts", "category", "permanent"), r))
+        out.append(d)
         if len(out) >= limit:
             break
     return out
