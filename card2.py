@@ -54,6 +54,7 @@ import skill
 import identity
 import habits as habits_mod
 import impression as impression_mod
+import facts as facts_mod
 import synapse as synapse_mod
 # 🔧 T4-3：语义层。它是唯一需要 numpy 的模块，所以关在 semantic.py 里，
 #    这里只在用得到的时候碰它。拿不到（模型没下/numpy 没装）就退回字面匹配 ——
@@ -2253,6 +2254,10 @@ class MemoryCard:
         except Exception as _ie:
             print("[card2] 印象层建表失败: %s" % _ie)
         try:
+            facts_mod.ensure(self.db_path)
+        except Exception as _fe:
+            print("[card2] 事实层建表失败: %s" % _fe)
+        try:
             self._ensure_hist_cols()
         except Exception:
             pass
@@ -3927,6 +3932,19 @@ class MemoryCard:
                 now=self.clock.now())
         except Exception as _ie:
             print("[card2] 印象记账失败: %s" % _ie)
+
+        # ---- 事实层（V5.7）：抽「谁 · 什么事 · 什么」-------------------------
+        # 只做索引，不改原文。抽不出就不抽（宁可少一条，不要错一条）。
+        # 用**未锚定**的 text：锚定后的日期会混进 object，抽出来是错的。
+        try:
+            _n_fact, _ = (0, []) if os.environ.get("WHALE_FACTS", "1") == "0" else facts_mod.record(
+                self.db_path, mid, text,
+                ts=(ts if ts is not None else self.clock.now()),
+                speaker=(speaker or "user"))
+            if _n_fact:
+                pass
+        except Exception as _fe:
+            print("[card2] 事实抽取失败: %s" % _fe)
 
         return mid
 
@@ -7263,6 +7281,31 @@ class MemoryCard:
             blk += "\n" + "\n".join(lines)
             out.append(blk)
             sections["recall"] = used
+
+        # ④b 事实格（V5.7）：谁说的 / 说的是谁 / 什么事
+        #
+        # 为什么单独一格：句子相似度能捞回「原话」，但捞不回「他妈生日三月五号」——
+        # 那种原子事实在远期原话被磨掉之后仍然该在；而且它必须**带着主体**出现，
+        # 否则就会犯第三方评测里最刺眼的那类错：把别人的事记到他头上。
+        _fact_cap = max(60, int(q["recall"] * 0.35))
+        _fact_used = 0
+        try:
+            _facts = ([] if os.environ.get("WHALE_FACTS", "1") == "0"
+                      else facts_mod.recall(self.db_path, query or "", limit=6))
+        except Exception as _fq:
+            _facts = []
+            print("[card2] 事实检索失败: %s" % _fq)
+        if _facts:
+            flines = []
+            for _f in _facts:
+                line = "- " + facts_mod.line_of(_f)
+                if _fact_used + len(line) > _fact_cap:
+                    break
+                flines.append(line)
+                _fact_used += len(line)
+            if flines:
+                out.append("【事实】\n" + "\n".join(flines))
+                sections["fact"] = _fact_used
 
         # ⑤ 技能格（F 维，V5.0 §7）
         #
