@@ -1282,6 +1282,28 @@ class Handler(BaseHTTPRequestHandler):
                         "items": m.card.inbox_list(limit=_lim, hours=_hrs,
                                                    unkept_only=_unk, full=_full),
                         "stats": m.card.inbox_stats()})
+                if path == "/inbox/pick":
+                    try:
+                        limit = int(body.get("limit") or 40)
+                    except Exception:
+                        limit = 40
+                    try:
+                        hours = float(body["hours"]) if body.get("hours") else None
+                    except Exception:
+                        hours = None
+                    try:
+                        with m.lock:
+                            d = m.card.inbox_pick(limit=limit, hours=hours,
+                                                  commit=bool(body.get("commit")),
+                                                  min_score=body.get("min_score"))
+                    except Exception as e:
+                        return self._send(500, {"ok": False, "error": "pick_failed",
+                                             "detail": str(e)})
+                    if d.get("committed"):
+                        m.tl.append("inbox",
+                                    "收件层挑进短期 " + str(d.get("n_wrote", 0)) + " 条",
+                                    allow_foreign=True)
+                    return self._send(200, d)
                 if path == "/inbox/mark":
                     _n = m.card.inbox_mark(body.get("ids") or [],
                                            kept=body.get("kept", 1),
@@ -1772,6 +1794,47 @@ class ExclusiveServer(ThreadingHTTPServer):
     request_queue_size = 128
 
 
+def _start_inbox_picker(mind):
+    """收件层定时挑选：把值得记的原文从收件层搬进短期池。
+
+    用户 2026-11-08 的规矩：收件层只装，判断价值是**工序**。这线程就是那道工序。
+    默认 30 分钟一次；`WHALE_INBOX_PICK_SEC=0` 关掉。
+    """
+    try:
+        sec = float(os.environ.get("WHALE_INBOX_PICK_SEC", "1800") or 0)
+    except Exception:
+        sec = 1800.0
+    if sec <= 0:
+        return None
+    try:
+        limit = int(os.environ.get("WHALE_INBOX_PICK_N", "20") or 20)
+    except Exception:
+        limit = 20
+
+    def loop():
+        while True:
+            time.sleep(sec)
+            try:
+                with mind.lock:
+                    d = mind.card.inbox_pick(limit=limit, commit=True)
+                n = int((d or {}).get("n_wrote") or 0)
+                if n:
+                    print("[mind] 收件层挑进短期 %d 条" % n)
+                    try:
+                        mind.tl.append("inbox",
+                                       "收件层挑进短期 %d 条" % n,
+                                       allow_foreign=True)
+                    except Exception:
+                        pass
+            except Exception as e:
+                print("[mind] 收件层挑选失败: %s" % e)
+
+    t = threading.Thread(target=loop, name="inbox-picker", daemon=True)
+    t.start()
+    print("[mind] 收件层挑选：每 %.0f 秒一次（每次最多 %d 条）" % (sec, limit))
+    return t
+
+
 def _start_viscera_sampler(mind):
     """后台定时「采样此刻」的身体状态。
 
@@ -1856,6 +1919,7 @@ def main(argv=None):
     print("[mind] %d 条记忆 / %d 条细节 / 盖章=%s"
           % (st["total"], st["details"], mind.sealed))
     print("[mind] 听在 http://%s:%d  （Ctrl+C 退出）" % (a.host, a.port))
+    _start_inbox_picker(mind)
     _start_viscera_sampler(mind)
     sys.stdout.flush()
     try:

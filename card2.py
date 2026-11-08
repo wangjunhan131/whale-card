@@ -4792,6 +4792,146 @@ class MemoryCard:
             print("[card2] 收件层标记失败: %s" % e)
             return 0
 
+    # ---- 收件层 → 短期池 的挑选器（V5.6.1）---------------------------------
+    # 用户 2026-11-08 的规矩：收件层只负责"装下"，判断价值是**工序**，交给这里。
+    # 它不调模型，只看几件朴素的事：是不是人说的话、有没有信息、是不是重复。
+    _PICK_WORDS = ("为什么", "怎么", "原理", "结论", "因为", "发现", "学到",
+                   "记得", "说过", "答应", "喜欢", "讨厌", "难受", "开心",
+                   "考试", "作业", "放学", "生日", "妈妈", "爸爸", "同学")
+
+    def inbox_score(self, it, now=None, recent_texts=None):
+        """给收件层的一条打「信噪比」。返回 (score, why)。纯规则，可解释。
+
+        注意：这不是在判断"这条重要不重要"，而是在判断"这条是不是噪声"。
+        用户定的分工是：收件层装下所有原文 → 除杂去噪 → 推短期池。
+        """
+        t = (it.get("text") or "").strip()
+        if not t:
+            return 0.0, "空"
+        score = 0.0
+        why = []
+        n = len(t)
+        # ── 除杂：这些是"噪"，不是"不重要" ──────────────────────────
+        import re as _re0
+        if not _re0.search(r"[\u4e00-\u9fffA-Za-z0-9]", t):
+            return 0.0, "纯符号/表情"
+        if n <= 2:
+            return 0.05, "太短（%d 字）" % n
+        if _re0.match(r"^(.{1,3})\1{2,}$", t.strip()):
+            return 0.05, "重复字（如哈哈哈）"
+        if n < 6 and not _re0.search(r"[\u4e00-\u9fff]{3,}", t):
+            return 0.12, "碎片"
+        if n < 4:
+            return 0.15, "太短（%d 字）" % n
+        if 14 <= n <= 300:
+            score += 0.35
+            why.append("长度合适")
+        elif n > 300:
+            score += 0.28
+            why.append("长文")
+        else:
+            score += 0.18
+        # 是不是"人说的话"：私聊/本窗口 > 群
+        ch = (it.get("channel") or "").lower()
+        if ch in ("private", "chat", "dsh"):
+            score += 0.30
+            why.append("一对一说的话")
+        elif ch == "group":
+            score += 0.05
+            why.append("群消息")
+        # 别家 AI 的话：只当素材，优先级压低
+        if (it.get("note") or "").find("bot") >= 0:
+            score -= 0.25
+            why.append("疑似别家 AI")
+        # 有没有信息量：数字/日期、专名、引号书名号、提问
+        if any(ch.isdigit() for ch in t):
+            score += 0.10
+            why.append("带数字")
+        import re as _re
+        if _re.search(r"[A-Za-z]{3,}", t):
+            score += 0.06
+            why.append("带英文/专名")
+        if _re.search(r"[「」“”《》]", t):
+            score += 0.06
+            why.append("带引用/书名")
+        if ("?" in t) or ("？" in t):
+            score += 0.08
+            why.append("提问")
+        hit = [w for w in self._PICK_WORDS if w in t]
+        if hit:
+            score += min(0.18, 0.06 * len(hit))
+            why.append("含关键词" + "/".join(hit[:3]))
+        # 重复：跟最近 20 条比 Jaccard
+        if recent_texts:
+            for o in recent_texts:
+                if not o or o == t:
+                    continue
+                a = set(t)
+                b = set(o)
+                if not a or not b:
+                    continue
+                j = len(a & b) / float(len(a | b))
+                if j >= 0.80:
+                    score -= 0.30
+                    why.append("与最近的重复（%.2f）" % j)
+                    break
+        score = max(0.0, min(1.0, score))
+        return score, "、".join(why)
+
+    def inbox_pick(self, limit=40, hours=None, commit=False, min_score=None,
+                   now=None):
+        """从收件层挑原文进短期池。
+
+        commit=False：只给候选与理由（默认，安全侧）。
+        commit=True ：真写卡（source/channel/who 全带过去），并回填 kept/kept_mid。
+        进短期池的永远是**整条原文**，不改写、不摘要 —— 用户 11-08 明确。
+        """
+        now = float(now if now is not None else self.clock.now())
+        thr = float(min_score if min_score is not None
+                    else getattr(self, "INBOX_PICK_MIN", 0.30))
+        items = self.inbox_list(limit=max(int(limit) * 3, 60), hours=hours,
+                                unkept_only=True, full=True)
+        recent = [(x.get("text") or "")[:400] for x in items[:20]]
+        picked, dropped = [], []
+        for it in items:
+            sc, why = self.inbox_score(it, now=now, recent_texts=recent)
+            row = {"id": it.get("id"), "score": round(sc, 3), "why": why,
+                   "ts": it.get("ts"), "source": it.get("source"),
+                   "channel": it.get("channel"), "who": it.get("who"),
+                   "text": (it.get("text") or "")[:200],
+                   "text_len": len(it.get("text") or "")}
+            (picked if sc >= thr else dropped).append(row)
+            if len(picked) >= int(limit):
+                break
+        picked.sort(key=lambda x: -x["score"])
+        if not commit:
+            return {"ok": True, "committed": False, "threshold": thr,
+                    "picked": picked, "dropped": dropped[:20],
+                    "n_picked": len(picked), "n_dropped": len(dropped)}
+
+        wrote = []
+        c = self.db.cursor()
+        self._ensure_inbox(c)
+        by_id = {it.get("id"): it for it in items}
+        for row in picked:
+            src = by_id.get(row["id"]) or {}
+            txt = src.get("text") or ""
+            if not txt.strip():
+                continue
+            ch = (src.get("channel") or "").lower()
+            speaker = "user" if ch in ("private", "chat", "dsh") else "other"
+            region = "episode"
+            mid = self.remember(
+                txt, source=(src.get("source") or ""), speaker=speaker,
+                region=region, salience=0.62, normalize=False,
+                about_uid=(src.get("uid") or "") if speaker == "user" else "",
+                pool=POOL_SHORT, ts=src.get("ts"))
+            self.inbox_mark([row["id"]], kept=1, kept_mid=mid)
+            wrote.append({"id": row["id"], "mid": mid, "score": row["score"]})
+        self.db.commit()
+        return {"ok": True, "committed": True, "threshold": thr,
+                "wrote": wrote, "n_wrote": len(wrote)}
+
     def inbox_gc(self, ttl_hours=60.0, now=None):
         """收件层过期清理：没被挑中的整条删；被挑中的只清正文留个壳。
 
