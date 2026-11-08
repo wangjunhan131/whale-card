@@ -1796,6 +1796,7 @@ _RE_SELF_ASK = re.compile(
     r"你(?:自己|之前|以前|上次|那天|刚才|当时)?.{0,10}?"
     r"(?:说|讲|答应|承诺|自称|叫|提过|记下|写过|叮嘱)")
 _RE_GROUP_ASK = re.compile(r"群|聊天室|群里|他们|大家")
+_RE_NAME_DEF = re.compile(r"(?:我|名字|昵称|外号|管自己)?叫[\u4e00-\u9fa5A-Za-z]{1,4}")
 
 # 对象倾向：同一个人 ×1.10，明确属于别人 ×0.92（软加权，见 recall）
 OBJECT_BOOST_SAME = 1.10
@@ -4443,8 +4444,12 @@ class MemoryCard:
                 #     时间对它不起作用（不是「衰减得慢」，是「不衰减」）。
                 #   ②长衰减：pool=long 但 tier=mid，走 LAM_L（半衰期 371 天 +
                 #     90 天保护期）—— 会褪，但褪得极慢。
-                c.execute("UPDATE mem SET pool=?, w=?, tier=?, t_anchor=? WHERE id=?",
-                          (POOL_LONG, 1.0, TIER_CORE_MUTABLE, now, r["id"]))
+                # 注意：不刷新 t_anchor —— 钉住是「不衰减」，不是「永远最新」。
+                # 刷新锚点会让它在时间线上压过所有真・最近发生的事（实测会把
+                # 「你自己叫什么」压到一条「大肥鱼号被封」上）。
+                if r["tier"] != TIER_CORE_MUTABLE or r["pool"] != POOL_LONG:
+                    c.execute("UPDATE mem SET pool=?, w=?, tier=? WHERE id=?",
+                              (POOL_LONG, 1.0, TIER_CORE_MUTABLE, r["id"]))
                 return POOL_LONG
         except Exception:
             pass
@@ -6307,6 +6312,8 @@ class MemoryCard:
         _self_name_ask = bool(_RE_SELF_NAME_ASK.search(query or ""))
         _self_boost = (SELF_ASK_BOOST_NAME if _self_name_ask else SELF_ASK_BOOST)
         _group_ask = bool(_RE_GROUP_ASK.search(query or ""))
+        _ask_my_name = bool(re.search(r"(叫什么|名字|称呼|怎么叫你)", query or "")) \
+            and not re.search(r"(身份|设定|规矩|原则|职责|负责|干什么|做什么)", query or "")
         qv = to_vec(q_clean)
         if not qv:
             qv = to_vec(query)          # 剥没了就退回原文
@@ -6492,19 +6499,34 @@ class MemoryCard:
                         s *= CONFLICT_RECALL_PENALTY
                 except Exception:
                     pass
+                # 2026-11-09：钉住的记忆 w 恒为 1，若原样进打分，
+                #    它们会凭「永远清楚」压过所有真正相关的近期记忆。
+                #    「不衰减」是寿命，不是相关性 —— 打分时把它的清晰度
+                #    压到 0.5，够用，但不至于霸榜。
+                try:
+                    if int(r["pin"] or 0):
+                        wn = min(wn, 0.5)
+                except Exception:
+                    pass
                 # 2026-11-09：群聊退一档（这句话本身在问群里的事就不退）
                 try:
                     _src = (r["source"] if "source" in r.keys() else "") or ""
                 except Exception:
                     _src = ""
-                if _src.startswith(GROUP_SOURCE_PREFIX) and not _group_ask:
+                if (_src.startswith(GROUP_SOURCE_PREFIX) and not _group_ask
+                        and not _self_ask):   # 我自己的话哪怕说在群里，也还是我的话
                     s *= GROUP_RECALL_PENALTY
                 # 2026-11-09：「你之前说过什么」→ 我自己的话抬一档
                 if _self_ask and (r["speaker"] or "") == "self":
                     s *= _self_boost
                     # 「我叫什么/什么身份」：优先长得像自我定义的那几条
-                    if _self_name_ask and _RE_SELF_DEF.search(r["raw"] or ""):
+                    _raw = r["raw"] or ""
+                    if _self_name_ask and _RE_SELF_DEF.search(_raw):
                         s *= 1.60
+                    # 只有「问我叫什么名字」时才强偏「我叫 X」那几句；
+                    # 问「身份/设定」时不掺这一脚，否则会把设定句压掉。
+                    if _ask_my_name:
+                        s *= 2.20 if _RE_NAME_DEF.search(_raw) else 0.60
                 out.append((s, wn, r, sim, cover))
                 # 🔧 2026-10-30 临时排错钩子（查完就删）：把每条的实际分数留痕，
                 #    外面 _DBG_SCORES 一开就能看，不影响正常路径。
