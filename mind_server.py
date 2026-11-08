@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""小鲸鱼数字生命卡 · 心智服务（Mind Service）
+"""鲸鱼娘数字生命卡 · 心智服务（Mind Service）
 
 T6-1：把卡变成一个「住在外面的进程」。
 
@@ -291,6 +291,16 @@ class Mind(object):
             #    这里是唯一收口的地方，就在这儿归一，别让调用方猜。
             #    字符串原样收；dict 依次认 text/content/reply 字段。
             _norm = []
+            # 🔧 2026-11-08：调用方（MCP 的 mind_context）传的是**条数**，不是消息列表。
+            #    原来只认 list，int 会在这里炸成
+            #    `TypeError: 'int' object is not iterable` → /context 500。
+            #    既然 int 的自然含义就是「最近几条」，那就按条数去 dialogue 里捞，
+            #    让两种形状都成立，调用方不用猜。
+            if isinstance(recent, int):
+                try:
+                    recent = self.recent_dialogue(int(recent or 12))
+                except Exception:
+                    recent = []
             for x in (recent or []):
                 if isinstance(x, str):
                     s = x
@@ -1868,7 +1878,7 @@ def _start_viscera_sampler(mind):
 
 
 def main(argv=None):
-    ap = argparse.ArgumentParser(description="小鲸鱼数字生命卡 · 心智服务")
+    ap = argparse.ArgumentParser(description="鲸鱼娘数字生命卡 · 心智服务")
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--port", type=int, default=DEFAULT_PORT)
     ap.add_argument("--db", default=DEFAULT_DB)

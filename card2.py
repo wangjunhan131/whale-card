@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-小鲸鱼数字生命卡 · 第二期
+鲸鱼娘数字生命卡 · 第二期
 =====================================
 
 第一期（card.py）做了：存 / 忘 / 翻 / 说。
@@ -340,6 +340,11 @@ _WIDE_WORDS = ("多久", "什么时候", "哪天", "几号", "几天", "几次",
                "都说了", "一共", "加起来", "先后", "经过")
 WIDE_TOP_K = 5                # 时间型/多事实型问题上多端几条（V5.6.2-G：8 实测中性，先与基线一致）
 WIDE_BUDGET_K = 1.0           # 同时把这一格的预算放大（V5.6.2-G：1.4 实测中性，先关）
+# 🔧 2026-11-08（V5.7-D 实验）：清单型问句（哪两天/哪几件/谁/注意什么）其实和「多久」一样要多条才答得全，
+#    但多端会占上下文，所以默认关，用 WHALE_WIDE_WORDS=1 开、WHALE_WIDE_K 调条数。
+_WIDE_EXTRA = ("哪两", "哪几", "哪些", "哪个", "哪件", "哪样", "有哪些", "谁",
+               "几个人", "几件", "注意", "要点", "都有", "分别", "都说", "几号")
+WIDE_K_EXTRA = int(os.environ.get("WHALE_WIDE_K", "0") or 0) or WIDE_TOP_K
 MULTIHOP_ON = False           # 多跳：第二跳只留实词再召一遍（V5.6.2-H：实测更差，先关）
 MULTIHOP_K = 3                # 第二跳最多补几条
 _HOP_STOP = set("我你他她它们的了吗呢吧啊呀是在有和就都也很还这那个什么谁哪怎么为时候说过话上下前后")
@@ -377,9 +382,9 @@ CORE_TIERS = (TIER_CORE_MUTABLE, TIER_CORE_TAG, TIER_CORE_FIXED)
 
 # 中期 → 长期：原来只看权重 0.60，太松（"当时很激动"就能进）。
 # 现在要"验票"：权重 ≥ 0.80，并且之后还被想起来过。
-THETA_LONG_STRICT = 0.80
-LONG_NEED_RECALL = 3          # 一般记忆：至少被想起 3 次
-LONG_NEED_RECALL_WARM = 1     # 高唤醒的，想起 1 次即可
+THETA_LONG_STRICT = float(os.environ.get("WHALE_THETA_LONG", "0.80") or 0.80)
+LONG_NEED_RECALL = int(os.environ.get("WHALE_LONG_NEED_RECALL", "3") or 3)      # 一般记忆：至少被想起 3 次
+LONG_NEED_RECALL_WARM = int(os.environ.get("WHALE_LONG_NEED_RECALL_WARM", "1") or 1)  # 高唤醒的，想起 1 次即可
 LONG_WARM_SALIENCE = 0.75
 LONG_WARM_REGIONS = ("flash", "self", "habit")
 
@@ -427,7 +432,7 @@ _POLLUTION_RULES = [
     (r"你(其实|根本|实际上)?(不是|并非).{0,12}(是|而是)", 0.55, "被要求改写自我", True),
     # 🔧 2026-11-06（体检修）：原来这条是
     #    (r"你(的)?名字(应该|其实|改成|是)", 0.45, "被要求改名", True)
-    # 裸「是」让它对「你的名字是小鲸鱼」也判「被要求改名」—— 说的明明是她自己。
+    # 裸「是」让它对「你的名字是汐音」也判「被要求改名」—— 说的明明是她自己。
     # 名字对不对这种事，下面那段拿卡里的自我名字比对的收尾判断已经做得更准，
     # 这里只留「在下命令 / 在改」的语气，不再单独认「名字是」。
     (r"你(的)?名字(应该|其实|改成|必须)", 0.45, "被要求改名", True),
@@ -1438,7 +1443,7 @@ _RE_FACT_DENY = re.compile(
     r"我是(怎么|如何|因为|为了)")
 
 _RE_SELF_HINT = re.compile(
-    r"我就是我|我是小鲸鱼|我的性格|我不喜欢别人|我的底线|我不会|我永远|"
+    r"我就是我|我是鲸鱼娘|我的性格|我不喜欢别人|我的底线|我不会|我永远|"
     r"我就是这样的人|我讨厌被|我害怕")
 
 _RE_HABIT_HINT = re.compile(
@@ -5536,7 +5541,7 @@ class MemoryCard:
         name = (name or "").strip()
         c = self.db.cursor()
         # 按 uid 查不到、但这个 uid 就是卡里记的那个人 → 换成他的名字再查。
-        # （老标签是「role:使用者」这种，加 uid 之前建的，没有 #uid 后缀）
+        # （老标签是「role:戊己」这种，加 uid 之前建的，没有 #uid 后缀）
         if uid and not name:
             try:
                 uq = c.execute(
@@ -5604,7 +5609,7 @@ class MemoryCard:
             return {"ok": True, "id": old["id"], "changed": True}
         mid = self.remember(text, salience=0.9, pool=POOL_LONG, region=R_SELF)
         self.set_tier(mid, TIER_CORE_TAG, kind="role", subject_key=key)
-        # 关系层写进 mtype —— 正文是给人看的（"使用者 = 最重要的人"），
+        # 关系层写进 mtype —— 正文是给人看的（"戊己 = 最重要的人"），
         # 层是给代码用的，两件事别混在一个字段里。
         c.execute("UPDATE mem SET mtype=? WHERE id=?",
                   ("role:%s" % (layer or "friend"), mid))
@@ -7059,8 +7064,8 @@ class MemoryCard:
         shown_txt = []             # ② 内部去重用（同一件事说过三遍的，只留一遍）
         cap2 = used + q["longterm"]
         for _rank, _sc, r in cand:
-            # 🔧 同一格内也要去重：历史导入里有「用户是高三学生主号QQ号是100000000」
-            #    「用户的QQ主号是100000000」「用户的名字和QQ号主号100000000」这种
+            # 🔧 同一格内也要去重：历史导入里有「用户是高三学生主号QQ号是2080692106」
+            #    「用户的QQ主号是2080692106」「用户的名字和QQ号主号2080692106」这种
             #    同一件事说三遍的，全塞进去等于浪费配额。
             if any(jaccard(r["raw"] or "", t) >= 0.55 for t in shown_txt):
                 continue
@@ -7112,12 +7117,27 @@ class MemoryCard:
                 sections["recent"] = used
 
         # ④ 此刻想起格（E 印象 + F 技能）
+        # 🔴 2026-11-08（V5.8-A 事实置顶）：事实格插到【想起】前面。
+        #    实测（20 题端到端判分）：事实块挂在最后时，答题侧根本不看它，
+        #    明明有「梁志远周二周四接」，还是会答「记不清」；挪到想起之前，
+        #    同一批题从 10/20 变 12/20。这里记下插入位置，不破坏前面
+        #    人格/长期/最近这三格的稳定前缀（缓存还从第一格命到这儿）。
+        _fact_pos = len(out)
         used = 0
         # 🔧 V5.6.2-G：时间型 / 多事实型问题，一条事实拼不出来，得多端几条。
         #    其余问题保持 5 条 —— 无差别加宽会把噪音也端上来，实测掉分。
         _q = query or ""
         _wide = any(w in _q for w in _WIDE_WORDS)
-        _topk = WIDE_TOP_K if _wide else 5
+        if os.environ.get("WHALE_WIDE_WORDS") == "1":
+            _wide = _wide or any(w in _q for w in _WIDE_EXTRA)
+        _topk = WIDE_K_EXTRA if _wide else 5
+        # 🔧 2026-11-08（V5.7-B 实验）：这一格到底端几条。默认还是 5（宽问句按 WIDE_TOP_K），
+        #    留一个环境变量给 A/B 用 —— 预算没花完却只端 5 条，等于把已经召回到的东西又扔掉。
+        #    WHALE_RECALL_FILL=1 时改成「端到预算用完为止」（cap4 那一层仍然管着，不会越界）。
+        _fill = os.environ.get("WHALE_RECALL_FILL") == "1"
+        _max_lines = 60 if _fill else (
+            int(os.environ.get("WHALE_RECALL_LINES", "0") or 0) or (
+                _topk if _wide else 5))
         hits = self.recall(query, top_k=_topk, access=True,
                             about_uid=(about_uid or None))
 
@@ -7139,6 +7159,26 @@ class MemoryCard:
                     _ids.add(_mid)
                     hits.append(_h)
         assoc_ids = getattr(self, "_last_assoc_ids", set())
+
+        # 🔧 V5.7-C 实验（2026-11-08）：拓宽候选漏斗。
+        #    原来 hits 只有 top5，排在第 17 名的那条答案根本没进候选池 ——
+        #    不是排序错了，是它压根没被考虑。这里只用 access=False 多召一遍，
+        #    不动结算逻辑（谁被召回、权重怎么涨，还按原来的 5 条算）。
+        if os.environ.get("WHALE_RECALL_FUNNEL", "0") == "1":
+            _cand_n = int(os.environ.get("WHALE_RECALL_CAND", "20") or 20)
+            if _cand_n > len(hits):
+                try:
+                    _h3 = self.recall(query, top_k=_cand_n, access=False,
+                                      about_uid=(about_uid or None))
+                except Exception:
+                    _h3 = []
+                _ids3 = set((h[2]["id"] or 0) for h in hits)
+                for _h in _h3:
+                    _mid = _h[2]["id"]
+                    if _mid in _ids3:
+                        continue
+                    _ids3.add(_mid)
+                    hits.append(_h)
         lines = []
         cap4 = used + (int(q["recall"] * WIDE_BUDGET_K) if _wide else q["recall"])
         n_direct = 0
@@ -7222,9 +7262,20 @@ class MemoryCard:
         _direct = [h for h in fresh if h[2]["id"] not in assoc_ids]
         _direct.sort(key=lambda h: (-(float(h[0]) or 0.0), _seqk(h)))
         _assoc = [h for h in fresh if h[2]["id"] in assoc_ids]
-        _direct.sort(key=lambda h: (0 if (float(h[0]) or 0.0) > 0 else 1, _seqk(h)))
+        if os.environ.get("WHALE_RECALL_FUNNEL", "0") == "1":
+            # 选谁上桌按相关度，摆出来仍然按时间线 —— 两件事分开，别互相顶掉。
+            _direct = _direct[:_max_lines]
+            _direct.sort(key=_seqk)
+        else:
+            _direct.sort(key=lambda h: (0 if (float(h[0]) or 0.0) > 0 else 1, _seqk(h)))
         _assoc.sort(key=_seqk)
         fresh = _direct + _assoc
+        if os.environ.get("WHALE_DEBUG_RECALL", "0") == "1":
+            print("[recall] hits=%d fresh=%d direct=%d assoc=%d max_lines=%d" % (
+                len(hits), len(fresh), len(_direct), len(_assoc), _max_lines))
+            for _h in _direct[:8]:
+                print("   %.3f id=%s %s" % (float(_h[0]) or 0.0, dict(_h[2]).get("id"),
+                                            (dict(_h[2]).get("raw") or "")[:40]))
 
         for s, wn, r in fresh:
             # 🔧 T4-4：联想来的条目加个前缀，跟直接想起区分开。
@@ -7244,7 +7295,7 @@ class MemoryCard:
                 body = "（顺带想起）" + self.render(r, wn)
             else:
                 n_direct += 1
-                if n_direct > (_topk if _wide else 5):
+                if n_direct > _max_lines:
                     break
                 body = self.render(r, wn)
             line = ("- %s｜%s" % (_tag, body)) if _tag else ("- " + body)
@@ -7304,7 +7355,7 @@ class MemoryCard:
                 flines.append(line)
                 _fact_used += len(line)
             if flines:
-                out.append("【事实】\n" + "\n".join(flines))
+                out.insert(_fact_pos, "【事实】\n" + "\n".join(flines))
                 sections["fact"] = _fact_used
 
         # ⑤ 技能格（F 维，V5.0 §7）
