@@ -41,3 +41,6 @@ qqg[0-9]*_*/
 qqguard_*/
 replica_*/
 _t7*_*/
+
+# 发布脚本的标记文件
+.builder_meta

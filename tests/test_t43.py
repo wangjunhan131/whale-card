@@ -23,7 +23,30 @@ import card2
 import semantic
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-DB = os.path.join(HERE, 'card.db')
+_REAL_DB = os.path.join(HERE, 'card.db')
+
+
+def _temp_copy():
+    """用真卡的**临时副本**跑，别把测试写进她的真卡。
+
+    这文件原来直接 card2.MemoryCard(DB) 并对真卡 remember() —— 每跑一次
+    验收就往真卡里塞一条「验收临时记忆：xxx」，还不删。2026-11-02 体检
+    时抓到 id=583 就是这么来的。
+    """
+    import shutil, sqlite3, tempfile
+    if not os.path.exists(_REAL_DB):
+        return _REAL_DB, None
+    d = tempfile.mkdtemp(prefix='t43_', dir=HERE)
+    dst = os.path.join(d, 'card.db')
+    src = sqlite3.connect(_REAL_DB)
+    out = sqlite3.connect(dst)
+    src.backup(out)
+    out.close()
+    src.close()
+    return dst, d
+
+
+DB, _TMPDIR = _temp_copy()
 
 _pass = 0
 _fail = 0
@@ -226,3 +249,8 @@ else:
 say('\n' + '=' * 52)
 say('T4-3 验收：通过 %d 项，失败 %d 项' % (_pass, _fail))
 sys.exit(0 if _fail == 0 else 1)
+
+
+if _TMPDIR:
+    import shutil
+    shutil.rmtree(_TMPDIR, ignore_errors=True)

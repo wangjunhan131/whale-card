@@ -86,7 +86,9 @@ DAY = 86400.0
 LAM_S1 = 1.80e-6     # 短期池 · 前 3 天（半衰期 ~4.5 天）
 LAM_S2 = 1.50e-5     # 短期池 · 第 4~7 天（半衰期 ~13 小时，没被想起就掉得快）
 LAM_M = 2.70e-7      # 中期池（半衰期 ~29.7 天）
-LAM_L = 2.16e-8      # 长期池（半衰期 ~371 天）
+LAM_L = 2.16e-8      # 长期池·长衰减档（半衰期 ~371 天）
+LONG_DECAY_HALFLIFE_DAYS = 371.0   # 与 LAM_L 对应；长期池里「会褪的那一半」
+                                   # 就是按这个周期褪，pin=1 的那一半不褪。
 
 S_SHORT_PHASE = 3 * DAY   # 短期池慢段的长度
 SHORT_MAX_TTL = 7 * DAY   # 短期池最多待 7 天，之后必须巩固或淘汰
@@ -1772,6 +1774,28 @@ REGION_BOOST = 1.25
 # 默认值来自 10-30 在 20 条真实查询上的网格搜索；10-31 修好候选集/分区/BLAS 后
 # 由 eval_weights.py 重新扫描一遍确认（见那个脚本开头的说明）。
 SCORE_W = (0.35, 0.30, 0.20, 0.10)
+
+# 🔧 2026-11-09（用户 m04652）：两处检索偏心，都不是新机制，是把已有的
+#    「什么值得被想起来」这条原则补回到打分里。
+#   ① 群聊降权：群里几百条别人的闲聊，字面/语义都跟日常问句很像，
+#      于是天天把真记忆顶下去（实测一条「秤歪了」能压过「我的号是多少」）。
+#      写入时把 salience 压下来，检索时再退一档 —— 不是删，是想得起来但排后面。
+GROUP_SOURCE_PREFIX = "qq-group"
+GROUP_RECALL_PENALTY = 0.55      # 群聊在打分时 ×0.55
+GROUP_SAL_MAX = 0.35             # 群聊写入时 salience 上限
+#   ② 「我自己说过的话」专用通道：问「你之前答应我什么」时，
+#      答案在我自己的话里，但那句话往往很短、没情绪、时间又久，
+#      三项因子全不占优。只在这一类问句上给自己的话抬一档。
+SELF_ASK_BOOST = float(os.environ.get("WHALE_SELF_BOOST", "1.45") or 1.45)
+# 问「叫什么 / 什么身份 / 怎么自称」时再强一档：这类问题的答案一定在我自己的话里
+SELF_ASK_BOOST_NAME = float(os.environ.get("WHALE_SELF_BOOST_NAME", "1.95") or 1.95)
+_RE_SELF_NAME_ASK = re.compile(r"叫什么|什么身份|什么名字|怎么称呼|自称|管自己|给自己")
+# 「我叫什么/什么身份」这类问题，答案通常长得像一句自我定义（叫…／设定…／规矩…）
+_RE_SELF_DEF = re.compile(r"叫|设定|自称|身份|规矩|原则|给自己|管自己")
+_RE_SELF_ASK = re.compile(
+    r"你(?:自己|之前|以前|上次|那天|刚才|当时)?.{0,10}?"
+    r"(?:说|讲|答应|承诺|自称|叫|提过|记下|写过|叮嘱)")
+_RE_GROUP_ASK = re.compile(r"群|聊天室|群里|他们|大家")
 
 # 对象倾向：同一个人 ×1.10，明确属于别人 ×0.92（软加权，见 recall）
 OBJECT_BOOST_SAME = 1.10
@@ -3556,6 +3580,9 @@ class MemoryCard:
             # value        0~5 价值分：这条像不像"关于她/关于你的事实"。
             #              只打分、默认不拦门（拦门会改"她记住什么"，那是产品决策）
             "value": "INTEGER NOT NULL DEFAULT 2",
+            # pin          2026-11-09：1 = 钉住，永不遗忘（底层/规则/重要的话）。
+            #              由 _repartition_pools.py 一次性标记，也可手动改。
+            "pin": "INTEGER NOT NULL DEFAULT 0",
         }
         for name, decl in add.items():
             if name not in cols:
@@ -3755,6 +3782,15 @@ class MemoryCard:
         text = strip_sysmark(text)
         if not text:
             return None
+
+        # 2026-11-09：群聊写入时把 salience 压下来。
+        #    群里别人的闲话不该跟「我的号是多少」同权重 —— 这是写入侧的事，
+        #    不该留给检索侧去补（见 recency 那段实测记录）。
+        if str(source or "").startswith(GROUP_SOURCE_PREFIX):
+            try:
+                salience = min(float(salience), GROUP_SAL_MAX)
+            except Exception:
+                salience = GROUP_SAL_MAX
 
         # 🔧 时间归一化：把「今天/昨天/刚刚」换成绝对日期。
         #    必须用「这句话说出来的时刻」at 做参照，不能用 now。
@@ -4395,6 +4431,23 @@ class MemoryCard:
         if self._is_repeat_short(r, now):
             score *= self.REPEAT_SHORT_PENALTY
         c = self.db.cursor()
+        # 🔧 2026-11-09（用户 m04803「底层和重要的那些，要让它进不会忘的区域」）：
+        #    pin=1 的记忆是钉住的 —— 不判遗忘、不评分数、原地留在长期，
+        #    权重给到存活下限之上，让它永远想得起来。
+        #    谁被钉住由 `_repartition_pools.py` 一次性标记，之后新写入的
+        #    规则/底线也可以显式钉（remember(pin=True) 目前没开，留口子）。
+        try:
+            if int(r["pin"] or 0):
+                # 2026-11-09（用户 m04851）：长期池分两档 ——
+                #   ①不衰减：pin=1，tier 提到 core，weight_now 直接返回原值，
+                #     时间对它不起作用（不是「衰减得慢」，是「不衰减」）。
+                #   ②长衰减：pool=long 但 tier=mid，走 LAM_L（半衰期 371 天 +
+                #     90 天保护期）—— 会褪，但褪得极慢。
+                c.execute("UPDATE mem SET pool=?, w=?, tier=?, t_anchor=? WHERE id=?",
+                          (POOL_LONG, 1.0, TIER_CORE_MUTABLE, now, r["id"]))
+                return POOL_LONG
+        except Exception:
+            pass
         # 🔧 2026-11-08（V5.6.3）：权重已经被时间磨到看不见的，不必等分数判 ——
         #    它什么都不剩了，抬进中期只是给它续命。先判这一刀，再谈晋升。
         if wn_row(r, now) < CLARITY_GC:
@@ -6248,6 +6301,12 @@ class MemoryCard:
         """
         idf = self._ensure_idf()
         q_clean = _RE_QUERY_SHELL.sub("", query or "")
+        # 2026-11-09：这句问的是「我自己说过什么」吗？是的话给自己的话抬一档；
+        # 问的是群里的事就不压群聊。
+        _self_ask = bool(_RE_SELF_ASK.search(query or ""))
+        _self_name_ask = bool(_RE_SELF_NAME_ASK.search(query or ""))
+        _self_boost = (SELF_ASK_BOOST_NAME if _self_name_ask else SELF_ASK_BOOST)
+        _group_ask = bool(_RE_GROUP_ASK.search(query or ""))
         qv = to_vec(q_clean)
         if not qv:
             qv = to_vec(query)          # 剥没了就退回原文
@@ -6307,6 +6366,14 @@ class MemoryCard:
             narrowed = [r for r in rows if r["id"] in pod_ids]
             if len(narrowed) >= 5:
                 rows = narrowed
+
+        # ---- 2026-11-09「我自己说过的话」先在自己话里找 ----
+        #    和分区路由同一个套路：先在自己说过的话里找，找出来的不够 2 条
+        #    再回退全库 —— 宁可多查，不可漏查。
+        if _self_ask:
+            _self_rows = [r for r in rows if (r["speaker"] or "") == "self"]
+            if len(_self_rows) >= 5:
+                rows = _self_rows
 
         vecs = self._vecs(rows)     # 🔧 批量取向量（带缓存），不再逐条 json.loads
 
@@ -6425,6 +6492,19 @@ class MemoryCard:
                         s *= CONFLICT_RECALL_PENALTY
                 except Exception:
                     pass
+                # 2026-11-09：群聊退一档（这句话本身在问群里的事就不退）
+                try:
+                    _src = (r["source"] if "source" in r.keys() else "") or ""
+                except Exception:
+                    _src = ""
+                if _src.startswith(GROUP_SOURCE_PREFIX) and not _group_ask:
+                    s *= GROUP_RECALL_PENALTY
+                # 2026-11-09：「你之前说过什么」→ 我自己的话抬一档
+                if _self_ask and (r["speaker"] or "") == "self":
+                    s *= _self_boost
+                    # 「我叫什么/什么身份」：优先长得像自我定义的那几条
+                    if _self_name_ask and _RE_SELF_DEF.search(r["raw"] or ""):
+                        s *= 1.60
                 out.append((s, wn, r, sim, cover))
                 # 🔧 2026-10-30 临时排错钩子（查完就删）：把每条的实际分数留痕，
                 #    外面 _DBG_SCORES 一开就能看，不影响正常路径。

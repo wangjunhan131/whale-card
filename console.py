@@ -2170,8 +2170,8 @@ function renderSide(){
     $("#mood").title = "心境是慢的（一天尺度），三维是此刻（一句话尺度）";
   })();
   $("#who").textContent = (id.nick||"") + (id.qq? " · "+id.qq : "");
-  var slotTxt = {unloaded:"没插", injected:"插着", broken:"坏了",
-                 unknown:"对不上", empty:"没文件"}[S.slot] || "—";
+  var slotTxt = {unloaded:"没插", injected:"插着", custom:"插着（自带版本）",
+                 broken:"坏了", unknown:"对不上", empty:"没文件"}[S.slot] || "—";
   $("#slot").textContent = slotTxt;
   var dot=$("#stDot"), tx=$("#stTxt");
   if(S.alive){ dot.className="dot"; tx.textContent="已连接"; }
@@ -2198,9 +2198,10 @@ function renderMini(){
   var av = tl.anchor_verdict || "";
   setLed("ledAnchor", av==="ok" ? "ok" : (av==="rollback"||av==="replaced" ? "bad" : ""));
 
-  /* 卡槽：插着绿、没插黄（不算错，只是状态）、坏了红 */
+  /* 卡槽：插着（含人自己改过 AGENTS.md 的 custom）绿、没插黄、坏了红 */
   var sl = S.slot || "";
-  setLed("ledSlot", sl==="injected" ? "ok" : (sl==="broken"||sl==="unknown" ? "bad" : "warn"));
+  setLed("ledSlot", (sl==="injected"||sl==="custom") ? "ok"
+                  : (sl==="broken"||sl==="unknown" ? "bad" : "warn"));
 
   /* 盘：有备份且在线 → 绿；只有主盘 → 黄；一个都没识别 → 灰 */
   var dk = (S.data && S.data.disks) || {};

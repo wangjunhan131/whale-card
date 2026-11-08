@@ -8,7 +8,10 @@
 import os
 import shutil
 import sys
+import sqlite3
 import tempfile
+
+HERE = os.path.dirname(os.path.abspath(__file__))
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -96,7 +99,17 @@ card.close()
 
 # ============================================================
 say("\n=== 5. 真实库核对 ===")
-c = MemoryCard(old_card)
+# 这一段只读真卡的统计，但 MemoryCard 一开就会跑 _migrate（有写语句），
+# 服务开着的时候会抢锁（database is locked）。所以先拷一份再开。
+_copy_dir = tempfile.mkdtemp(prefix="t52_real_", dir=HERE)
+_copy_db = os.path.join(_copy_dir, "card.db")
+_src = sqlite3.connect(old_card)
+_dst = sqlite3.connect(_copy_db)
+with _dst:
+    _src.backup(_dst)
+_src.close()
+_dst.close()
+c = MemoryCard(_copy_db)
 n_mem = c.db.execute("SELECT COUNT(*) FROM mem").fetchone()[0]
 n_dlg = c.db.execute("SELECT COUNT(*) FROM dialogue").fetchone()[0]
 n_pair = c.db.execute(
@@ -137,6 +150,13 @@ F.CARD_DB, F.SESS = old_card, old_sess
 
 # ============================================================
 say("\n" + "=" * 50)
+# 收摊：第 5 段为了不抢真卡的写锁，特意拷了一份副本出来（MemoryCard 一开就会 _migrate）。
+# 跑完就把副本删掉，不然每跑一次多一个 t52_real_* 目录。
+try:
+    c.close()
+except Exception:
+    pass
+shutil.rmtree(_copy_dir, ignore_errors=True)
 if fail == 0:
     print("T5-2/T5-3 验收：全部通过 ✅  (%d 项)" % ok)
 else:

@@ -35,11 +35,14 @@ ok("渲染带地点和情绪", "路边摊" in card.render(hits[0][2]),
 
 print("\n【2】短期池分段双速率：前3天慢、之后快")
 w0 = 1.0
-t0 = 0.0
-w_1d = weight_now(w0, POOL_SHORT, t0, 1 * DAY)
-w_3d = weight_now(w0, POOL_SHORT, t0, 3 * DAY)
-w_5d = weight_now(w0, POOL_SHORT, t0, 5 * DAY)
-w_7d = weight_now(w0, POOL_SHORT, t0, 7 * DAY)
+# 🔧 2026-11-05：锚点原来是 0.0（1970 年），而 t_anchor=0 在生产里是
+#    「这个字段没被写上」的哨兵值（weight_now 遇到它原样返回、不衰减）。
+#    拿哨兵值当时间戳测曲线，测到的就不是曲线。换一个真实时刻。
+t0 = 1_700_000_000
+w_1d = weight_now(w0, POOL_SHORT, t0, t0 + 1 * DAY)
+w_3d = weight_now(w0, POOL_SHORT, t0, t0 + 3 * DAY)
+w_5d = weight_now(w0, POOL_SHORT, t0, t0 + 5 * DAY)
+w_7d = weight_now(w0, POOL_SHORT, t0, t0 + 7 * DAY)
 ok("1天还很结实 (>0.85)", w_1d > 0.85, "w=%.3f" % w_1d)
 ok("3天还行 (>0.60)", w_3d > 0.60, "w=%.3f" % w_3d)
 ok("5天掉得快 (<0.15)", w_5d < 0.15, "w=%.3f" % w_5d)
@@ -47,8 +50,8 @@ ok("7天几乎没了 (<0.02)", w_7d < 0.02, "w=%.4f" % w_7d)
 print("    曲线: 1d=%.3f 3d=%.3f 5d=%.3f 7d=%.4f" % (w_1d, w_3d, w_5d, w_7d))
 
 print("\n【3】中期池比短期慢段还慢，长期最慢")
-wm_30d = weight_now(1.0, POOL_MEDIUM, 0.0, 30 * DAY)
-wl_365d = weight_now(1.0, POOL_LONG, 0.0, 365 * DAY)
+wm_30d = weight_now(1.0, POOL_MEDIUM, t0, t0 + 30 * DAY)
+wl_365d = weight_now(1.0, POOL_LONG, t0, t0 + 365 * DAY)
 ok("中期30天仍存活 (>0.30)", wm_30d > 0.30, "w=%.3f" % wm_30d)
 ok("长期365天仍存活 (>0.40)", wl_365d > 0.40, "w=%.3f" % wl_365d)
 ok("中期比短期慢段慢", LAM_M < LAM_S1, "λm=%.2e < λs1=%.2e" % (LAM_M, LAM_S1))

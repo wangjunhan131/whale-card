@@ -17,6 +17,7 @@ import urllib.request
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 
+import card2
 import mind_server                                   # noqa: E402
 from card2 import MemoryCard                         # noqa: E402
 
@@ -119,13 +120,19 @@ ck("assistant 排在 user 后面", len(dlg) > 1 and dlg[1]["ts"] > dlg[0]["ts"])
 
 print()
 print("【A4】时间真的在流")
+# 只验"时间在流"这一件事：拿同一条记忆、同一个 t_anchor，比较现在与两天后的
+# 纯衰减值。不能比较 recall 出来的数 —— 那里面有"被想起来就加强"的加成，
+# 而 tick 会结算挂在 recall_event 里的加成（前面 A1~A3 留下的），一比较就会
+# 出现"两天后权重反而变大"。这不是衰减坏了，是量错了东西。
 w0 = m.card.recall("白米饭", top_k=1, access=False)
-before = w0[0][1] if w0 else 0
+row = m.card.db.execute(
+    "SELECT w, pool, t_anchor, tier FROM mem WHERE id=?", (w0[0][2]["id"],)).fetchone()
+now = time.time()
+before = card2.weight_now(row[0], row[1], row[2], now, None, row[3])
+after = card2.weight_now(row[0], row[1], row[2], now + 86400 * 2, None, row[3])
 m.card.tick(86400 * 2)
 m.last_tick_ts = time.time()
-w1 = m.card.recall("白米饭", top_k=1, access=False)
-after = w1[0][1] if w1 else 0
-ck("两天后权重下降", after < before, "%.4f → %.4f" % (before, after))
+ck("两天后权重下降", after < before, "%.4f → %.4f（纯衰减）" % (before, after))
 
 print()
 print("【A5】status 全量状态")
