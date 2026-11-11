@@ -141,6 +141,47 @@ def snapshot_into(src_db, dst_db):
         s.close()
 
 
+def _card_candidates():
+    """可能放着「另一份卡」的地方，全按运行时环境算，不写死盘符。
+
+    顺序：环境变量 WHALE_CARD_ROOTS（分号分隔）→ 各盘常见目录名 → 各盘一层子目录。
+    只保留「目录里真有 card.db」的，并且踢掉本机这一份（不然自己搬自己）。
+    """
+    out = []
+    for p in os.environ.get("WHALE_CARD_ROOTS", "").replace(os.pathsep, ";").split(";"):
+        p = p.strip().strip('"')
+        if p:
+            out.append(p)
+    drives = [chr(c) + ":\\" for c in range(65, 91) if os.path.exists(chr(c) + ":\\")]
+    for d in drives:
+        for n in ("card-live", "whale-card", "数字生命卡", "whale-card-usb"):
+            out.append(os.path.join(d, n))
+    for d in drives:
+        try:
+            subs = sorted(os.listdir(d))
+        except OSError:
+            # 某个盘不让枚举（比如空的读卡器）——记一笔就跳过，不算失败
+            _listdir_err = True
+            continue
+        for x in subs:
+            full = os.path.join(d, x)
+            if os.path.isdir(full):
+                out.append(full)
+    me = os.path.normcase(os.path.abspath(ROOT))
+    seen, rank = {me}, {}
+    for i, p in enumerate(out):          # 越早出现的越像（常见名在子目录扫描之前）
+        q = os.path.normcase(os.path.abspath(p))
+        if q in seen:
+            continue
+        seen.add(q)
+        base = os.path.basename(p.rstrip("\\/")).lower()
+        if any(w in base for w in ("backup", "snapshot", "bak", "trash", "recycle")):
+            continue                      # 备份/快照不是「另一份卡」，别让接回认错人
+        if os.path.exists(os.path.join(p, "card.db")):
+            rank[p] = i
+    return sorted(rank, key=lambda x: rank[x])
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description="把 U 盘那份卡接回本机")
     ap.add_argument("usb", nargs="?", default=None,
@@ -159,15 +200,18 @@ def main(argv=None):
     # ── 找 U 盘那份 ─────────────────────────────
     usb = a.usb
     if not usb:
-        for cand in ("G:\\card-live", "F:\\card-live", "H:\\card-live",
-                     "G:\\whale-card", "F:\\whale-card"):
-            if os.path.exists(os.path.join(cand, "card.db")):
-                usb = cand
-                break
+        cands = _card_candidates()
+        if len(cands) > 1:
+            print("  看到好几份像卡的：")
+            for c in cands:
+                print("    " + c)
+            print("  先按第一份走；不是它就把路径直接给我。")
+        if cands:
+            usb = cands[0]
     if not usb or not os.path.exists(os.path.join(usb, "card.db")):
         print()
         print("  ✗ 没找到 U 盘上的卡。插好 U 盘，或者告诉我路径：")
-        print("    接回来.bat G:\\card-live")
+        print("    接回来.bat <那份卡所在的目录>（例如 X:\\card-live）")
         return 1
     usb = os.path.abspath(usb)
     print("  U 盘：%s" % usb)

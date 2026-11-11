@@ -185,21 +185,32 @@ for path in ["/health", "/status", "/console_data", "/timeline", "/injection",
 # ---------- 6. 硬编码 ----------
 sec("6. 写死的盘符路径（搬家会断）")
 hits = []
+# dev/ 与 probe/ 是一次性脚本、_build_oss/_sync_oss 是打包脱敏规则（里面本来就要写盘符），
+# 它们跟「这张卡搬到别的电脑还能不能跑」无关，不参与这条检查。
+DEV_DIRS = {"dev", "probe", "_trash", "vendor", "tests"}
+DEV_FILES = {"_build_oss.py", "_sync_oss.py", "_sync_oss_full.py", "_clean_oss_all.py"}
 for dirpath, dirnames, names in os.walk(ROOT):
-    dirnames[:] = [d for d in dirnames if d not in SKIP]
+    dirnames[:] = [d for d in dirnames if d not in SKIP and d not in DEV_DIRS]
     for fn in names:
-        if not fn.endswith(".py"):
+        if not fn.endswith(".py") or fn in DEV_FILES:
             continue
         p = os.path.join(dirpath, fn)
         for i, line in enumerate(io.open(p, encoding="utf-8", errors="replace"), 1):
-            if re.search(r"[\"'][A-Za-z]:\\\\", line) and "示例" not in line and "<卡目录>" not in line:
+            if not re.search(r"[\"'][A-Za-z]:\\\\", line):
+                continue
+            # 帮助文本 / 测试夹具 / 占位符：里面本来就该有盘符，跟搬家无关
+            if any(w in line for w in ("示例", "例如", "<卡目录>", "<那份卡",
+                                       "--bundle", "OLD-HOME", "OLD-CARD",
+                                       "假卡", "X:\\\\")):
+                continue
+            if True:
                 hits.append("%s:%d %s" % (os.path.relpath(p, ROOT), i, line.strip()[:80]))
 for h in hits[:10]:
     print("  " + h)
 if not hits:
     ok("没有写死的盘符路径")
 else:
-    warns.append("硬编码盘符 %d 处（搬家前要改）" % len(hits))
+    warns.append("产品代码里硬编码盘符 %d 处（搬家前要改；dev/probe 不计）" % len(hits))
 
 # ---------- 汇总 ----------
 sec("结论")
