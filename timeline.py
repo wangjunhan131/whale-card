@@ -123,6 +123,18 @@ class Timeline(object):
             ts    REAL NOT NULL DEFAULT 0
         )""")
         c.execute("CREATE INDEX IF NOT EXISTS ix_mb_seq ON mem_birth(seq)")
+        # 事件出生证（V7 第 4 件）：habits / impression 这两类「会一直改的行」
+        # 锁不了整行，只能锁它们第一次出现的那一刻。seq=0 = 启用台账前的旧行。
+        c.execute("""
+        CREATE TABLE IF NOT EXISTS event_birth (
+            kind  TEXT NOT NULL,
+            ref   TEXT NOT NULL,
+            hash  TEXT NOT NULL,
+            seq   INTEGER NOT NULL DEFAULT 0,
+            ts    REAL NOT NULL DEFAULT 0,
+            PRIMARY KEY(kind, ref)
+        )""")
+        c.execute("CREATE INDEX IF NOT EXISTS ix_eb_kind ON event_birth(kind, seq)")
         # 认识第一天：第一次写时间线的那一刻。只写一次。
         c.execute("""
         CREATE TABLE IF NOT EXISTS timeline_meta (
@@ -140,11 +152,12 @@ class Timeline(object):
 
     # ---------- 写 ----------
     def _last_row(self):
-        if self._last is None:
-            r = self.db.execute(
-                "SELECT seq, self_hash FROM timeline ORDER BY seq DESC LIMIT 1"
-            ).fetchone()
-            self._last = (r["seq"], r["self_hash"]) if r else (0, "")
+        # 不缓存：同一张卡上可能同时存在多个 Timeline 实例（业务写、维护线程、
+        # 就地盖出生证各一个），缓存一旧就会算出重复 seq，撞 UNIQUE。
+        r = self.db.execute(
+            "SELECT seq, self_hash FROM timeline ORDER BY seq DESC LIMIT 1"
+        ).fetchone()
+        self._last = (r["seq"], r["self_hash"]) if r else (0, "")
         return self._last
 
     def append(self, kind, note="", ts=None, allow_foreign=False):
@@ -264,6 +277,68 @@ class Timeline(object):
             (int(mid), h, seq, float(create_ts or 0)))
         self.db.commit()
         return h
+
+    def birth_gap(self, limit=None):
+        """找出「记忆在库里、出生证没开」的条目。
+
+        为什么会有这种洞：report() 里 `card.remember()` 自己 commit、
+        `tl.birth_stamp()` 又 commit 一次 —— 两次写之间断电/进程被杀，
+        就留下「记忆在、账本没有」的状态。硬塞进一个事务要改几十处 commit，
+        所以这里走另一条路：**允许漏，但必须能查出来、能补齐**。
+
+        排除台账里登记过的删除（mem_tomb）—— 那些是正常死的，不该补证。
+        返回 [(mid, create_ts, speaker, raw[:40]), ...]，按 id 升序。
+        """
+        sql = ("SELECT m.id AS id, m.raw AS raw, m.speaker AS speaker,"
+               " m.create_ts AS cts FROM mem m"
+               " LEFT JOIN mem_birth b ON b.mid = m.id"
+               " WHERE b.mid IS NULL")
+        sql += " AND NOT EXISTS (SELECT 1 FROM mem_tomb t WHERE t.mid = m.id)"
+        sql += " ORDER BY m.id ASC"
+        if limit:
+            sql += " LIMIT %d" % int(limit)
+        out = []
+        for r in self.db.execute(sql).fetchall():
+            out.append((int(r["id"]), float(r["cts"] or 0),
+                        r["speaker"] if "speaker" in r.keys() else "",
+                        (r["raw"] or "")[:40]))
+        return out
+
+    def repair_birth(self, limit=50, ts=None):
+        """把 birth_gap() 里的洞补上（补的时候在链上写明是补的）。
+
+        为什么要写清楚「补」：一条 2026-11-10 出生、却在 11-12 才补证的记录，
+        如果和正常记录长得一模一样，事后就没法区分「当时就记下了」和
+        「两天后才补的」。kind 用 `mem_repair` 而不是 `mem`，note 里带原
+        create_ts —— 时间轴上看得见这是补的，但不会冒充当时的观测。
+
+        返回 (补了几条, 仍然失败的 mid 列表)。失败不抛，留给下一轮再补。
+        """
+        gaps = self.birth_gap(limit=limit)
+        fixed, failed = 0, []
+        for mid, cts, _spk, _snip in gaps:
+            try:
+                r = self.db.execute(
+                    "SELECT id, raw, speaker, create_ts FROM mem WHERE id=?",
+                    (int(mid),)).fetchone()
+                if r is None:
+                    continue
+                h = self._birth_hash(r["id"], r["raw"],
+                                     r["speaker"] if "speaker" in r.keys() else "",
+                                     r["create_ts"])
+                note = "补出生证 #%d（原记录于 %s）" % (
+                    int(mid), time.strftime("%m-%d %H:%M", time.localtime(cts or 0)))
+                seq = self.append("mem_repair", note,
+                                  ts=float(ts if ts is not None else time.time()))
+                self.db.execute(
+                    "INSERT OR REPLACE INTO mem_birth(mid,hash,seq,ts)"
+                    " VALUES(?,?,?,?)",
+                    (int(mid), h, seq, float(r["create_ts"] or 0)))
+                self.db.commit()
+                fixed += 1
+            except Exception:
+                failed.append(int(mid))
+        return fixed, failed
 
     def backfill_birth(self, ts=None, limit=None):
         """给老记忆盖一个总章（不逐条写时间线，那会把时间轴冲烂）。
@@ -660,3 +735,132 @@ class Timeline(object):
         if last and note and last["note"] == note and (t - last["ts"]) < window:
             return None
         return self.append("talk", note, ts=t)
+
+    # ---------- 事件出生证（V7 第 4 件：habit / impression） ----------
+    # 为什么只锁「出生」：habit 的 hits/last_seen/status 每次挖矿都会改，
+    # impression 的 n/w/sample/react_key 每次 observe 都会改；整行上链下一秒
+    # 哈希就崩。能锁死、且值得锁死的是「这条行第一次出现」。
+    def _event_source(self, kind):
+        if kind == "habit":
+            return ("habits", "first_seen",
+                    "SELECT id, category, key, scope, subject_key, first_seen"
+                    " FROM habits WHERE id=?")
+        if kind == "impression":
+            return ("impression", "first_ts",
+                    "SELECT id, subject, subject_kind, first_ts"
+                    " FROM impression WHERE id=?")
+        raise ValueError("未知事件类型：%r" % (kind,))
+
+    def _event_hash(self, kind, row):
+        if kind == "habit":
+            payload = {"kind": kind, "ref": int(row[0]),
+                       "category": row[1] or "", "key": row[2] or "",
+                       "scope": row[3] or "", "subject_key": row[4] or ""}
+        else:
+            payload = {"kind": kind, "ref": int(row[0]),
+                       "subject": row[1] or "", "subject_kind": row[2] or "",
+                       "first_ts": round(float(row[3] or 0), 3)}
+        return _sha(json.dumps(payload, ensure_ascii=False, sort_keys=True))
+
+    def _event_row(self, kind, ref):
+        _, _, q = self._event_source(kind)
+        return self.db.execute(q, (int(ref),)).fetchone()
+
+    def event_gap(self, kind, limit=None):
+        """库里有、台账没开证的行。返回 [(id, 创建时间)]。"""
+        table, col, _ = self._event_source(kind)
+        q = ("SELECT x.id, x.%s FROM %s x"
+             " LEFT JOIN event_birth eb"
+             " ON eb.kind=? AND eb.ref=CAST(x.id AS TEXT)"
+             " WHERE eb.ref IS NULL ORDER BY x.id" % (col, table))
+        args = [kind]
+        if limit:
+            q += " LIMIT ?"
+            args.append(int(limit))
+        return [(int(r[0]), float(r[1] or 0)) for r in self.db.execute(q, args)]
+
+    def event_stats(self, kind):
+        table, _, _ = self._event_source(kind)
+        total = int(self.db.execute("SELECT COUNT(*) FROM %s" % table).fetchone()[0])
+        stamped = int(self.db.execute(
+            "SELECT COUNT(*) FROM event_birth WHERE kind=? AND seq>0",
+            (kind,)).fetchone()[0])
+        legacy = int(self.db.execute(
+            "SELECT COUNT(*) FROM event_birth WHERE kind=? AND seq=0",
+            (kind,)).fetchone()[0])
+        return {"total": total, "stamped": stamped, "legacy": legacy,
+                "gap": len(self.event_gap(kind))}
+
+    def stamp_event(self, kind, ref, ts=None):
+        """给一行补出生证：链上写一条 kind 事件，台账记 hash/seq。"""
+        row = self._event_row(kind, ref)
+        if row is None:
+            return None
+        h = self._event_hash(kind, row)
+        created = float(ts if ts is not None else
+                        (row[5] if kind == "habit" else row[3]) or 0)
+        label = "习惯" if kind == "habit" else "印象"
+        note = "%s#%s 出生证（原记录于 %s）" % (
+            label, ref, time.strftime("%m-%d %H:%M", time.localtime(created)))
+        seq = self.append(kind, note, ts=created)
+        self.db.execute(
+            "INSERT OR REPLACE INTO event_birth(kind,ref,hash,seq,ts)"
+            " VALUES(?,?,?,?,?)", (kind, str(ref), h, int(seq), created))
+        self.db.commit()
+        return seq
+
+    def backfill_events(self, kind):
+        """首次启用：旧行只记 seq=0 + 一条 kind_root，不逐条补链。"""
+        table, col, _ = self._event_source(kind)
+        key = "event_since_" + kind
+        r = self.db.execute(
+            "SELECT val FROM timeline_meta WHERE key=?", (key,)).fetchone()
+        if r:
+            return {"kind": kind, "skipped": True, "legacy": 0}
+        since = time.time()
+        rows = self.db.execute(
+            "SELECT id FROM %s ORDER BY id" % table).fetchall()
+        n = 0
+        for row in rows:
+            full = self._event_row(kind, row[0])
+            if full is None:
+                continue
+            h = self._event_hash(kind, full)
+            created = float(full[5] if kind == "habit" else full[3]) or 0
+            self.db.execute(
+                "INSERT OR REPLACE INTO event_birth(kind,ref,hash,seq,ts)"
+                " VALUES(?,?,?,0,?)", (kind, str(row[0]), h, created))
+            n += 1
+        self.db.execute(
+            "INSERT OR REPLACE INTO timeline_meta(key,val) VALUES(?,?)",
+            (key, str(since)))
+        self.db.commit()
+        label = "习惯" if kind == "habit" else "印象"
+        self.append(kind + "_root",
+                    "%s 台账从此刻起（旧行 %d 条只记 seq=0，不逐条补链）"
+                    % (label, n), ts=since)
+        return {"kind": kind, "skipped": False, "legacy": n}
+
+    def repair_event(self, kind, limit=50):
+        """补「行进了库、证没开」的洞。返回 (补上, 补不上)。"""
+        table, col, _ = self._event_source(kind)
+        key = "event_since_" + kind
+        r = self.db.execute(
+            "SELECT val FROM timeline_meta WHERE key=?", (key,)).fetchone()
+        if not r:
+            self.backfill_events(kind)
+            r = self.db.execute(
+                "SELECT val FROM timeline_meta WHERE key=?", (key,)).fetchone()
+        since = float(r[0]) if r else 0.0
+        fixed = failed = 0
+        for ref, created in self.event_gap(kind, limit=limit):
+            if created and created < since:
+                continue          # 启用前的旧行：backfill 已记 seq=0
+            try:
+                self.stamp_event(kind, ref, ts=created)
+                fixed += 1
+            except Exception as e:
+                failed += 1
+                print("[timeline] %s#%s 出生证补不上：%s: %s"
+                      % (kind, ref, type(e).__name__, e))
+        return fixed, failed

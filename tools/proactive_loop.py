@@ -36,8 +36,7 @@ def napcat_alive():
     try:
         import requests
         r = requests.post("http://127.0.0.1:6700/get_login_info", json={},
-                          headers={"Authorization": "Bearer " + os.environ.get(
-                              "NAPCAT_TOKEN", "qqai-dsh-http-2026")},
+                          headers={"Authorization": "Bearer qqai-dsh-http-2026"},
                           timeout=5)
         return r.status_code == 200 and bool((r.json().get("data") or {}).get("user_id"))
     except Exception:

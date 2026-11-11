@@ -48,12 +48,23 @@ def pad_of(mood, sero=None, dopa=None, cort=None, oxy=None):
     k_a = 0.6 * dopa + 0.4 * cort
     k_d = 0.6 * oxy + 0.4 * (1.0 - cort)
 
-    p = (mood - MOOD_NEUTRAL) * 2.0
+    # 🔧 2026-11-09：P 轴原来只读 mood 那个慢量，而 mood 一整天都贴着 0.5，
+    #    于是 P 恒等于 0.00 —— 提示语永远说不出「心情好/心情差」，
+    #    只剩 A、D 两个轴在响，看着就像情绪一成不变。
+    #    愉悦本来也是生理的：血清素和多巴胺高、皮质醇低，人就是舒服的。
+    #    所以 P 改成「心境那一份」和「四激素推出来那一份」各占一半。
+    p_mood = (mood - MOOD_NEUTRAL) * 2.0
+    p_life = ((sero - H_BASE["h_sero"]) * 1.8
+              + (dopa - H_BASE["h_dopa"]) * 0.9
+              - (cort - H_BASE["h_cort"]) * 1.6
+              + (oxy - H_BASE["h_oxy"]) * 0.5)
+    p = 0.5 * p_mood + 0.5 * max(-1.0, min(1.0, p_life))
     a = (k_a - a0) * SCALE
     d = (k_d - d0) * SCALE
     p, a, d = (round(max(-1.0, min(1.0, x)), 3) for x in (p, a, d))
     return {"p": p, "a": a, "d": d, "label": pad_label(p, a),
-            "src": {"mood": round(mood, 3),
+            "src": {"mood": round(mood, 3), "p_mood": round(p_mood, 3),
+                    "p_life": round(p_life, 3),
                     "sero": round(sero, 3), "dopa": round(dopa, 3),
                     "cort": round(cort, 3), "oxy": round(oxy, 3)}}
 
@@ -108,10 +119,15 @@ def style_hint(pad):
     elif p <= -0.12:
         bits.append("心情不太好")
     # 唤醒轴：管语速和话量，是最容易被听出来的那一维
+    # 🔧 2026-11-09：高唤醒不等于「劲头足」。皮质醇高的时候 A 也会高，
+    #    但那时候人是躁、是绷，不是有精神 —— 同一个 A，P 是正还是负，读法相反。
     if a >= 0.30:
-        bits.append("劲头足，话会多一点、句子会长")
+        if p <= -0.12:
+            bits.append("心里有点躁，话会冲、忍不太住")
+        else:
+            bits.append("劲头足，话会多一点、句子会长")
     elif a >= 0.12:
-        bits.append("有点精神")
+        bits.append("有点精神" if p >= -0.12 else "有点绷")
     elif a <= -0.45:
         bits.append("没什么劲，话短、懒得绕")
     elif a <= -0.12:

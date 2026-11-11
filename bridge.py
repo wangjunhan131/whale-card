@@ -22,6 +22,7 @@
   - 服务没起来就**自己拉起来**，等它 /health 通。DSH 会话里没人会记得先起服务。
   - 输出一律 UTF-8。Windows 控制台默认 GBK，中文会 UnicodeEncodeError。
 """
+import io
 import json
 import os
 import subprocess
@@ -49,8 +50,43 @@ def _fix_stdout():
             pass
 
 
+def _api_token():
+    """读本机 API token（V7 第 17 件）。
+
+    为什么要它：服务端「没带 token 的调用方，自报 source 一律降级成
+    unverified:xxx」。bridge 是本地可信进程，带上 token 才不至于让
+    「他自己说的话」在库里被标成来路不明。
+    token 由服务端首启自动生成：<卡目录>/qq_state/api_token.txt。
+    """
+    cand = []
+    if os.environ.get("WHALE_CARD_DIR"):
+        cand.append(os.environ["WHALE_CARD_DIR"])
+    cand.append(os.getcwd())
+    cand.append(os.path.dirname(os.path.abspath(__file__)))
+    for root in cand:
+        p = os.path.join(root, "qq_state", "api_token.txt")
+        try:
+            t = io.open(p, encoding="utf-8").read().strip()
+        except OSError:
+            continue
+        if t:
+            return t
+    return ""
+
+
+def _headers(extra=None):
+    h = {"Content-Type": "application/json; charset=utf-8"}
+    t = _api_token()
+    if t:
+        h["X-Whale-Token"] = t
+    if extra:
+        h.update(extra)
+    return h
+
+
 def _get(path, timeout=5.0):
-    req = urllib.request.Request(BASE + path, method="GET")
+    req = urllib.request.Request(BASE + path, method="GET",
+                                 headers=_headers())
     with urllib.request.urlopen(req, timeout=timeout) as r:
         return json.loads(r.read().decode("utf-8"))
 
@@ -58,8 +94,7 @@ def _get(path, timeout=5.0):
 def _post(path, obj, timeout=30.0):
     raw = json.dumps(obj, ensure_ascii=False).encode("utf-8")
     req = urllib.request.Request(
-        BASE + path, data=raw, method="POST",
-        headers={"Content-Type": "application/json; charset=utf-8"})
+        BASE + path, data=raw, method="POST", headers=_headers())
     with urllib.request.urlopen(req, timeout=timeout) as r:
         return json.loads(r.read().decode("utf-8"))
 
@@ -287,10 +322,52 @@ def cmd_note(argv):
     return 0
 
 
+def cmd_log(argv):
+    """工作日志（那张「桌子」）：不带参数看最近几条，带参数就写一条。
+
+    用法：
+        python bridge.py log                      → 最近 8 条
+        python bridge.py log "干了什么" "怎么干的/看到什么数" "下一步"
+        python bridge.py log --kind bug "标题" "正文"
+
+    为什么要它：卡记的是「我们之间发生过什么」，记不住「我上一轮改到第几行」。
+    换窗口/换电脑之后，新开的那一轮先看这张表，就知道上一轮干到哪、为什么这么干。
+    """
+    import argparse
+    ap = argparse.ArgumentParser(prog="bridge.py log")
+    ap.add_argument("title", nargs="?", default=None, help="一句话：干了什么")
+    ap.add_argument("body", nargs="?", default="", help="怎么干的 / 看到什么数")
+    ap.add_argument("next_step", nargs="?", default="", help="下一步")
+    ap.add_argument("--kind", default="work", help="work / bug / decision / note")
+    ap.add_argument("--n", type=int, default=8, help="不带参数时列几条")
+    args = ap.parse_args(argv)
+    _need_server()
+    if not args.title:
+        out = _get("/worklog?n=%d" % max(1, args.n))
+        items = out.get("items") or []
+        if not items:
+            print("工作日志还是空的。")
+            return 0
+        for it in items:
+            print("%s  [%s] %s" % (time.strftime("%m-%d %H:%M",
+                                                 time.localtime(float(it.get("ts") or 0))),
+                                   it.get("kind") or "work", it.get("title") or ""))
+            if it.get("body"):
+                print("      %s" % it["body"])
+            if it.get("next_step"):
+                print("      → %s" % it["next_step"])
+        return 0
+    out = _post("/worklog", {"title": args.title, "body": args.body,
+                             "next_step": args.next_step, "kind": args.kind})
+    print("[bridge] 日志已记：id=%s" % out.get("id"), file=sys.stderr)
+    return 0
+
+
 CMDS = {
     "ask": cmd_ask,
     "report": cmd_report,
     "note": cmd_note,
+    "log": cmd_log,
     "health": cmd_health,
     "status": cmd_status,
     "recall": cmd_recall,

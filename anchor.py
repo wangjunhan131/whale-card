@@ -189,6 +189,23 @@ def check(db_path=None, verbose=True):
         return {"verdict": "first", "ok": True, "state": state,
                 "reason": "还没有卡外锚，本次写入", "anchor": None}
 
+    # ①.0 签名先验：锚被改过的话，后面那些「条数/链头」的比较全是在跟假证据比。
+    #     旧版锚没有签名，不报错、只标注（不能因为升级就把老锚判成坏）。
+    _sig = (best or {}).get("sig") or ""
+    if _sig:
+        try:
+            import seal as _cp
+            _key = _cp.load_key(_db_label(db_path))
+            _body = {k: v for k, v in best.items() if k != "sig"}
+            _want = _cp.sign(_body, _key)
+            if _want != _sig:
+                return {"verdict": "anchor_tampered", "ok": False, "state": state,
+                        "anchor": best,
+                        "reason": "锚的签名对不上：这份 anchor.json 被改过（或不是这把钥匙签的），"
+                                  "先别信它记的条数和链头"}
+        except Exception as _e:
+            _sig = ""
+
     a_count = int(best.get("count") or 0)
     a_hash = best.get("head_hash") or ""
     a_ts = float(best.get("last_ts") or 0)
@@ -233,6 +250,41 @@ def check(db_path=None, verbose=True):
             "reason": "锚一致（锚 %d 条，卡 %d 条）" % (a_count, state["count"])}
 
 
+
+ANCHOR_VERSION = 1
+
+
+def _device_id():
+    """三元分离 §5：锚里记下「哪台机器」的卡，跨机器还原时才看得见。"""
+    try:
+        import device as _dev
+        return _dev.device_id()
+    except Exception as e:      # 取不到就不记，不因为这条让落锚失败
+        sys.stderr.write("[anchor] 取不到 device_id（%s）\n" % e)
+        return ""
+
+
+def _sign_rec(rec, db_label):
+    """给锚签个名 —— 原来 anchor.json 是明文，谁把 count 改大一点都看不出来。
+
+    用卡自己的检查点密钥（`checkpoint.load_key`），不另起一套密钥：
+    同一张卡的所有「防篡改」的东西，钥匙就该是同一把。
+    """
+    try:
+        import seal as checkpoint  # 名字沿用以少改调用点
+        key = checkpoint.load_key(db_label)
+        body = {k: v for k, v in rec.items() if k != "sig"}
+        return checkpoint.sign(body, key)
+    except Exception:
+        return ""
+
+
+def _db_label(db_path):
+    if isinstance(db_path, sqlite3.Connection):
+        return os.path.abspath(_conn_path(db_path) or DB_PATH)
+    return os.path.abspath(db_path or DB_PATH)
+
+
 def write(db_path=None, extra=None, force=False, throttle=30.0):
     """把当前卡的状态写成锚。条数比锚少时**拒绝写**（除非 force）。
 
@@ -250,6 +302,15 @@ def write(db_path=None, extra=None, force=False, throttle=30.0):
     else:
         db_label = db_path or DB_PATH
     db_label = os.path.abspath(db_label)
+    # 🔧 2026-11-11（真事故）：拿测试库跑压测的时候，live 卡的锚被写脏了一次 ——
+    # anchor.json 里的 `db` 变成了临时库路径、签名对不上，/health 直接报
+    # anchor_tampered。原因是「状态读的是哪张卡」和「锚写到哪个文件」
+    # 在极端路径下能对不上。这里加一条硬护栏：状态自己的 db 和要写的
+    # 锚标签不是一个文件的，绝不落盘（宁可这一轮不写锚，也不写错证据）。
+    if str(state.get("db") or "") and os.path.abspath(str(state["db"])) != db_label:
+        sys.stderr.write("[anchor] 拒绝写锚：状态来自 %s，锚标签是 %s\n"
+                         % (state.get("db"), db_label))
+        return None
 
     local, ext = _paths(db_path)
     best, _ = _best_anchor(local, ext)
@@ -278,7 +339,8 @@ def write(db_path=None, extra=None, force=False, throttle=30.0):
             return best, None
 
     rec = {
-        "version": 1,
+        "version": ANCHOR_VERSION,
+        "device_id": _device_id(),
         "db": db_label,
         "count": state["count"],
         "head_seq": state["head_seq"],
@@ -289,6 +351,7 @@ def write(db_path=None, extra=None, force=False, throttle=30.0):
     if extra:
         rec["extra"] = extra
 
+    rec["sig"] = _sign_rec(rec, db_label)
     _write_json(local, rec)
     # 卡外那份写失败不影响主流程（比如 U 盘只读、家目录没权限），但要提示
     err = None

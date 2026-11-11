@@ -246,6 +246,8 @@ def step_land(dry=False):
         dry=dry,
         anchor_home=os.environ.get("WHALE_ANCHOR_HOME") or None,
         dsh_home=os.environ.get("DSH_HOME") or None,
+        migrate=True,   # 一键落地 = 同一张卡搬到这台机器（不是分叉）
+        fork=False,
     )
     try:
         rc = P.cmd_land(ns)

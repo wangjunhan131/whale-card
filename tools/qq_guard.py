@@ -313,6 +313,27 @@ def looks_like_bot(text):
     return False
 
 
+def _api_headers():
+    """带 X-Whale-Token（V7 第 17 件）。
+
+    不带的后果不是「写不进去」，而是**来源被降级**：服务端会把
+    source=qq 改写成 unverified:qq —— 于是一整条 QQ 通道的话，
+    在库里全成了「来路不明」，以后按来源筛就筛不出来。
+    token 由 mind_server 启动时生成，位置 <卡目录>/qq_state/api_token.txt。
+    """
+    h = {"Content-Type": "application/json"}
+    for root in (ROOT, os.getcwd(), os.path.dirname(os.path.abspath(__file__))):
+        try:
+            t = io.open(os.path.join(root, "qq_state", "api_token.txt"),
+                        encoding="utf-8").read().strip()
+        except OSError:
+            continue
+        if t:
+            h["X-Whale-Token"] = t
+            break
+    return h
+
+
 def remember(text, source, speaker="other", region="episode", salience=0.5,
              about_uid="", pool="long"):
     """把一条消息写进卡。失败不抛 —— 值守不能因为卡忙就停。
@@ -331,12 +352,12 @@ def remember(text, source, speaker="other", region="episode", salience=0.5,
     try:
         req = urllib.request.Request(
             MIND + "/remember",
+            headers=_api_headers(),
             data=json.dumps({"text": text, "source": source,
                              "speaker": speaker, "region": region,
                              "pool": pool,
                              "salience": salience,
-                             "about_uid": str(about_uid or "")}).encode("utf-8"),
-            headers={"Content-Type": "application/json"})
+                             "about_uid": str(about_uid or "")}).encode("utf-8"))
         with urllib.request.urlopen(req, timeout=30) as r:
             return json.loads(r.read().decode("utf-8"))
     except Exception as e:
@@ -931,8 +952,39 @@ def human_gap(text, rnd=None):
 
 
 # ---------------------------------------------------------------- 常驻
+def _pid_alive(pid):
+    """这个 pid 还在跑吗（Windows 用 OpenProcess 探，不依赖 psutil）。"""
+    try:
+        import ctypes
+        k32 = ctypes.windll.kernel32
+        h = k32.OpenProcess(0x1000, False, int(pid))   # QUERY_LIMITED_INFORMATION
+        if not h:
+            return False
+        code = ctypes.c_ulong()
+        ok = k32.GetExitCodeProcess(h, ctypes.byref(code))
+        k32.CloseHandle(h)
+        return bool(ok) and code.value == 259          # STILL_ACTIVE
+    except Exception:
+        return False
+
+
+def _pidfile_value():
+    try:
+        with io.open(PIDF, "r", encoding="utf-8") as f:
+            return int((f.read() or "0").strip() or 0)
+    except Exception:
+        return 0
+
+
 def run_forever(interval=5):
     _ensure()
+    # 单例闸：2026-11-09 之前这里只写 pid 不检查，于是重启一次就多一份。
+    # 实测同时挂了 7 个常驻，全都盯着同一批群、抢着写同一个 seen 水位线 ——
+    # 重复进卡、配额重复记账，还对 NapCat 平白多出七倍轮询。
+    _old = _pidfile_value()
+    if _old and _old != os.getpid() and _pid_alive(_old):
+        print("[qq_guard] 已经有一份在跑（pid=%d），本次不重复启动" % _old)
+        return 1
     if os.path.exists(STOP):
         os.remove(STOP)
     with io.open(PIDF, "w", encoding="utf-8") as f:

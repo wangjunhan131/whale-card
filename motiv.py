@@ -107,7 +107,11 @@ def bump(d, kind, amount=0.15):
     d = normalize(d)
     if kind not in d:
         return d
-    d[kind] = max(0.0, min(1.5, d[kind] - float(amount)))
+    # 2026-11-09：下面这个 0.0 是「一点都不想他」—— 连着聊十几句就会踩到，
+    # 然后要五个小时才回得来。人不是这样的：聊得越多越麻木，但不会归零。
+    # 所以压一个地板：最多泄到底线的一小截。
+    _floor = 0.15
+    d[kind] = max(min(_floor, float(b)), min(1.5, d[kind] - float(amount)))
     return d
 
 

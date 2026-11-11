@@ -321,8 +321,8 @@ def card_metrics(db_path=DEFAULT_DB):
 
         # 每个区自己的遗忘曲线开没开 + 今天这个区挤不挤
         try:
-            import card2 as _c2
-            out["region_load"] = _c2.region_snapshot_from_db(c, now)
+            import poolmath as _pm
+            out["region_load"] = _pm.region_snapshot_from_db(c, now)
         except Exception:
             pass
 
@@ -629,16 +629,16 @@ def forget_curve(db_path=DEFAULT_DB):
     不自己另写一份衰减公式 —— 那样画出来的曲线只是"看起来像"，
     改常量时图和实际行为会悄悄对不上。
     """
-    import card2
+    import poolmath as _pm
     now = time.time()
     days = [0, 1, 2, 3, 5, 7, 10, 14, 21, 30, 45, 60, 90, 120, 180, 270, 371, 540]
     out = {"days": days, "short": [], "mid": [], "long": [], "core": []}
     for d in days:
         t = now - d * 86400.0
-        out["short"].append(round(card2.weight_now(1.0, card2.POOL_SHORT, t, now), 4))
-        out["mid"].append(round(card2.weight_now(1.0, card2.POOL_MEDIUM, t, now), 4))
-        out["long"].append(round(card2.weight_now(1.0, card2.POOL_LONG, t, now), 4))
-        out["core"].append(round(card2.weight_now(1.0, card2.POOL_LONG, t, now,
+        out["short"].append(round(_pm.weight_now(1.0, _pm.POOL_SHORT, t, now), 4))
+        out["mid"].append(round(_pm.weight_now(1.0, _pm.POOL_MEDIUM, t, now), 4))
+        out["long"].append(round(_pm.weight_now(1.0, _pm.POOL_LONG, t, now), 4))
+        out["core"].append(round(_pm.weight_now(1.0, _pm.POOL_LONG, t, now,
                                                  tier="core_mutable"), 4))
     return out
 
@@ -648,17 +648,17 @@ def media_curve(db_path=DEFAULT_DB):
 
     同样不另写公式 —— 调 card2.media_weight_now，和 tick 里删帧用的是同一个函数。
     """
-    import card2
+    import poolmath as _pm
     now = time.time()
     days = [0, 1, 2, 3, 5, 7, 10, 14, 21, 30, 45, 60, 90, 120, 180, 270, 371, 540]
     img = []
     for d in days:
-        img.append(round(card2.media_weight_now(
+        img.append(round(_pm.media_weight_now(
             1.0, now - d * 86400.0, now), 4))
     return {"days": days, "image": img,
-            "drop_w": card2.MEDIA_DROP_W,
-            "b": card2.MEDIA_DECAY_B,
-            "tau_days": card2.MEDIA_TAU_DAYS,
+            "drop_w": _pm.MEDIA_DROP_W,
+            "b": _pm.MEDIA_DECAY_B,
+            "tau_days": _pm.MEDIA_TAU_DAYS,
             "text_mid": forget_curve(db_path)["mid"]}
 
 
@@ -783,9 +783,12 @@ def card_integrity(db_path=DEFAULT_DB):
             if os.path.exists(p):
                 man = json.load(open(p, encoding="utf-8"))
                 files = man.get("files") or []
+                if isinstance(files, dict):   # schema v1：{"路径": {...}}
+                    files = list(files.values())
                 out["pack"] = {
                     "n": len(files),
-                    "mb": round(sum(int(f.get("size") or 0) for f in files) / 1048576.0, 1),
+                    "mb": round(sum(int(f.get("bytes") or f.get("size") or 0)
+                                    for f in files) / 1048576.0, 1),
                     "built_at": man.get("built_at"),
                     "wal_before": (man.get("wal") or {}).get("wal_before_mb"),
                 }
@@ -2456,6 +2459,26 @@ function viewDash(){
           "", "DIM · "+(m.usable_emb||0)+" COVER")+
     '</div>');
 
+  /* ── ①b 对账与告警（V7 第 15 件：红了的东西得看得见） ── */
+  var rc = (h.reconcile) || {};
+  var rcRed = rc.red || [], rcWarn = rc.warn || [];
+  var rcRows = "";
+  if(!rcRed.length && !rcWarn.length){
+    rcRows = '<div style="color:#2fd07d">全绿 · 对账通过（原文/习惯/印象/工作台/维护心跳/链与锚都对得上）</div>';
+  }else{
+    rcRed.forEach(function(x){ rcRows += '<div style="color:#ff6b6b;margin:1px 0">✗ '+esc(x)+'</div>'; });
+    rcWarn.forEach(function(x){ rcRows += '<div style="color:#e8b44a;margin:1px 0">! '+esc(x)+'</div>'; });
+  }
+  var ck = (rc.checks||{});
+  var line2 = [];
+  ["dialogue_today","habits_n","impression_n","archive_n","worklog_n","maint_last_h","soft_fail","queue"].forEach(function(k){
+    if(ck[k]!==undefined && ck[k]!==null) line2.push(esc(k)+" "+esc(String(typeof ck[k]==="object"?JSON.stringify(ck[k]):ck[k])));
+  });
+  if(ck.bridge && ck.bridge.tools!==undefined) line2.push("桥工具 "+esc(String(ck.bridge.tools)));
+  out += cardHTML("c12","HEALTH / 对账与告警",
+    rcRows + (line2.length ? '<div style="color:#6f7b8a;margin-top:6px">'+line2.join(" · ")+'</div>' : ""),
+    "红了说明账实对不上 · 黄了说明还没到但不能一直不管");
+
   /* ── ② 激素场 ── */
   /* 采样太少时后端会自动换更长窗口 —— 标题和副标题都按真实跨度写，
      不能把 3 天的线挂在"(24H)"下面。 */
@@ -2925,9 +2948,12 @@ function viewMem(){
       {fmt:function(it){ return it.n+"<em>条</em>"; }}),
     ((m.synapse||{}).edges||0)+" EDGES / 总");
     /* ── 印象（V5.5）：同一情境下反复出现的反应，才叫印象 ── */
-  out+=cardHTML("c4","IMPRESSION / 印象",
+  out+=cardHTML("c6","IMPRESSION / 印象",
     '<div id="impList" class="legend">加载中…</div>',
-    "同一情境反复出现同一种反应 · 覆盖要靠更多证据");
+    "同一情境反复出现同一种反应");
+out+=cardHTML("c6","DRIVES / 欲望 · 习惯 · 梦",
+    '<div id="layerBox" class="legend">加载中…</div>',
+    "想不想开口 · 说话的口气 · 攒够原文才压");
 out+=cardHTML("c12","QUERY / 查一句话会想起什么",
     '<div style="display:flex;gap:8px;margin-bottom:10px">'+
     '<input id="qIn" placeholder="比如：白米饭" style="flex:1;background:#0e131a;'+
@@ -3022,7 +3048,10 @@ function _p95(arr){
 function loadImpression(){
   var box=document.getElementById("impList");
   if(!box) return;
-  API("/impression?limit=8").then(function(r){
+  /* min_w 取 0.29 = 同一情境攒到 3 次的那一档权重（impression.weight_of(3)）。
+     以前不带 min_w，后端默认 0 —— n=1 的碎句也全塞进来，跟下面这句
+     「同一情境至少出现 3 次」的文案正好相反。 */
+  API("/impression?limit=8&min_w=0.29").then(function(r){
     var list=(r&&r.impressions)||[];
     if(!list.length){ box.innerHTML="<span style='color:#3f5164'>还没有攒够的印象（同一情境至少出现 3 次）</span>"; return; }
     box.innerHTML=list.map(function(it){
@@ -3033,6 +3062,51 @@ function loadImpression(){
         ' <span style="color:#6f7b8a">×'+esc(String(it.n||0))+'</span> <span style="color:#8ea3bb">w='+Number(it.w||0).toFixed(2)+'</span> '+bars+'</div>';
     }).join("");
   }).catch(function(){ box.textContent="印象接口没打开"; });
+}
+
+function loadLayers(){
+  var box=document.getElementById("layerBox");
+  if(!box) return;
+  var d=S.data||{}, mv=d.motiv||{}, hb=d.habits||[], dr=d.dream||{};
+  /* 三层以前在控制台上没有任何影子：动机进了上下文、习惯挖矿成了维护线程的一部分、
+     梦层攒原文等压缩 —— 但面板上一个字都看不到，等于「装了也没人知道它在不在动」。 */
+  var out=[];
+  var ds=mv.drives||mv.pool||{};
+  var keys=Object.keys(ds);
+  if(keys.length){
+    out.push('<div style="margin:2px 0 6px"><span style="color:#e8b44a">动机</span> '+
+      keys.map(function(k){
+        var v=Number(ds[k]&&ds[k].value!=null?ds[k].value:ds[k])||0;
+        return '<span style="color:#8ea3bb">'+esc(k)+'</span> '+
+          '<b style="color:'+(v>0.7?'#2fd07d':'#d5dbe4')+'">'+v.toFixed(2)+'</b>';
+      }).join(" · ")+'</div>');
+    if(mv.urge||mv.want){
+      out.push('<div style="color:#6f7b8a;margin-bottom:6px">当前想不想开口：'+
+        esc(mv.urge||mv.want||"")+'</div>');
+    }
+  }else{
+    out.push('<div style="color:#3f5164;margin-bottom:6px">动机：还没有快照（驱力都还在基线）</div>');
+  }
+  out.push('<div style="margin:6px 0"><span style="color:#e8b44a">习惯</span> '+
+    (hb.length? hb.map(function(h){
+      return esc(h.key)+' <span style="color:#6f7b8a">'+
+        esc(String(h.status))+' ×'+esc(String(h.hits))+'/'+esc(String(h.days))+'天</span>';
+    }).join(" · ") : '<span style="color:#3f5164">还没挖出来（要攒到至少 3 次、2 天）</span>')+'</div>');
+  var wl=d.worklog||[];
+  out.push('<div style="margin:6px 0 4px"><span style="color:#e8b44a">工作台</span> '+
+    (wl.length? wl.map(function(w){
+      var t=new Date((Number(w.ts)||0)*1000);
+      var hh=("0"+t.getHours()).slice(-2)+":"+("0"+t.getMinutes()).slice(-2);
+      return '<div style="color:#9fb0c4">'+hh+' '+esc(String(w.title||""))+
+        (w.next_step?' <span style="color:#6f7b8a">→ '+esc(String(w.next_step))+'</span>':'')+
+        '</div>';
+    }).join("") : '<span style="color:#3f5164">还没有记（干完活我该在这儿写一行）</span>')+'</div>');
+  out.push('<div style="margin:6px 0"><span style="color:#e8b44a">梦</span> '+
+    '待压缩 <b>'+esc(String(dr.pending||0))+'</b> 条 · 空闲 '+
+    Number(dr.idle_hours||0).toFixed(1)+'h · '+
+    (dr.due?'<b style="color:#e8b44a">到点了，该做梦</b>':'<span style="color:#3f5164">还没到</span>')+
+    '</div>');
+  box.innerHTML=out.join("");
 }
 
 function drawEmo(){
@@ -4570,6 +4644,11 @@ function refresh(){
     }
     renderSide();
     if(S.tab==="dash"||S.tab==="mem") render(); else renderSide();
+    /* 印象卡走独立接口（/impression），刷新时补拉一次。
+       2026-11-09 发现：loadImpression 定义了却**没有任何调用点**，
+       所以那张卡永远停在「加载中…」—— 面板看起来在，其实一直空着。 */
+    if(document.getElementById("impList")) loadImpression();
+    if(document.getElementById("layerBox")) loadLayers();
   }).catch(function(e){
     S.alive=false; S.stamp="刷新失败："+e; renderSide();
   });

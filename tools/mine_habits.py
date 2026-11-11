@@ -36,25 +36,14 @@ DEFAULT_OUT = os.path.join(ROOT, "docs", "habits-report.md")
 DEFAULT_JSON = os.path.join(ROOT, "docs", "habits-candidates.json")
 
 # 停用：虚词、连词、代词开头这类"谁都会说"的东西
-STOP_PHRASES = set("""
-的 了 是 在 我 你 他 她 它 们 这 那 有 没 就 都 也 又 还 很 太 不 要 会 能 可 对 吧 啊 呀 呢 哦 嗯 嗯嗯 哈哈 嘿嘿 嘻嘻
-一个 一下 一点 一些 这个 那个 这样 那样 什么 怎么 为什么 因为 所以 但是 不过 而且 然后 如果 要是 虽然 或者 还是 就是 只是 已经 现在 时候
-我们 你们 他们 自己 别人 东西 事情 问题 地方 时间 感觉 觉得 知道 应该 可以 需要 不用 不是 没有 不会 不能 不要 就是 还有 也是 都是
-要是你 你要是 我可以 你可以 我就不 你不 我就 我就说 我不是 我又 你也不 我也不
-""".split())
-
-# 纯虚词组成的碎片（"的你""得我""了我"）不是口癖，是 n-gram 切出来的渣
-GRAM_STOP_CHARS = set("的得地了着过是我你他她它们在有没就都也又还太不要会能可对吧啊呀呢哦嗯嘛啦咯哈哟喂嘿唉")
-
-
-def is_gram_junk(g):
-    """全是虚词/单字功能词拼起来的 -> 丢。"""
-    return bool(g) and all(ch in GRAM_STOP_CHARS for ch in g)
-
-
-# 开发汇报词（默认排除的补充过滤）
-DEV_WORDS = ("测试", "回归", "提交", "代码", "文件", "接口", "配置", "数据库", "脚本",
-             "日志", "字段", "函数", "报错", "修复", "验收", "文档", "仓库", "部署")
+# 挖矿逻辑已经搬进 habits.py（线上维护线程直接调它）。
+# 这里只留别名，免得命令行报告和线上各用一套口径、越走越远。
+STOP_PHRASES = H._STOP_PHRASES
+GRAM_STOP_CHARS = H._GRAM_STOP_CHARS
+DEV_WORDS = H._DEV_WORDS
+is_gram_junk = H._gram_all_function
+day_of = H._day_of
+has_dev_word = H.has_dev_word
 
 
 def open_ro(path):
@@ -62,17 +51,6 @@ def open_ro(path):
     con = sqlite3.connect("file:%s?mode=ro" % p, uri=True, timeout=10.0)
     con.row_factory = sqlite3.Row
     return con
-
-
-def day_of(ts):
-    try:
-        return time.strftime("%Y-%m-%d", time.localtime(float(ts)))
-    except Exception:
-        return "?"
-
-
-def has_dev_word(s):
-    return any(w in s for w in DEV_WORDS)
 
 
 def load_corpus(path):
@@ -104,19 +82,9 @@ def load_corpus(path):
 
 
 def collect(con):
-    rows = [dict(r) for r in con.execute(
-        "SELECT id, ts, role, text FROM dialogue ORDER BY id")]
-    mine, theirs = [], []
-    for r in rows:
-        text = (r.get("text") or "").strip()
-        if not text:
-            continue
-        if r["role"] == "assistant":
-            r["report_like"] = H.is_report_like(text) or has_dev_word(text)
-            mine.append(r)
-        else:
-            theirs.append(r)
-    return mine, theirs
+    """她自己说的 / 别人说的（实现见 habits.collect_dialogue）。"""
+    return H.collect_dialogue(con)
+
 
 
 def shape_stats(texts):
@@ -168,102 +136,10 @@ def ngram_stats(texts, lo=1, hi=3, top=20):
 
 
 def phrase_candidates(mine, theirs, include_reports=False, bg_rows=None):
-    """候选口头禅：2~4 字，出现在我方回复里，统计次数/天数/用户是否也说。
+    """候选口头禅（实现见 habits.mine_phrases）。"""
+    return H.mine_phrases(mine, theirs, include_reports=include_reports,
+                          bg_rows=bg_rows)
 
-    返回 (cands, totals)，totals 里有聊天段数与背景段数 —— 算 lift 要用。
-    背景默认 = 被判定为"像工作汇报"的那批回复（同一个词在聊天里是不是显著更高频）。
-    用 QQ 语料时改传 bg_rows=别人的话：那时要问的是
-    「这个词是我常说的，还是大家都这么说」—— 这才是口音。
-    """
-    stat = defaultdict(lambda: {"hits": 0, "days": set(), "ids": [], "samples": []})
-    user_stat = Counter()
-    bg_hits = Counter()
-    chat_segs = bg_segs = 0
-
-    if bg_rows:
-        for r in bg_rows:
-            for s in H.segments(r["text"]):
-                bg_segs += 1
-                for g in H.ngrams(s, 2, 4):
-                    if H._HAS_CN_RE.search(g):
-                        bg_hits[g] += 1
-
-    for r in theirs:
-        for s in H.segments(r["text"]):
-            for g in H.ngrams(s, 2, 4):
-                user_stat[g] += 1
-
-    for r in mine:
-        segs = H.segments(r["text"])
-        is_bg = bool(r.get("report_like")) and not bg_rows
-        if is_bg and not include_reports:
-            # 不算进候选，但算进背景频率
-            bg_segs += len(segs)
-            for s in segs:
-                for g in H.ngrams(s, 2, 4):
-                    if H._HAS_CN_RE.search(g):
-                        bg_hits[g] += 1
-            continue
-        chat_segs += len(segs)
-        for s in segs:
-            core = H.strip_punct(s)
-            if len(core) < 2:
-                continue
-            grams = set()
-            # 整段很短（<=8 字）本身就是一个候选；否则取 2~4 字 n-gram
-            if len(core) <= 8:
-                grams.add(core)
-            grams |= H.ngrams(core, 2, 4)
-            for g in grams:
-                if g in STOP_PHRASES or len(g) < 2 or is_gram_junk(g):
-                    continue
-                if H.is_gram_junk(g):          # 词面闸：2 字功能词不算口癖
-                    continue
-                if not H._HAS_CN_RE.search(g):      # 纯英文/数字不算口癖
-                    continue
-                if g.isdigit():
-                    continue
-                st = stat[g]
-                st["hits"] += 1
-                st["days"].add(day_of(r["ts"]))
-                if len(st["ids"]) < 6:
-                    st["ids"].append(r["id"])
-                if len(st["samples"]) < 3:
-                    st["samples"].append(s[:40])
-
-    # 过滤：被更长短语覆盖的短候选（"行吧" 和 "行吧我等着" 同时出现时留长的）
-    keys = [k for k, v in stat.items()
-            if v["hits"] >= H.HAB_CAND_MIN_HITS and len(v["days"]) >= H.HAB_CAND_MIN_DAYS]
-    keys.sort(key=len, reverse=True)
-    keep = []
-    for k in keys:
-        if any(k != o and k in o for o in keep):
-            continue
-        keep.append(k)
-
-    out = []
-    for k in keep:
-        v = stat[k]
-        u = user_stat.get(k, 0)
-        # 区分度：她说得多、用户说得少 → 更像她的口音
-        distinct = round(v["hits"] / float(v["hits"] + u), 3)
-        lift = H.lift_of(v["hits"], chat_segs, bg_hits.get(k, 0), bg_segs)
-        out.append({
-            "key": k,
-            "hits": v["hits"],
-            "days": len(v["days"]),
-            "user_hits": u,
-            "bg_hits": bg_hits.get(k, 0),
-            "distinct": distinct,
-            "lift": lift,
-            "suggest": H.suggest_of(distinct, lift, v["hits"], len(v["days"])),
-            "confidence": H.confidence_of(v["hits"], len(v["days"])),
-            "status": H.status_of(v["hits"], len(v["days"])),
-            "dialogue_ids": v["ids"],
-            "samples": v["samples"],
-        })
-    out.sort(key=lambda x: (x["suggest"] != "keep", -x["lift"], -x["hits"]))
-    return out, {"chat_segments": chat_segs, "bg_segments": bg_segs}
 
 
 def report_md(meta, shape_chat, shape_all, head_chat, tail_chat, cands,
@@ -418,56 +294,13 @@ def main(argv=None):
 
 
 def write_back(db_path, cands, weak_top=0):
-    """把建议保留/待定的候选 upsert 进 habits 表，返回写入条数。
-
-    weak_top > 0 时，额外把 lift 最高、词面最干净的前 N 条标成 weak（弱注入）。
-    为什么要有弱注入：stable 门槛（language 5 次/5 天）在语料还少的时候
-    一条都过不去，这层就白做了；但放宽全局门槛会把噪声放进来。
-    折中：词面闸先过一遍，剩下的允许以"弱"身份进上下文，硬限 3 条。
-    """
-    import sqlite3 as _s
+    """写进 habits 表（实现见 habits.write_candidates）。"""
+    con = sqlite3.connect(db_path, timeout=30.0)
     try:
-        import habits as H
-    except Exception:
-        return 0
-    con = _s.connect(db_path, timeout=30.0)
-    try:
-        H.ensure_table(con)
-        n = 0
-        now = time.time()
-        for c in cands:
-            if c.get("suggest") == "drop":
-                continue
-            hits = int(c.get("hits") or 0)
-            days = int(c.get("days") or 0)
-            status = H.status_of(hits, days, 0, 0, now - 86400, now,
-                                 category="language")
-            H.upsert(con, category="language", key=c["key"], hits=hits,
-                     days=days, first_seen=now - days * 86400.0,
-                     last_seen=now, evidence=c.get("samples") or [],
-                     note="由 mine_habits.py 自动挖出（lift=%.2f，%s）"
-                          % (c.get("lift") or 0, c.get("suggest")),
-                     now=now)
-            n += 1
-        # 弱注入：只挑 keep、词面干净、lift 最高的前 N 条
-        if weak_top > 0:
-            pool = [c for c in cands
-                    if c.get("suggest") == "keep"
-                    and not H.is_gram_junk(c["key"])]
-            pool.sort(key=lambda x: (-(x.get("lift") or 0), -(x.get("hits") or 0)))
-            for c in pool[:int(weak_top)]:
-                hits = int(c.get("hits") or 0)
-                days = int(c.get("days") or 0)
-                H.upsert(con, category="language", key=c["key"], hits=hits,
-                         days=days, first_seen=now - days * 86400.0,
-                         last_seen=now, evidence=c.get("samples") or [],
-                         note="弱注入（语料还少，lift=%.2f）：先借来用，"
-                              "等跨够 5 天再升 stable" % (c.get("lift") or 0),
-                         now=now, force_status=H.ST_WEAK)
-        con.commit()
-        return n
+        return H.write_candidates(con, cands, weak_top=weak_top)
     finally:
         con.close()
+
 
 
 if __name__ == "__main__":

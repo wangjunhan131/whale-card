@@ -14,6 +14,7 @@
          temporal  时序    1.20   同一段对话里挨着发生
          tag       同标签  1.15   同一分区 + 共享实体
          ground    同地点  1.25   同一个地方
+         semantic  语义    1.45~1.80  库里 emb 的余弦最近邻（2026-11-09 加）
     2. 扩散：从直接命中的种子出发，电势沿突触往外传
          pot_next = pot_cur * LAYER_DECAY * synapse_weight
          LAYER_DECAY = 0.75   （V3.4 是 0.5，第三层直接死）
@@ -35,12 +36,37 @@ LAYER_DECAY = 0.75
 POT_MIN_ACTIVATE = 0.05
 D_MAX = 3
 
+# 语义边（2026-11-09）：
+#   病根：temporal 边只是「时间上挨着的另一句话」，沿它扩散出来的「顺带
+#   想起」几乎全是上下句，不是语义相关的事。这里直接用库里已有的 emb
+#   连最近邻（不重新编码），让联想网长出真正的语义边。
+#
+#   阈值怎么定的 —— 先跑了诊断脚本，对真卡前 200 条记忆两两算余弦
+#   （768 维，19900 对）：
+#     两两分布：p50=.426 p75=.486 p90=.544 p95=.583 p99=.681 max=.996
+#               >=.60 占 3.69%，>=.65 占 1.62%，>=.70 占 0.75%
+#     每条 top1：p5=.585 p25=.647 p50=.722
+#     top3 均值：p5=.564 p25=.621 p50=.681
+#   取 0.62：高于两两 p95(.583)，只收相似度前约 3% 的边；又略高于 top1
+#   的 p5(.585)，约九成记忆至少连得到一条，不会把网留空。
+#   评测副本（512 维，96 条）复核：两两 p95=.607、>=.60 占 5.83%、
+#   top1 p5=.599 —— 同一个阈值在两种模型上落在同一分位，不用按维度分叉。
+SEMANTIC_MIN_SIM = 0.62      # 余弦低于它不连边
+SEMANTIC_TOP_N = 3           # 一条最多连 3 个语义近邻，防稠密
+SEMANTIC_DUP_SIM = 0.95      # 两个候选彼此 >=.95 算近重复，只留一个
+SEMANTIC_WEIGHT_MIN = 1.45   # 严格高于 temporal(1.20)，扩散时不被挤掉
+SEMANTIC_WEIGHT_MAX = 1.80   # 越像越粗，始终高于 temporal，扩散时优先
+
+# 每节点边数封顶时，权重相同则按类型优先级留边（语义 > 地点 > 时序 ...）
+KIND_PRIORITY = {"semantic": 5, "ground": 4, "temporal": 3, "tag": 2, "co": 1}
+
 # 关系边类型与基础权重（V5.0 §9.6）
 EDGE_TYPES = {
     "co": 1.00,        # 共激活
     "temporal": 1.20,  # 时序
     "tag": 1.15,       # 同标签
     "ground": 1.25,    # 同地点
+    "semantic": SEMANTIC_WEIGHT_MIN,  # 语义近邻（实际权重按相似度在区间内浮动）
 }
 
 # 建边阈值
@@ -95,6 +121,13 @@ class SynapseNet(object):
         self.db = db
         self._adj = None          # {mem_id: [(other_id, kind, weight)]}
         self._n_at_build = 0
+        # 语义边用的向量缓存：dim -> [ids, 已 L2 归一化的矩阵]
+        # 增量 remember 时只追加新行，避免每写一条就把整库 1300×768 读一遍。
+        self._vec = {}
+        self._vec_count = -1
+        self._vec_max_id = 0
+        self._sem_checked = False
+        self._schema_ok = False
 
     # ---------- 建表 ----------
     def ensure_schema(self):
@@ -114,6 +147,7 @@ class SynapseNet(object):
         c.execute("CREATE INDEX IF NOT EXISTS ix_syn_a ON synapse(a_id)")
         c.execute("CREATE INDEX IF NOT EXISTS ix_syn_b ON synapse(b_id)")
         self.db.commit()
+        self._schema_ok = True
 
     # ---------- 惰性建边 ----------
     def _stale(self):
@@ -137,10 +171,37 @@ class SynapseNet(object):
                 n = self.db.execute("SELECT COUNT(*) FROM mem").fetchone()[0]
                 if n >= 2:
                     return self.rebuild()
+            # 老库兼容：已有 temporal/tag，却几乎没有 semantic → 补一次。
+            # 只在本进程第一次 ensure 时检查，别把 COUNT 挂到每次 recall 上。
+            # 用覆盖率而不是「一条都没有」：万一新记忆先写了几条语义边，
+            # 老记忆仍然是空的，不能因此跳过整库补建。
+            if not self._sem_checked:
+                self._sem_checked = True
+                try:
+                    mem_n = self.db.execute(
+                        "SELECT COUNT(*) FROM mem WHERE COALESCE(dead,0)=0"
+                    ).fetchone()[0]
+                    if (not self._has_kind("semantic")
+                            or self._semantic_covered() < 0.6 * mem_n):
+                        self.backfill_semantic_edges()
+                except Exception as e:
+                    print("[synapse] 语义边批量补建失败: %s" % e)
             return self._adj
         if self._stale():
             return self.rebuild()
         return self._adj
+
+    def _has_kind(self, kind):
+        row = self.db.execute(
+            "SELECT 1 FROM synapse WHERE kind=? LIMIT 1", (kind,)).fetchone()
+        return row is not None
+
+    def _semantic_covered(self):
+        row = self.db.execute(
+            "SELECT COUNT(*) FROM (SELECT a_id AS mid FROM synapse"
+            " WHERE kind='semantic' UNION SELECT b_id FROM synapse"
+            " WHERE kind='semantic')").fetchone()
+        return row[0] or 0
 
     def _load_adj(self):
         """从 synapse 表读进内存，不重建"""
@@ -151,12 +212,244 @@ class SynapseNet(object):
             adj.setdefault(b, []).append((a, k, w))
         for mid in list(adj):
             if len(adj[mid]) > MAX_EDGES_PER_NODE:
-                adj[mid] = sorted(adj[mid], key=lambda x: -x[2])[
-                    :MAX_EDGES_PER_NODE]
+                # 权重相同按类型优先级留（语义边先留），别让时序边把
+                # 语义边挤出 24 条的上限。
+                adj[mid] = sorted(
+                    adj[mid],
+                    key=lambda x: (-x[2], -KIND_PRIORITY.get(x[1], 0)))[
+                        :MAX_EDGES_PER_NODE]
         self._adj = adj
         self._n_at_build = self.db.execute(
             "SELECT COUNT(*) FROM mem").fetchone()[0]
         return adj
+
+    # ---------- 语义边：直接用库里存的 emb，不重新编码 ----------
+    @staticmethod
+    def _numpy():
+        try:
+            import numpy as np
+            return np
+        except Exception:
+            return None
+
+    @staticmethod
+    def _l2(np, mat):
+        norms = np.linalg.norm(mat, axis=1, keepdims=True)
+        norms[norms == 0.0] = 1.0
+        return (mat / norms).astype(np.float32)
+
+    def _load_all_vectors(self, np):
+        """一次读全库 emb，按维度分组并 L2 归一化。
+
+        老库可能混着 512 维和 768 维（换过模型），不同维度不能算余弦，
+        所以按 dims 分组，各算各的。
+        """
+        rows = self.db.execute(
+            "SELECT id, emb FROM mem WHERE emb IS NOT NULL"
+            " AND COALESCE(dead,0)=0").fetchall()
+        groups = {}
+        for r in rows:
+            blob = r["emb"]
+            if not blob or len(blob) % 4:
+                continue
+            dim = len(blob) // 4
+            v = np.frombuffer(blob, dtype=np.float32)
+            if v.size != dim:
+                continue
+            ids, vs = groups.setdefault(dim, ([], []))
+            ids.append(r["id"])
+            vs.append(v)
+        out = {}
+        for dim, (ids, vs) in groups.items():
+            out[dim] = [ids, self._l2(np, np.stack(vs))]
+        self._vec = out
+        cnt = self.db.execute(
+            "SELECT COUNT(*) AS n, COALESCE(MAX(id),0) AS m FROM mem"
+            " WHERE emb IS NOT NULL AND COALESCE(dead,0)=0").fetchone()
+        self._vec_count = cnt["n"] or 0
+        self._vec_max_id = cnt["m"] or 0
+        return bool(out)
+
+    def _refresh_vectors(self, np):
+        """缓存有效就直接用；新写了记忆只把 id 更大的那几行追加进来。"""
+        cnt = self.db.execute(
+            "SELECT COUNT(*) AS n, COALESCE(MAX(id),0) AS m FROM mem"
+            " WHERE emb IS NOT NULL AND COALESCE(dead,0)=0").fetchone()
+        n, m = cnt["n"] or 0, cnt["m"] or 0
+        if self._vec and n == self._vec_count and m == self._vec_max_id:
+            return bool(self._vec)
+        if self._vec and n > self._vec_count and m > self._vec_max_id:
+            rows = self.db.execute(
+                "SELECT id, emb FROM mem WHERE id>? AND emb IS NOT NULL"
+                " AND COALESCE(dead,0)=0", (self._vec_max_id,)).fetchall()
+            new = {}
+            for r in rows:
+                blob = r["emb"]
+                if not blob or len(blob) % 4:
+                    continue
+                dim = len(blob) // 4
+                v = np.frombuffer(blob, dtype=np.float32)
+                if v.size != dim:
+                    continue
+                ids, vs = new.setdefault(dim, ([], []))
+                ids.append(r["id"])
+                vs.append(v)
+            for dim, (ids, vs) in new.items():
+                fresh = self._l2(np, np.stack(vs))
+                if dim in self._vec:
+                    old_ids, old_mat = self._vec[dim]
+                    self._vec[dim] = [old_ids + ids,
+                                      np.vstack([old_mat, fresh])]
+                else:
+                    self._vec[dim] = [ids, fresh]
+            self._vec_count = n
+            self._vec_max_id = m
+            return bool(self._vec)
+        return self._load_all_vectors(np)
+
+    @staticmethod
+    def _sem_weight(sim):
+        span = max(1e-9, 1.0 - SEMANTIC_MIN_SIM)
+        t = min(1.0, max(0.0, (sim - SEMANTIC_MIN_SIM) / span))
+        return SEMANTIC_WEIGHT_MIN + (
+            SEMANTIC_WEIGHT_MAX - SEMANTIC_WEIGHT_MIN) * t
+
+    def _pick_for(self, np, mid, vec, group):
+        """给一条记忆挑最多 3 个语义近邻 -> [(other_id, sim, weight)]"""
+        ids, mat = group
+        v = np.asarray(vec, dtype=np.float32).reshape(-1)
+        if v.shape[0] != mat.shape[1]:
+            return []
+        norm = float(np.linalg.norm(v))
+        if norm <= 0.0:
+            return []
+        sims = mat @ (v / norm)
+        order = np.argsort(-sims)
+        out, chosen = [], []
+        for idx in order:
+            if len(out) >= SEMANTIC_TOP_N:
+                break
+            sim = float(sims[idx])
+            if sim < SEMANTIC_MIN_SIM:
+                break
+            oid = ids[idx]
+            if oid == mid:
+                continue
+            # 两个候选彼此太像（同一句话的两个版本）→ 只留一条，
+            # 否则「顺带想起」又变成翻出三条几乎一样的句子。
+            if any(float(np.dot(mat[idx], mat[c])) >= SEMANTIC_DUP_SIM
+                   for c in chosen):
+                continue
+            chosen.append(idx)
+            out.append((oid, sim, self._sem_weight(sim)))
+        return out
+
+    def _all_semantic_edges(self, np):
+        """全库语义边 -> {(lo, hi): weight}，分块算，避免 n² 内存爆掉。"""
+        edges = {}
+        for _dim, (ids, mat) in self._vec.items():
+            n = len(ids)
+            for start in range(0, n, 256):
+                block = mat[start:start + 256]
+                sims = block @ mat.T
+                for r in range(sims.shape[0]):
+                    i = start + r
+                    row = sims[r]
+                    order = np.argsort(-row)
+                    picks, chosen = [], []
+                    for idx in order:
+                        if len(picks) >= SEMANTIC_TOP_N:
+                            break
+                        sim = float(row[idx])
+                        if sim < SEMANTIC_MIN_SIM:
+                            break
+                        if idx == i:
+                            continue
+                        if any(float(np.dot(mat[idx], mat[c]))
+                               >= SEMANTIC_DUP_SIM for c in chosen):
+                            continue
+                        chosen.append(idx)
+                        picks.append((ids[idx], sim))
+                    for oid, sim in picks:
+                        a, b = (ids[i], oid) if ids[i] < oid else (oid, ids[i])
+                        w = self._sem_weight(sim)
+                        if w > edges.get((a, b), 0.0):
+                            edges[(a, b)] = w
+        return edges
+
+    def backfill_semantic_edges(self):
+        """老库兼容：一次算完全库近邻并写库（1300×768 约几十毫秒）。"""
+        np = self._numpy()
+        if np is None or not self._load_all_vectors(np):
+            return 0
+        edges = self._all_semantic_edges(np)
+        if not edges:
+            return 0
+        now = time.time()
+        self.db.cursor().executemany(
+            "INSERT OR IGNORE INTO synapse(a_id,b_id,kind,weight,create_ts)"
+            " VALUES(?,?,?,?,?)",
+            [(a, b, "semantic", w, now) for (a, b), w in edges.items()])
+        self.db.commit()
+        self._load_adj()
+        return len(edges)
+
+    def add_semantic_edges(self, mem_ids, vecs=None):
+        """新记忆落库后增量补语义边（复用传入向量，没有再查库）。
+
+        vecs 与 mem_ids 对齐；元素可以是 ndarray / float32 bytes / None。
+        返回真正插入的边数。numpy 不可用就静默跳过（功能降级，不崩）。
+        """
+        np = self._numpy()
+        if np is None or not mem_ids:
+            return 0
+        if not self._schema_ok:
+            self.ensure_schema()
+        if not self._refresh_vectors(np):
+            return 0
+        now = time.time()
+        c = self.db.cursor()
+        inserted = 0
+        for i, mid in enumerate(mem_ids):
+            vec = vecs[i] if vecs and i < len(vecs) else None
+            if vec is None:
+                row = self.db.execute(
+                    "SELECT emb FROM mem WHERE id=?", (mid,)).fetchone()
+                vec = row["emb"] if row else None
+            if vec is None:
+                continue
+            if isinstance(vec, (bytes, bytearray, memoryview)):
+                vec = bytes(vec)
+                if not vec or len(vec) % 4:
+                    continue
+                vec = np.frombuffer(vec, dtype=np.float32)
+            vec = np.asarray(vec, dtype=np.float32).reshape(-1)
+            group = self._vec.get(int(vec.shape[0]))
+            if not group:
+                continue
+            for oid, _sim, w in self._pick_for(np, mid, vec, group):
+                a, b = (mid, oid) if mid < oid else (oid, mid)
+                cur = c.execute(
+                    "INSERT OR IGNORE INTO synapse"
+                    "(a_id,b_id,kind,weight,create_ts) VALUES(?,?,?,?,?)",
+                    (a, b, "semantic", w, now))
+                if cur.rowcount:
+                    inserted += 1
+                    self._adj_add(a, b, w)
+        self.db.commit()
+        return inserted
+
+    def _adj_add(self, a, b, w):
+        """内存邻接表跟着长一条；不重置 _n_at_build，原有重建节奏不变。"""
+        if self._adj is None:
+            return
+        for x, y in ((a, b), (b, a)):
+            lst = self._adj.setdefault(x, [])
+            lst.append((y, "semantic", w))
+            if len(lst) > MAX_EDGES_PER_NODE:
+                self._adj[x] = sorted(
+                    lst, key=lambda t: (-t[2], -KIND_PRIORITY.get(t[1], 0)))[
+                        :MAX_EDGES_PER_NODE]
 
     def rebuild(self):
         """从 mem / detail / recall_event 重建整张突触网
@@ -261,6 +554,13 @@ class SynapseNet(object):
                     continue
                 lo, hi = (a, b) if a < b else (b, a)
                 add.append((lo, hi, kind, w, now))
+
+        # 5) semantic：emb 余弦最近邻。重建必须一起重建 —— 上面那条
+        #    DELETE FROM synapse 会把老库补好的语义边一起冲掉。
+        np = self._numpy()
+        if np is not None and self._load_all_vectors(np):
+            for (a, b), w in self._all_semantic_edges(np).items():
+                add.append((a, b, "semantic", w, now))
         # 每节点边数封顶（按 id 顺序截，简单可复现）
         if add:
             c.executemany(
@@ -299,16 +599,23 @@ class SynapseNet(object):
                     np_ = p * LAYER_DECAY * w
                     if np_ < POT_MIN_ACTIVATE:
                         continue
-                    if np_ > nxt.get(other, 0.0):
-                        nxt[other] = np_
-                        acc[other] = kind
+                    pri = KIND_PRIORITY.get(kind, 0)
+                    cur = nxt.get(other)
+                    # 电势相同时优先语义边：不能让先遍历到的时序边
+                    # 仅靠插入顺序把语义路径顶掉。
+                    if cur is None or (np_, pri) > (cur[0], cur[1]):
+                        nxt[other] = (np_, kind)
             if not nxt:
                 break
             # 同一层内合并（取最大），不累加 —— 累加会让稠密节点爆炸
-            for mid, p in nxt.items():
-                if p > pot.get(mid, 0.0):
+            for mid, (p, kind) in nxt.items():
+                cur = pot.get(mid, 0.0)
+                if p > cur or (p == cur and
+                               KIND_PRIORITY.get(kind, 0) >
+                               KIND_PRIORITY.get(acc.get(mid), 0)):
                     pot[mid] = p
-            frontier = nxt
+                    acc[mid] = kind
+            frontier = {m: p for m, (p, _k) in nxt.items()}
         out = [(mid, p, acc.get(mid, "co")) for mid, p in pot.items()
                if mid not in seed_ids]
         out.sort(key=lambda x: -x[1])
@@ -342,5 +649,13 @@ class SynapseNet(object):
             kinds[r["kind"]] = r["n"]
         nodes = self.db.execute(
             "SELECT COUNT(DISTINCT a_id) FROM synapse").fetchone()[0]
+        covered = self.db.execute(
+            "SELECT COUNT(*) FROM (SELECT a_id AS mid FROM synapse"
+            " UNION SELECT b_id FROM synapse)").fetchone()[0]
+        memories = self.db.execute(
+            "SELECT COUNT(*) FROM mem WHERE COALESCE(dead,0)=0").fetchone()[0]
         return {"edges": total, "kinds": kinds, "nodes": nodes,
+                "covered": covered, "memories": memories,
+                "coverage": round(covered * 1.0 / memories, 4)
+                if memories else 0.0,
                 "avg_degree": round(total * 2.0 / nodes, 2) if nodes else 0.0}

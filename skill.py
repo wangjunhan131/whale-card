@@ -233,6 +233,35 @@ class SkillMemory(object):
     def all(self):
         return self.db.execute("SELECT * FROM skill ORDER BY L DESC").fetchall()
 
+    def ensure_vecs(self, to_vec_fn):
+        """给 vec 为空的技能补一条向量（name + desc 现算）。
+
+        为什么需要（2026-11-09）：mind_server 的 /skill_add 只在**建技能那一刻**
+        算 vec；早先经别的通道写进来的技能（真实卡里的 4、5 号）vec 是 {}。
+        search() 里 `if not mv or not query_vec: continue` 会把它们直接跳过 ——
+        学得再熟，也永远检索不到，更谈不上用。
+        只补空行，已有向量一个字不动（那是当时建卡时的语义指纹）。
+        返回补了几条。
+        """
+        n = 0
+        for r in self.all():
+            try:
+                mv = json.loads(r["vec"] or "{}")
+            except Exception:
+                mv = {}
+            if mv:
+                continue
+            v = to_vec_fn((r["name"] or "") + " " + (r["desc"] or ""))
+            if not v:
+                continue
+            self.db.execute(
+                "UPDATE skill SET vec=? WHERE id=?",
+                (json.dumps(v, ensure_ascii=False), r["id"]))
+            n += 1
+        if n:
+            self.db.commit()
+        return n
+
     def tick_all(self, now=None):
         """按各自 interval 衰减所有技能的熟练度（内容不动）
 

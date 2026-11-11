@@ -27,7 +27,9 @@ python tools/portable.py build "E:\whale-card" --confirm \
 python tools/portable.py verify "E:\whale-card"
 
 # 4) 到了新机器再落地：写回卡外锚 + 改写卡槽状态
-python tools/portable.py land "E:\whale-card"
+#    --migrate = 同一张卡搬过来（源盘会被标成「已迁出」，再启动只读）；
+#    要分出一张新卡用 --fork（新身份，源盘不动）；不给 / 同时给 → 退出码 2
+python tools/portable.py land "E:\whale-card" --migrate
 
 # 5) 【必须】交棒 —— 不做这步，她一到新家就是哑的（只能读不能写）
 python tools/portable.py handover "E:\whale-card"

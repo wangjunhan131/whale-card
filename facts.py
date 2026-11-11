@@ -198,7 +198,12 @@ def _is_name(tok):
     return all("\u4e00" <= c <= "\u9fa5" for c in tok)
 
 
-_PERSON_VERB = "想来要把给说在是还接借发欠约叫改送买养帮问让拿找谈聊倒值"
+_PERSON_VERB = ("想来要把给说在是还接借发欠约叫改送买养帮问让拿找谈聊倒值"
+                # V6.0：光认上面这些动词，会把「她考了/他住在/我给他打」里的
+                # 主语整条丢掉——而这类句子恰恰是第三方事实的主产地。
+                "去到回打考学住吃喝睡起做干挣花用看听玩走跑骑开抽戒病疼累忙"
+                "忘记等陪带教骂夸嫌怕爱收洗卖存交租搬换修遛喂抱哄管盯催劝怪"
+                "谢烦气穿戴饿渴")
 _NAME_NEXT_STOP = "的了是和就都也吗呢吧啊呀哦嗯"
 _NAME_NEXT_OK = set(_PERSON_VERB) | set("今年明昨刚正已都还也要本上这那每下把给")
 _DATE_PREFIX = re.compile(r"^(周|星期|第|\d|今|明|昨|上|下|这|那)")
@@ -419,7 +424,14 @@ _HEARSAY = re.compile(r"(听说|据说|可能|也许|好像|大概|不确定|是
 
 # 再收一道：真正允许进永久区的谓词。接送、排班、单价、约定、打算这些时间性太强，
 # 换天就过期，留在事件记忆里让它自己褪掉反而更诚实。
-_PERMANENT_OK = {"叫", "年龄", "生日", "住处", "欠账", "归还"}
+_PERMANENT_OK = {"叫", "年龄", "生日"}
+
+# 2026-11-09：我自己写的工程记录不算「生活」。
+#    这些字眼出现在原文里，基本就是当天施工/评测的汇报，抽出来的三元组
+#    一个都不该进永久区（实测混进过「讨厌｜多少」「接送｜替了她对面」）。
+_WORKLOG = re.compile(r"施工|测试|评测|部署|提交|回归|编译|推送|跑分|自测|bench|probe|packet|review", re.I)
+# 只有「人和人真说过的话」才配不衰减：空来源（老数据/manual）、QQ 私聊/群聊、chat、cli、日记
+_LIFE_SOURCE = re.compile(r"^(|qq.*|chat|cli|diary)$", re.I)
 
 
 def _perm_ok(it, text, source):
@@ -431,7 +443,15 @@ def _perm_ok(it, text, source):
         return False
     if _HEARSAY.search(text or "") or not _source_ok(source):
         return False
-    if not (2 <= len(obj) <= 24):
+    if _WORKLOG.search(text or ""):
+        return False
+    if not _LIFE_SOURCE.match((source or "").strip()):
+        return False
+    if not (2 <= len(obj) <= 10):
+        return False
+    if any(ch in obj for ch in "的了是我你他她它在把给被就都还得了着吧呢啊嘛呀"):
+        return False
+    if len(text or "") > 90:
         return False
     if obj[0] in "替进这上端把让给被不没都很就到":
         return False

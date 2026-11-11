@@ -77,7 +77,8 @@ class EmotionEngine:
         self.last_ts: float = time.time()
 
         # ---- 学习记忆 ----
-        self.expect_global: float = 0.52
+        # 初值/夹取范围来自 config（env WHALE_EXPECT_RESET 控制）；夹窄 RPE 才留得住
+        self.expect_global: float = float(self.cfg.get("expect_init", 0.52))
         self.expect: Dict[str, float] = {}     # 场景 → 预期价值
         self.rep: Dict[str, float] = {}        # 场景 → 重复计数（神经适应）
         self.pending: Optional[Dict[str, Any]] = None   # 预激活缓存
@@ -108,6 +109,11 @@ class EmotionEngine:
             self.last_ts = d.get("last_ts", time.time())
             self.expect_global = d.get("expect_global", self.expect_global)
             self.expect = d.get("expect", {})
+            # 旧档里的预期可能落在旧范围（.05/.95），读进来先夹回当前范围
+            _b = self.cfg.get("expect_bounds", (0.05, 0.95))
+            _gb = self.cfg.get("expect_global_bounds", (0.10, 0.90))
+            self.expect_global = clip(self.expect_global, _gb[0], _gb[1])
+            self.expect = {k: clip(v, _b[0], _b[1]) for k, v in self.expect.items()}
             self.rep = d.get("rep", {})
             self.apply_wallclock_gap()      # 关了几天再打开，情绪先自然回落
         except Exception as e:      # 状态文件损坏不应阻断运行
@@ -138,7 +144,7 @@ class EmotionEngine:
         self.st = dict(self.factory)
         self.safety, self.fatigue, self.mood = 0.72, 0.05, 0.0
         self.turn = 0
-        self.expect_global, self.expect, self.rep = 0.52, {}, {}
+        self.expect_global, self.expect, self.rep = float(self.cfg.get("expect_init", 0.52)), {}, {}
         self.pending = None
         if os.path.exists(self.path):
             os.remove(self.path)
@@ -288,8 +294,10 @@ class EmotionEngine:
 
         # ⑦ TD 学习 + 基线漂移（衰减已在轮首完成，这里保留本轮脉冲给情绪分类）
         key = scenario
-        self.expect[key] = clip(self.expect.get(key, self.expect_global) + p["td_alpha"] * rpe, 0.05, 0.95)
-        self.expect_global = clip(self.expect_global + p["td_alpha_global"] * rpe, 0.10, 0.90)
+        _b = self.cfg.get("expect_bounds", (0.05, 0.95))
+        _gb = self.cfg.get("expect_global_bounds", (0.10, 0.90))
+        self.expect[key] = clip(self.expect.get(key, self.expect_global) + p["td_alpha"] * rpe, _b[0], _b[1])
+        self.expect_global = clip(self.expect_global + p["td_alpha_global"] * rpe, _gb[0], _gb[1])
         for k in list(self.rep):
             self.rep[k] *= 0.93
         self.rep[key] = self.rep.get(key, 0.0) + 1.0

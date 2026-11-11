@@ -1,0 +1,8 @@
+# dsh-whale-bridge bundle patch。
+#
+# 一个插件、一个 fiber，不需要别的 bundle 层。
+# 装法（本地开发用 junction，不经过 pnpm，避免把 lockfile 搞坏）：
+#   mklink /J "%USERPROFILE%\.dsh\profiles\desktop\node_modules\dsh-whale-bridge" "workspace\deploy\dsh-whale-bridge"
+- insert:
+    - id: whale-bridge
+      name: dsh-whale-bridge

@@ -110,7 +110,14 @@ def _err(msg):
 # MCP 工具定义
 # ──────────────────────────────────────────────────────
 def _build():
-    from mcp.server.fastmcp import FastMCP
+    # mcp 2.x 把 FastMCP 改名成了 MCPServer（两代的名字不一样，
+    # 但 tool 装饰器与 run(transport="stdio") 的用法是兼容的）。
+    # 2026-11-09 之前这里只认旧名，这个文件在装了 mcp 2.x 的机器上
+    # 连导入都过不去 —— 于是「MCP 工具层」等于不存在。
+    try:
+        from mcp.server.fastmcp import FastMCP
+    except Exception:                                    # mcp >= 2.0
+        from mcp.server.mcpserver import MCPServer as FastMCP
 
     m = FastMCP(
         "whale",
@@ -223,6 +230,36 @@ def _build():
                                    "q": float(q)})
         return {"ok": True, "result": out.get("result") or out}
 
+    @m.tool(description=(
+        "梦层（Dream）：看看有没有攒够该压缩的对话原文。"
+        "返回待消化轮次/最久空闲小时/够不够触发。够了就把 items 拿去压缩成高阶记忆，"
+        "再用 mind_dream_commit 写回来。卡自己不调模型，压缩这一步只能由我做。"))
+    def mind_dream_pending(limit: int = 40) -> dict:
+        if not _ensure_server():
+            return _err("心智服务连不上（8848）")
+        due = _get("/dream/due")
+        out = _get("/dream/pending")
+        # /dream/pending 不带 limit 参数时后端用默认；这里只做截断，不改语义
+        items = (out.get("items") or [])[:max(1, int(limit or 40))]
+        return {"ok": True, "due": due.get("due"), "pending": due.get("pending"),
+                "idle_hours": due.get("idle_hours"),
+                "min_turns": due.get("min_turns"),
+                "items": items,
+                "note": ("现在还不该做梦" if not due.get("due")
+                         else "到点了：把 items 压成几条高阶记忆，再调 mind_dream_commit")}
+
+    @m.tool(description=(
+        "梦层（Dream）：把压缩好的高阶记忆写回卡，并把这几轮原文标成已消化（原文永不删除）。"
+        "memories 每项形如 {\"text\": \"…\", \"kind\": \"fact|episode|preference\", \"salience\": 0.6}。"))
+    def mind_dream_commit(memories: list, dialogue_ids: list = None) -> dict:
+        if not _ensure_server():
+            return _err("心智服务连不上（8848）")
+        body = {"items": memories or []}
+        if dialogue_ids:
+            body["dialogue_ids"] = [int(x) for x in dialogue_ids]
+        out = _post("/dream/commit", body)
+        return {"ok": True, "result": out.get("dream") or out}
+
     @m.tool(description="让卡往前走一点时间（心跳结算：衰减、激素回归、突触扩散）。连的是真卡时最多 1 小时。")
     def mind_tick(seconds: float = 60.0, confirm: bool = False) -> dict:
         if not _ensure_server():
@@ -248,7 +285,10 @@ def selftest():
         return 2
     print("✓ 服务在：%s  记忆 %s 条" % (h.get("db"), h.get("memories")))
 
-    from mcp.server.fastmcp import FastMCP  # noqa: F401
+    try:
+        from mcp.server.fastmcp import FastMCP  # noqa: F401
+    except Exception:
+        from mcp.server.mcpserver import MCPServer as FastMCP  # noqa: F401
     print("✓ mcp 包可用：%s" % __import__("mcp").__file__)
 
     m = _build()

@@ -1,0 +1,2219 @@
+{
+ "version": 1,
+ "generated_at": "2026-11-11 11:41:12",
+ "count": 240,
+ "scanned_files": 104,
+ "counts": {
+  "_clean_oss_all.py": 1,
+  "anchor.py": 1,
+  "backup_verify.py": 3,
+  "body.py": 2,
+  "bridge.py": 4,
+  "card2.py": 56,
+  "cardmix_store.py": 5,
+  "cardslot.py": 3,
+  "cardtime.py": 2,
+  "chatcfg.py": 1,
+  "checkpoint.py": 3,
+  "console.py": 29,
+  "ctxweight.py": 4,
+  "disks.py": 19,
+  "dl_model.py": 2,
+  "emotion_link.py": 1,
+  "facts.py": 1,
+  "habits.py": 1,
+  "identity.py": 2,
+  "impression.py": 1,
+  "migration.py": 4,
+  "mind_server.py": 26,
+  "seal.py": 1,
+  "timeline.py": 4,
+  "tools/come_back.py": 2,
+  "tools/diary.py": 5,
+  "tools/e2e_lock.py": 1,
+  "tools/env_probe.py": 5,
+  "tools/first_run.py": 3,
+  "tools/fix_sysmark.py": 1,
+  "tools/install_to_dsh.py": 1,
+  "tools/media_audio.py": 2,
+  "tools/media_video.py": 1,
+  "tools/mine_habits.py": 1,
+  "tools/open_console.py": 1,
+  "tools/portable.py": 6,
+  "tools/proactive.py": 3,
+  "tools/qq_guard.py": 10,
+  "tools/qq_memes.py": 2,
+  "tools/qq_proactive.py": 1,
+  "tools/qq_say.py": 1,
+  "tools/quiet_policy.py": 2,
+  "tools/replica.py": 2,
+  "tools/smoke.py": 6,
+  "tools/voice.py": 4,
+  "versions.py": 1,
+  "viscera.py": 1,
+  "vmath.py": 1,
+  "whale_mcp.py": 1
+ },
+ "entries": [
+  {
+   "fp": "3a937c7f811c3a5a",
+   "file": "_clean_oss_all.py",
+   "func": "<module>",
+   "exc": "Exception",
+   "body": "continue",
+   "nth": 1,
+   "line": 27
+  },
+  {
+   "fp": "a97475d159acc3be",
+   "file": "anchor.py",
+   "func": "_conn_path",
+   "exc": "Exception",
+   "body": "pass",
+   "nth": 1,
+   "line": 56
+  },
+  {
+   "fp": "a323e8fc9079a883",
+   "file": "backup_verify.py",
+   "func": "backup_roots",
+   "exc": "Exception",
+   "body": "continue",
+   "nth": 1,
+   "line": 96
+  },
+  {
+   "fp": "b742113b68f9776a",
+   "file": "backup_verify.py",
+   "func": "_scan_root",
+   "exc": "OSError",
+   "body": "continue",
+   "nth": 1,
+   "line": 131
+  },
+  {
+   "fp": "7435c0414e95ea9b",
+   "file": "backup_verify.py",
+   "func": "inspect_backups",
+   "exc": "OSError",
+   "body": "continue",
+   "nth": 1,
+   "line": 199
+  },
+  {
+   "fp": "575de5a1553224ac",
+   "file": "body.py",
+   "func": "assess_trust",
+   "exc": "re.error",
+   "body": "continue",
+   "nth": 1,
+   "line": 51
+  },
+  {
+   "fp": "d765bcd2021eed4c",
+   "file": "body.py",
+   "func": "assess_trust",
+   "exc": "Exception",
+   "body": "pass",
+   "nth": 1,
+   "line": 87
+  },
+  {
+   "fp": "4924baa676a9f292",
+   "file": "bridge.py",
+   "func": "_fix_stdout",
+   "exc": "Exception",
+   "body": "pass",
+   "nth": 1,
+   "line": 49
+  },
+  {
+   "fp": "1bd1a0690bc9dc5a",
+   "file": "bridge.py",
+   "func": "_api_token",
+   "exc": "OSError",
+   "body": "continue",
+   "nth": 1,
+   "line": 70
+  },
+  {
+   "fp": "729a5613a1cde25d",
+   "file": "bridge.py",
+   "func": "cmd_ask",
+   "exc": "Exception",
+   "body": "pass",
+   "nth": 1,
+   "line": 191
+  },
+  {
+   "fp": "4311db7ba1cbd969",
+   "file": "bridge.py",
+   "func": "main",
+   "exc": "Exception",
+   "body": "pass",
+   "nth": 1,
+   "line": 395
+  },
+  {
+   "fp": "42ac0f24f1de30d9",
+   "file": "card2.py",
+   "func": "MemoryCard.__init__",
+   "exc": "Exception",
+   "body": "pass",
+   "nth": 1,
+   "line": 1121
+  },
+  {
+   "fp": "d5c2c41d92fd8736",
+   "file": "card2.py",
+   "func": "MemoryCard.__init__",
+   "exc": "Exception",
+   "body": "pass",
+   "nth": 2,
+   "line": 1138
+  },
+  {
+   "fp": "14309d8ded38f4d7",
+   "file": "card2.py",
+   "func": "MemoryCard.__init__",
+   "exc": "Exception",
+   "body": "pass",
+   "nth": 3,
+   "line": 1145
+  },
+  {
+   "fp": "980601bcad88c345",
+   "file": "card2.py",
+   "func": "MemoryCard.__init__",
+   "exc": "Exception",
+   "body": "pass",
+   "nth": 4,
+   "line": 1178
+  },
+  {
+   "fp": "ea4f3bdf6935a469",
+   "file": "card2.py",
+   "func": "MemoryCard.__init__",
+   "exc": "Exception",
+   "body": "pass",
+   "nth": 5,
+   "line": 1201
+  },
+  {
+   "fp": "b00f806f9d48ed4e",
+   "file": "card2.py",
+   "func": "MemoryCard._load_hormones",
+   "exc": "Exception",
+   "body": "pass",
+   "nth": 1,
+   "line": 1292
+  },
+  {
+   "fp": "992223272e03a9d6",
+   "file": "card2.py",
+   "func": "MemoryCard._save_hormones",
+   "exc": "Exception",
+   "body": "pass",
+   "nth": 1,
+   "line": 1304
+  },
+  {
+   "fp": "b96a510072b6ad64",
+   "file": "card2.py",
+   "func": "MemoryCard._save_viscera",
+   "exc": "Exception",
+   "body": "pass",
+   "nth": 1,
+   "line": 1332
+  },
+  {
+   "fp": "77b8dd1994b93174",
+   "file": "card2.py",
+   "func": "MemoryCard._save_motiv",
+   "exc": "Exception",
+   "body": "pass",
+   "nth": 1,
+   "line": 1366
+  },
+  {
+   "fp": "f48e04e6ebe2345b",
+   "file": "card2.py",
+   "func": "MemoryCard._ensure_hist_cols",
+   "exc": "Exception",
+   "body": "pass",
+   "nth": 1,
+   "line": 1563
+  },
+  {
+   "fp": "be0c1fcc710f1c1f",
+   "file": "card2.py",
+   "func": "MemoryCard._hist_viscera",
+   "exc": "Exception",
+   "body": "pass",
+   "nth": 2,
+   "line": 1597
+  },
+  {
+   "fp": "974e75ea55fd7f28",
+   "file": "card2.py",
+   "func": "MemoryCard._hist_viscera",
+   "exc": "Exception",
+   "body": "pass",
+   "nth": 3,
+   "line": 1637
+  },
+  {
+   "fp": "7ef3d91315a09a51",
+   "file": "card2.py",
+   "func": "MemoryCard._hist_viscera",
+   "exc": "Exception",
+   "body": "pass",
+   "nth": 4,
+   "line": 1647
+  },
+  {
+   "fp": "119383343a989ad7",
+   "file": "card2.py",
+   "func": "MemoryCard._hist_viscera",
+   "exc": "Exception",
+   "body": "pass",
+   "nth": 1,
+   "line": 1668
+  },
+  {
+   "fp": "7fc0029d727fd6d8",
+   "file": "card2.py",
+   "func": "MemoryCard.viscera_snapshot",
+   "exc": "Exception",
+   "body": "pass",
+   "nth": 1,
+   "line": 1868
+  },
+  {
+   "fp": "243c84d44079595b",
+   "file": "card2.py",
+   "func": "MemoryCard.touch_hormones",
+   "exc": "Exception",
+   "body": "pass",
+   "nth": 1,
+   "line": 1979
+  },
+  {
+   "fp": "88e48f77539df803",
+   "file": "card2.py",
+   "func": "MemoryCard._save_mood",
+   "exc": "Exception",
+   "body": "pass",
+   "nth": 1,
+   "line": 2010
+  },
+  {
+   "fp": "64ddb34681dee675",
+   "file": "card2.py",
+   "func": "MemoryCard._meta_float",
+   "exc": "Exception",
+   "body": "pass",
+   "nth": 1,
+   "line": 2047
+  },
+  {
+   "fp": "8b07b4ee313f1255",
+   "file": "card2.py",
+   "func": "MemoryCard._set_meta_float",
+   "exc": "Exception",
+   "body": "pass",
+   "nth": 1,
+   "line": 2058
+  },
+  {
+   "fp": "d8874581c6fb7278",
+   "file": "card2.py",
+   "func": "MemoryCard._save_oxy",
+   "exc": "Exception",
+   "body": "pass",
+   "nth": 1,
+   "line": 2216
+  },
+  {
+   "fp": "3591c3c44c7696c2",
+   "file": "card2.py",
+   "func": "MemoryCard._migrate",
+   "exc": "Exception",
+   "body": "pass",
+   "nth": 1,
+   "line": 2564
+  },
+  {
+   "fp": "27539f2de0d3eaad",
+   "file": "card2.py",
+   "func": "MemoryCard.dream_commit",
+   "exc": "Exception",
+   "body": "pass",
+   "nth": 1,
+   "line": 2956
+  },
+  {
+   "fp": "b17c83523dcd8047",
+   "file": "card2.py",
+   "func": "MemoryCard._load_read",
+   "exc": "Exception",
+   "body": "continue",
+   "nth": 1,
+   "line": 3000
+  },
+  {
+   "fp": "64cb5faa7a357ab5",
+   "file": "card2.py",
+   "func": "MemoryCard._load_write",
+   "exc": "Exception",
+   "body": "pass",
+   "nth": 1,
+   "line": 3014
+  },
+  {
+   "fp": "656000ea479e3565",
+   "file": "card2.py",
+   "func": "MemoryCard.set_region_lambda",
+   "exc": "Exception",
+   "body": "pass",
+   "nth": 1,
+   "line": 3065
+  },
+  {
+   "fp": "6737d681a5a2798c",
+   "file": "card2.py",
+   "func": "MemoryCard.tick",
+   "exc": "Exception",
+   "body": "pass",
+   "nth": 1,
+   "line": 3111
+  },
+  {
+   "fp": "9b2c345f6362ccb8",
+   "file": "card2.py",
+   "func": "MemoryCard.tick",
+   "exc": "Exception",
+   "body": "pass",
+   "nth": 2,
+   "line": 3117
+  },
+  {
+   "fp": "dddbf14ee5e892a6",
+   "file": "card2.py",
+   "func": "MemoryCard.tick",
+   "exc": "Exception",
+   "body": "pass",
+   "nth": 3,
+   "line": 3318
+  },
+  {
+   "fp": "2f3f3260ff45b621",
+   "file": "card2.py",
+   "func": "MemoryCard.tick",
+   "exc": "Exception",
+   "body": "pass",
+   "nth": 4,
+   "line": 3335
+  },
+  {
+   "fp": "46105b0cb41898d5",
+   "file": "card2.py",
+   "func": "MemoryCard.tick",
+   "exc": "Exception",
+   "body": "pass",
+   "nth": 5,
+   "line": 3343
+  },
+  {
+   "fp": "5706d87ebab6522b",
+   "file": "card2.py",
+   "func": "MemoryCard.medium_exit_plan",
+   "exc": "Exception",
+   "body": "continue",
+   "nth": 1,
+   "line": 3418
+  },
+  {
+   "fp": "b073a0db8bfc5fab",
+   "file": "card2.py",
+   "func": "MemoryCard._ensure_soft_cols",
+   "exc": "sqlite3.OperationalError",
+   "body": "pass",
+   "nth": 1,
+   "line": 3730
+  },
+  {
+   "fp": "78a33a493d5baba6",
+   "file": "card2.py",
+   "func": "MemoryCard.forget",
+   "exc": "sqlite3.OperationalError",
+   "body": "pass",
+   "nth": 1,
+   "line": 3811
+  },
+  {
+   "fp": "3bb2ed646c60b726",
+   "file": "card2.py",
+   "func": "MemoryCard.forget",
+   "exc": "sqlite3.OperationalError",
+   "body": "pass",
+   "nth": 2,
+   "line": 3815
+  },
+  {
+   "fp": "9d7e91b8cd905cb4",
+   "file": "card2.py",
+   "func": "MemoryCard.forget",
+   "exc": "Exception",
+   "body": "pass",
+   "nth": 1,
+   "line": 3825
+  },
+  {
+   "fp": "d640707c7124f18d",
+   "file": "card2.py",
+   "func": "MemoryCard._forget_row",
+   "exc": "Exception",
+   "body": "pass",
+   "nth": 1,
+   "line": 4141
+  },
+  {
+   "fp": "bb5560fa39a97ca7",
+   "file": "card2.py",
+   "func": "MemoryCard.recall_trace_recent",
+   "exc": "Exception",
+   "body": "pass",
+   "nth": 1,
+   "line": 4197
+  },
+  {
+   "fp": "cce287759f1008fd",
+   "file": "card2.py",
+   "func": "MemoryCard.archive_search",
+   "exc": "Exception",
+   "body": "pass",
+   "nth": 1,
+   "line": 4229
+  },
+  {
+   "fp": "a398680669b39b81",
+   "file": "card2.py",
+   "func": "MemoryCard.media_root",
+   "exc": "Exception",
+   "body": "pass",
+   "nth": 1,
+   "line": 4260
+  },
+  {
+   "fp": "a959d4c470b5a9a1",
+   "file": "card2.py",
+   "func": "MemoryCard.attach_media",
+   "exc": "Exception",
+   "body": "pass",
+   "nth": 1,
+   "line": 4290
+  },
+  {
+   "fp": "ba45a9335876cfdb",
+   "file": "card2.py",
+   "func": "MemoryCard._media_tomb_add",
+   "exc": "Exception",
+   "body": "pass",
+   "nth": 1,
+   "line": 4368
+  },
+  {
+   "fp": "e9c69adcf4091c7a",
+   "file": "card2.py",
+   "func": "MemoryCard._forget_media",
+   "exc": "Exception",
+   "body": "pass",
+   "nth": 1,
+   "line": 4388
+  },
+  {
+   "fp": "3bbe7bf4179c829e",
+   "file": "card2.py",
+   "func": "MemoryCard.person_layer_of",
+   "exc": "Exception",
+   "body": "pass",
+   "nth": 1,
+   "line": 4702
+  },
+  {
+   "fp": "82e36f41837cc73a",
+   "file": "card2.py",
+   "func": "MemoryCard.core_vec_of",
+   "exc": "Exception",
+   "body": "pass",
+   "nth": 1,
+   "line": 5035
+  },
+  {
+   "fp": "25e65eec5384f11f",
+   "file": "card2.py",
+   "func": "MemoryCard._build_pods",
+   "exc": "Exception",
+   "body": "continue",
+   "nth": 1,
+   "line": 5149
+  },
+  {
+   "fp": "e36f88b57eab1d27",
+   "file": "card2.py",
+   "func": "MemoryCard.recall._score_rows",
+   "exc": "Exception",
+   "body": "pass",
+   "nth": 1,
+   "line": 5568
+  },
+  {
+   "fp": "661da8b5a76e534f",
+   "file": "card2.py",
+   "func": "MemoryCard.recall._score_rows",
+   "exc": "Exception",
+   "body": "pass",
+   "nth": 2,
+   "line": 5577
+  },
+  {
+   "fp": "4b6c92e521a981be",
+   "file": "card2.py",
+   "func": "MemoryCard.recall",
+   "exc": "Exception",
+   "body": "pass",
+   "nth": 1,
+   "line": 5688
+  },
+  {
+   "fp": "92d9468210d4de43",
+   "file": "card2.py",
+   "func": "MemoryCard._expand_assoc",
+   "exc": "Exception",
+   "body": "pass",
+   "nth": 1,
+   "line": 5742
+  },
+  {
+   "fp": "f71a8a07322af1ab",
+   "file": "card2.py",
+   "func": "MemoryCard.render",
+   "exc": "Exception",
+   "body": "pass",
+   "nth": 1,
+   "line": 6068
+  },
+  {
+   "fp": "cd5995b394f0541d",
+   "file": "card2.py",
+   "func": "MemoryCard.assemble_context",
+   "exc": "Exception",
+   "body": "pass",
+   "nth": 1,
+   "line": 6271
+  },
+  {
+   "fp": "28149796d499cc94",
+   "file": "card2.py",
+   "func": "MemoryCard.assemble_context",
+   "exc": "Exception",
+   "body": "pass",
+   "nth": 2,
+   "line": 6551
+  },
+  {
+   "fp": "7937cacda4aefd87",
+   "file": "card2.py",
+   "func": "MemoryCard.assemble_context",
+   "exc": "Exception",
+   "body": "pass",
+   "nth": 3,
+   "line": 6678
+  },
+  {
+   "fp": "270a31113475243d",
+   "file": "card2.py",
+   "func": "MemoryCard.assemble_context",
+   "exc": "Exception",
+   "body": "pass",
+   "nth": 4,
+   "line": 6811
+  },
+  {
+   "fp": "7f7fc5692b6e5b73",
+   "file": "card2.py",
+   "func": "MemoryCard.close",
+   "exc": "Exception",
+   "body": "pass",
+   "nth": 1,
+   "line": 6873
+  },
+  {
+   "fp": "232ebe6f62acebf2",
+   "file": "card2.py",
+   "func": "MemoryCard.close",
+   "exc": "Exception",
+   "body": "pass",
+   "nth": 2,
+   "line": 6877
+  },
+  {
+   "fp": "70d7dbcce9aa106d",
+   "file": "cardmix_store.py",
+   "func": "MixStore.remember",
+   "exc": "Exception",
+   "body": "pass",
+   "nth": 1,
+   "line": 163
+  },
+  {
+   "fp": "496bfa008f43306a",
+   "file": "cardmix_store.py",
+   "func": "MixStore.remember",
+   "exc": "Exception",
+   "body": "pass",
+   "nth": 2,
+   "line": 336
+  },
+  {
+   "fp": "e14ddffeb05d8183",
+   "file": "cardmix_store.py",
+   "func": "MixStore.remember",
+   "exc": "Exception",
+   "body": "pass",
+   "nth": 3,
+   "line": 351
+  },
+  {
+   "fp": "05a0967cb11f3a46",
+   "file": "cardmix_store.py",
+   "func": "MixStore._consolidate",
+   "exc": "Exception",
+   "body": "pass",
+   "nth": 1,
+   "line": 495
+  },
+  {
+   "fp": "4137c68deb3a96d0",
+   "file": "cardmix_store.py",
+   "func": "MixStore._tomb_add",
+   "exc": "Exception",
+   "body": "pass",
+   "nth": 1,
+   "line": 698
+  },
+  {
+   "fp": "ea9ed3ed0baeb312",
+   "file": "cardslot.py",
+   "func": "_fix_stdout",
+   "exc": "Exception",
+   "body": "pass",
+   "nth": 1,
+   "line": 60
+  },
+  {
+   "fp": "671f12c48d0f1a13",
+   "file": "cardslot.py",
+   "func": "status",
+   "exc": "Exception",
+   "body": "pass",
+   "nth": 1,
+   "line": 176
+  },
+  {
+   "fp": "911ab1f9d1b014bb",
+   "file": "cardslot.py",
+   "func": "inject",
+   "exc": "Exception",
+   "body": "pass",
+   "nth": 1,
+   "line": 273
+  },
+  {
+   "fp": "bff11c72261e42e3",
+   "file": "cardtime.py",
+   "func": "parse_event_time",
+   "exc": "(ValueError, OverflowError)",
+   "body": "pass",
+   "nth": 1,
+   "line": 165
+  },
+  {
+   "fp": "002c4ed9d0888295",
+   "file": "cardtime.py",
+   "func": "query_time_span",
+   "exc": "(ValueError, OverflowError)",
+   "body": "pass",
+   "nth": 1,
+   "line": 318
+  },
+  {
+   "fp": "ab70d6483bc01f77",
+   "file": "chatcfg.py",
+   "func": "load_cfg",
+   "exc": "Exception",
+   "body": "pass",
+   "nth": 1,
+   "line": 148
+  },
+  {
+   "fp": "00f3c51dee0a6059",
+   "file": "checkpoint.py",
+   "func": "_write_dir",
+   "exc": "Exception",
+   "body": "pass",
+   "nth": 1,
+   "line": 146
+  },
+  {
+   "fp": "14347343802bfb44",
+   "file": "checkpoint.py",
+   "func": "write",
+   "exc": "Exception",
+   "body": "pass",
+   "nth": 1,
+   "line": 159
+  },
+  {
+   "fp": "50232de18a595438",
+   "file": "checkpoint.py",
+   "func": "_backup_candidates",
+   "exc": "Exception",
+   "body": "continue",
+   "nth": 1,
+   "line": 307
+  },
+  {
+   "fp": "3a25504193b2f3cf",
+   "file": "console.py",
+   "func": "timeline_tail",
+   "exc": "Exception",
+   "body": "pass",
+   "nth": 1,
+   "line": 106
+  },
+  {
+   "fp": "ec41b47564795484",
+   "file": "console.py",
+   "func": "hormones_series",
+   "exc": "Exception",
+   "body": "pass",
+   "nth": 1,
+   "line": 159
+  },
+  {
+   "fp": "d482605e319f6524",
+   "file": "console.py",
+   "func": "mem_by_day",
+   "exc": "Exception",
+   "body": "pass",
+   "nth": 1,
+   "line": 232
+  },
+  {
+   "fp": "e5a8b6a395d0bf0e",
+   "file": "console.py",
+   "func": "regions",
+   "exc": "Exception",
+   "body": "pass",
+   "nth": 1,
+   "line": 248
+  },
+  {
+   "fp": "8bfa54a2214273a8",
+   "file": "console.py",
+   "func": "_dirsize",
+   "exc": "Exception",
+   "body": "pass",
+   "nth": 1,
+   "line": 259
+  },
+  {
+   "fp": "e7cbb720ae615da2",
+   "file": "console.py",
+   "func": "card_metrics",
+   "exc": "Exception",
+   "body": "pass",
+   "nth": 1,
+   "line": 296
+  },
+  {
+   "fp": "fa6286b4ac3119b0",
+   "file": "console.py",
+   "func": "card_metrics",
+   "exc": "Exception",
+   "body": "pass",
+   "nth": 2,
+   "line": 307
+  },
+  {
+   "fp": "0dfdaeb043fa0669",
+   "file": "console.py",
+   "func": "card_metrics",
+   "exc": "Exception",
+   "body": "pass",
+   "nth": 3,
+   "line": 319
+  },
+  {
+   "fp": "b75bc0ce84cc0b32",
+   "file": "console.py",
+   "func": "card_metrics",
+   "exc": "Exception",
+   "body": "pass",
+   "nth": 4,
+   "line": 326
+  },
+  {
+   "fp": "a4779fc8c31cd5d2",
+   "file": "console.py",
+   "func": "card_metrics",
+   "exc": "Exception",
+   "body": "pass",
+   "nth": 5,
+   "line": 336
+  },
+  {
+   "fp": "112e4c531c2e9895",
+   "file": "console.py",
+   "func": "card_metrics",
+   "exc": "Exception",
+   "body": "pass",
+   "nth": 6,
+   "line": 347
+  },
+  {
+   "fp": "cc0379d55d917b18",
+   "file": "console.py",
+   "func": "card_metrics",
+   "exc": "Exception",
+   "body": "pass",
+   "nth": 7,
+   "line": 366
+  },
+  {
+   "fp": "c50e3706f82f9f75",
+   "file": "console.py",
+   "func": "card_metrics",
+   "exc": "Exception",
+   "body": "pass",
+   "nth": 8,
+   "line": 401
+  },
+  {
+   "fp": "6ca6b38b4bd0ef15",
+   "file": "console.py",
+   "func": "card_metrics",
+   "exc": "Exception",
+   "body": "pass",
+   "nth": 9,
+   "line": 420
+  },
+  {
+   "fp": "bb96477b17b28deb",
+   "file": "console.py",
+   "func": "card_metrics",
+   "exc": "Exception",
+   "body": "pass",
+   "nth": 10,
+   "line": 432
+  },
+  {
+   "fp": "35d82c18dcb5a382",
+   "file": "console.py",
+   "func": "card_metrics",
+   "exc": "Exception",
+   "body": "pass",
+   "nth": 11,
+   "line": 451
+  },
+  {
+   "fp": "13f8221856e81311",
+   "file": "console.py",
+   "func": "card_metrics",
+   "exc": "Exception",
+   "body": "pass",
+   "nth": 12,
+   "line": 460
+  },
+  {
+   "fp": "dc2236427cf62c80",
+   "file": "console.py",
+   "func": "card_metrics",
+   "exc": "Exception",
+   "body": "pass",
+   "nth": 13,
+   "line": 482
+  },
+  {
+   "fp": "6c15bce26761f9a4",
+   "file": "console.py",
+   "func": "storage",
+   "exc": "Exception",
+   "body": "pass",
+   "nth": 2,
+   "line": 522
+  },
+  {
+   "fp": "ec7656a28ee2e313",
+   "file": "console.py",
+   "func": "storage",
+   "exc": "Exception",
+   "body": "pass",
+   "nth": 1,
+   "line": 524
+  },
+  {
+   "fp": "7c42e411885ce6f1",
+   "file": "console.py",
+   "func": "health_flag",
+   "exc": "Exception",
+   "body": "pass",
+   "nth": 1,
+   "line": 552
+  },
+  {
+   "fp": "5bbea5b2216433ef",
+   "file": "console.py",
+   "func": "card_identity",
+   "exc": "Exception",
+   "body": "pass",
+   "nth": 1,
+   "line": 584
+  },
+  {
+   "fp": "983ee6246ee8b44e",
+   "file": "console.py",
+   "func": "card_identity",
+   "exc": "Exception",
+   "body": "pass",
+   "nth": 2,
+   "line": 604
+  },
+  {
+   "fp": "f8367d07a108bdf9",
+   "file": "console.py",
+   "func": "live_hormones",
+   "exc": "Exception",
+   "body": "pass",
+   "nth": 2,
+   "line": 618
+  },
+  {
+   "fp": "5c30a3d96311376f",
+   "file": "console.py",
+   "func": "live_hormones",
+   "exc": "Exception",
+   "body": "pass",
+   "nth": 1,
+   "line": 621
+  },
+  {
+   "fp": "b189756dcc05dc96",
+   "file": "console.py",
+   "func": "card_integrity",
+   "exc": "Exception",
+   "body": "pass",
+   "nth": 1,
+   "line": 801
+  },
+  {
+   "fp": "fd80049738b618c7",
+   "file": "console.py",
+   "func": "talk_state",
+   "exc": "Exception",
+   "body": "pass",
+   "nth": 1,
+   "line": 826
+  },
+  {
+   "fp": "d7defa8152dd43a0",
+   "file": "console.py",
+   "func": "talk_state",
+   "exc": "Exception",
+   "body": "pass",
+   "nth": 3,
+   "line": 834
+  },
+  {
+   "fp": "77c14080a200e7b2",
+   "file": "console.py",
+   "func": "talk_state",
+   "exc": "Exception",
+   "body": "pass",
+   "nth": 2,
+   "line": 836
+  },
+  {
+   "fp": "33dcabd225bf50d4",
+   "file": "ctxweight.py",
+   "func": "detect_model",
+   "exc": "Exception",
+   "body": "pass",
+   "nth": 1,
+   "line": 143
+  },
+  {
+   "fp": "d579aed841b0ff85",
+   "file": "ctxweight.py",
+   "func": "rc_all",
+   "exc": "Exception",
+   "body": "pass",
+   "nth": 1,
+   "line": 263
+  },
+  {
+   "fp": "9576dba1123d20d2",
+   "file": "ctxweight.py",
+   "func": "effective_budget",
+   "exc": "Exception",
+   "body": "pass",
+   "nth": 1,
+   "line": 357
+  },
+  {
+   "fp": "2c9c2e76ff2e143a",
+   "file": "ctxweight.py",
+   "func": "effective_budget",
+   "exc": "Exception",
+   "body": "pass",
+   "nth": 2,
+   "line": 366
+  },
+  {
+   "fp": "a87f0e5b01d496c8",
+   "file": "disks.py",
+   "func": "card_fp",
+   "exc": "Exception",
+   "body": "pass",
+   "nth": 1,
+   "line": 156
+  },
+  {
+   "fp": "6966b56636086609",
+   "file": "disks.py",
+   "func": "set_retired",
+   "exc": "OSError",
+   "body": "pass",
+   "nth": 1,
+   "line": 259
+  },
+  {
+   "fp": "b64ec60c64ce1843",
+   "file": "disks.py",
+   "func": "_identity_id",
+   "exc": "Exception",
+   "body": "pass",
+   "nth": 2,
+   "line": 532
+  },
+  {
+   "fp": "e66f7855c54d66b2",
+   "file": "disks.py",
+   "func": "_identity_id",
+   "exc": "Exception",
+   "body": "pass",
+   "nth": 1,
+   "line": 534
+  },
+  {
+   "fp": "043cecc306574050",
+   "file": "disks.py",
+   "func": "_identity_id",
+   "exc": "Exception",
+   "body": "pass",
+   "nth": 3,
+   "line": 540
+  },
+  {
+   "fp": "35f7907fd640511b",
+   "file": "disks.py",
+   "func": "_identity_id",
+   "exc": "Exception",
+   "body": "pass",
+   "nth": 4,
+   "line": 550
+  },
+  {
+   "fp": "e8f3d10ddf2f78c3",
+   "file": "disks.py",
+   "func": "_writer_epoch",
+   "exc": "Exception",
+   "body": "pass",
+   "nth": 1,
+   "line": 572
+  },
+  {
+   "fp": "d08587050a2884e4",
+   "file": "disks.py",
+   "func": "_writer_epoch",
+   "exc": "Exception",
+   "body": "pass",
+   "nth": 2,
+   "line": 580
+  },
+  {
+   "fp": "75fa2e567fddff0f",
+   "file": "disks.py",
+   "func": "_atomic_json",
+   "exc": "OSError",
+   "body": "pass",
+   "nth": 1,
+   "line": 626
+  },
+  {
+   "fp": "84115a2f060af5b4",
+   "file": "disks.py",
+   "func": "_atomic_json",
+   "exc": "OSError",
+   "body": "pass",
+   "nth": 2,
+   "line": 635
+  },
+  {
+   "fp": "c5a7927a3317f642",
+   "file": "disks.py",
+   "func": "_lock_acquire",
+   "exc": "OSError",
+   "body": "pass",
+   "nth": 1,
+   "line": 655
+  },
+  {
+   "fp": "ca70721ef310c3d1",
+   "file": "disks.py",
+   "func": "_lock_release",
+   "exc": "OSError",
+   "body": "pass",
+   "nth": 1,
+   "line": 668
+  },
+  {
+   "fp": "ea3fd54a22607d58",
+   "file": "disks.py",
+   "func": "_lock_release",
+   "exc": "OSError",
+   "body": "pass",
+   "nth": 2,
+   "line": 672
+  },
+  {
+   "fp": "47f9442493872c9d",
+   "file": "disks.py",
+   "func": "epoch_check",
+   "exc": "(TypeError, ValueError)",
+   "body": "pass",
+   "nth": 1,
+   "line": 736
+  },
+  {
+   "fp": "93c064848a851017",
+   "file": "disks.py",
+   "func": "release_lease",
+   "exc": "FileNotFoundError",
+   "body": "pass",
+   "nth": 1,
+   "line": 915
+  },
+  {
+   "fp": "1fefcf06e60697bd",
+   "file": "disks.py",
+   "func": "manifest_identity",
+   "exc": "Exception",
+   "body": "pass",
+   "nth": 1,
+   "line": 956
+  },
+  {
+   "fp": "f9ce50356ebb2c8a",
+   "file": "disks.py",
+   "func": "build_manifest",
+   "exc": "OSError",
+   "body": "continue",
+   "nth": 1,
+   "line": 988
+  },
+  {
+   "fp": "6b10742fd9f9d7a3",
+   "file": "disks.py",
+   "func": "_bundle_chain_problems",
+   "exc": "Exception",
+   "body": "continue",
+   "nth": 1,
+   "line": 1173
+  },
+  {
+   "fp": "b475ced7ff67f33b",
+   "file": "disks.py",
+   "func": "sync_to",
+   "exc": "Exception",
+   "body": "pass",
+   "nth": 1,
+   "line": 1576
+  },
+  {
+   "fp": "86145fc7ee156e23",
+   "file": "dl_model.py",
+   "func": "total_size",
+   "exc": "Exception",
+   "body": "continue",
+   "nth": 1,
+   "line": 30
+  },
+  {
+   "fp": "ebcad4e26990154e",
+   "file": "dl_model.py",
+   "func": "main",
+   "exc": "OSError",
+   "body": "pass",
+   "nth": 1,
+   "line": 124
+  },
+  {
+   "fp": "754615ee0672eddd",
+   "file": "emotion_link.py",
+   "func": "EmotionLink.save",
+   "exc": "Exception",
+   "body": "pass",
+   "nth": 1,
+   "line": 292
+  },
+  {
+   "fp": "cfdc79017e9120ef",
+   "file": "facts.py",
+   "func": "_prev_subject",
+   "exc": "Exception",
+   "body": "pass",
+   "nth": 1,
+   "line": 627
+  },
+  {
+   "fp": "9f7c1073b0f2df60",
+   "file": "habits.py",
+   "func": "upsert",
+   "exc": "Exception",
+   "body": "pass",
+   "nth": 1,
+   "line": 377
+  },
+  {
+   "fp": "f0a1a79a8bacb64a",
+   "file": "identity.py",
+   "func": "IdentityAnchor.seal",
+   "exc": "Exception",
+   "body": "pass",
+   "nth": 1,
+   "line": 184
+  },
+  {
+   "fp": "128a516afa375a3f",
+   "file": "identity.py",
+   "func": "IdentityAnchor.set_name",
+   "exc": "Exception",
+   "body": "pass",
+   "nth": 1,
+   "line": 287
+  },
+  {
+   "fp": "c4ee6f3fcee6211b",
+   "file": "impression.py",
+   "func": "ensure",
+   "exc": "Exception",
+   "body": "pass",
+   "nth": 1,
+   "line": 242
+  },
+  {
+   "fp": "14e4044cbc7d090e",
+   "file": "migration.py",
+   "func": "_conn_file",
+   "exc": "Exception",
+   "body": "pass",
+   "nth": 1,
+   "line": 147
+  },
+  {
+   "fp": "4eefc3a1f52790a6",
+   "file": "migration.py",
+   "func": "_has_timeline",
+   "exc": "Exception",
+   "body": "pass",
+   "nth": 1,
+   "line": 172
+  },
+  {
+   "fp": "cd016eac662c60d0",
+   "file": "migration.py",
+   "func": "check_chain",
+   "exc": "Exception",
+   "body": "pass",
+   "nth": 1,
+   "line": 196
+  },
+  {
+   "fp": "bed71d19ff88c386",
+   "file": "migration.py",
+   "func": "last_event",
+   "exc": "Exception",
+   "body": "pass",
+   "nth": 1,
+   "line": 217
+  },
+  {
+   "fp": "be5d951bf72cea33",
+   "file": "mind_server.py",
+   "func": "Mind.__init__",
+   "exc": "Exception",
+   "body": "pass",
+   "nth": 1,
+   "line": 331
+  },
+  {
+   "fp": "9fe41e932da40ac0",
+   "file": "mind_server.py",
+   "func": "Mind.__init__",
+   "exc": "Exception",
+   "body": "pass",
+   "nth": 2,
+   "line": 361
+  },
+  {
+   "fp": "bfdc4fbb59f19678",
+   "file": "mind_server.py",
+   "func": "Mind.flow_time",
+   "exc": "Exception",
+   "body": "pass",
+   "nth": 1,
+   "line": 446
+  },
+  {
+   "fp": "2b816734fb1fe441",
+   "file": "mind_server.py",
+   "func": "Mind.flow_time",
+   "exc": "Exception",
+   "body": "pass",
+   "nth": 2,
+   "line": 458
+  },
+  {
+   "fp": "2895dbd9907142d0",
+   "file": "mind_server.py",
+   "func": "Mind.flow_time",
+   "exc": "Exception",
+   "body": "pass",
+   "nth": 3,
+   "line": 465
+  },
+  {
+   "fp": "c1389afab5aa88c2",
+   "file": "mind_server.py",
+   "func": "Mind.context",
+   "exc": "Exception",
+   "body": "pass",
+   "nth": 1,
+   "line": 521
+  },
+  {
+   "fp": "ec210671bd490522",
+   "file": "mind_server.py",
+   "func": "Mind.close",
+   "exc": "Exception",
+   "body": "pass",
+   "nth": 1,
+   "line": 745
+  },
+  {
+   "fp": "2d26b53faac380cd",
+   "file": "mind_server.py",
+   "func": "api_token",
+   "exc": "OSError",
+   "body": "pass",
+   "nth": 1,
+   "line": 845
+  },
+  {
+   "fp": "a705b87ee38eb998",
+   "file": "mind_server.py",
+   "func": "_gate_note_blocked",
+   "exc": "Exception",
+   "body": "pass",
+   "nth": 1,
+   "line": 893
+  },
+  {
+   "fp": "904e3bc4564ef721",
+   "file": "mind_server.py",
+   "func": "Handler._route",
+   "exc": "Exception",
+   "body": "pass",
+   "nth": 1,
+   "line": 1134
+  },
+  {
+   "fp": "5bfd1145628929e5",
+   "file": "mind_server.py",
+   "func": "Handler._route",
+   "exc": "Exception",
+   "body": "pass",
+   "nth": 2,
+   "line": 1315
+  },
+  {
+   "fp": "e4df11001aa2021a",
+   "file": "mind_server.py",
+   "func": "Handler._route",
+   "exc": "Exception",
+   "body": "pass",
+   "nth": 3,
+   "line": 1548
+  },
+  {
+   "fp": "7fe5aa5bd683b6db",
+   "file": "mind_server.py",
+   "func": "Handler._route",
+   "exc": "Exception",
+   "body": "pass",
+   "nth": 4,
+   "line": 1884
+  },
+  {
+   "fp": "d2f7b3bc90a11c9f",
+   "file": "mind_server.py",
+   "func": "Handler._route",
+   "exc": "Exception",
+   "body": "pass",
+   "nth": 5,
+   "line": 1962
+  },
+  {
+   "fp": "6713b62b0a2c8ed8",
+   "file": "mind_server.py",
+   "func": "Handler._route",
+   "exc": "Exception",
+   "body": "pass",
+   "nth": 6,
+   "line": 2000
+  },
+  {
+   "fp": "a77aa69e25b0b274",
+   "file": "mind_server.py",
+   "func": "Handler._timed",
+   "exc": "Exception",
+   "body": "pass",
+   "nth": 1,
+   "line": 2402
+  },
+  {
+   "fp": "d3000dd50bb9a946",
+   "file": "mind_server.py",
+   "func": "_start_inbox_picker.loop",
+   "exc": "Exception",
+   "body": "pass",
+   "nth": 1,
+   "line": 2456
+  },
+  {
+   "fp": "17e0508987cffab4",
+   "file": "mind_server.py",
+   "func": "_lat_add",
+   "exc": "Exception",
+   "body": "pass",
+   "nth": 1,
+   "line": 2484
+  },
+  {
+   "fp": "1107ee47dcda9ca8",
+   "file": "mind_server.py",
+   "func": "_bridge_tools",
+   "exc": "Exception",
+   "body": "pass",
+   "nth": 1,
+   "line": 2539
+  },
+  {
+   "fp": "8a90220da586d3c7",
+   "file": "mind_server.py",
+   "func": "_bridge_tools",
+   "exc": "Exception",
+   "body": "continue",
+   "nth": 1,
+   "line": 2551
+  },
+  {
+   "fp": "fdce066faa137127",
+   "file": "mind_server.py",
+   "func": "_qq_guard",
+   "exc": "Exception",
+   "body": "pass",
+   "nth": 1,
+   "line": 2571
+  },
+  {
+   "fp": "1c6a70175df83424",
+   "file": "mind_server.py",
+   "func": "_qq_guard",
+   "exc": "Exception",
+   "body": "pass",
+   "nth": 2,
+   "line": 2576
+  },
+  {
+   "fp": "a64d783552f30027",
+   "file": "mind_server.py",
+   "func": "_reconcile",
+   "exc": "Exception",
+   "body": "pass",
+   "nth": 1,
+   "line": 2886
+  },
+  {
+   "fp": "f88b87cf832134fc",
+   "file": "mind_server.py",
+   "func": "_drop_lease",
+   "exc": "Exception",
+   "body": "pass",
+   "nth": 1,
+   "line": 2908
+  },
+  {
+   "fp": "cb245615eb8b819c",
+   "file": "mind_server.py",
+   "func": "_start_lease_keeper.loop",
+   "exc": "Exception",
+   "body": "pass",
+   "nth": 1,
+   "line": 2948
+  },
+  {
+   "fp": "cb5f25371a6579b0",
+   "file": "mind_server.py",
+   "func": "main",
+   "exc": "Exception",
+   "body": "pass",
+   "nth": 1,
+   "line": 3290
+  },
+  {
+   "fp": "be67baf102e3334d",
+   "file": "seal.py",
+   "func": "load_key",
+   "exc": "OSError",
+   "body": "pass",
+   "nth": 1,
+   "line": 28
+  },
+  {
+   "fp": "0523227690b55330",
+   "file": "timeline.py",
+   "func": "writer_id",
+   "exc": "Exception",
+   "body": "pass",
+   "nth": 1,
+   "line": 77
+  },
+  {
+   "fp": "ece27d82ec966d14",
+   "file": "timeline.py",
+   "func": "writer_id",
+   "exc": "Exception",
+   "body": "pass",
+   "nth": 2,
+   "line": 84
+  },
+  {
+   "fp": "4fc8f346d0c63c77",
+   "file": "timeline.py",
+   "func": "Timeline._prune_index",
+   "exc": "Exception",
+   "body": "continue",
+   "nth": 1,
+   "line": 492
+  },
+  {
+   "fp": "9060c813c2cf3263",
+   "file": "timeline.py",
+   "func": "Timeline.birth_ts",
+   "exc": "Exception",
+   "body": "pass",
+   "nth": 1,
+   "line": 676
+  },
+  {
+   "fp": "716afd270257e800",
+   "file": "tools/come_back.py",
+   "func": "stop_service",
+   "exc": "Exception",
+   "body": "pass",
+   "nth": 1,
+   "line": 84
+  },
+  {
+   "fp": "82fa563558fc42fa",
+   "file": "tools/come_back.py",
+   "func": "main",
+   "exc": "Exception",
+   "body": "pass",
+   "nth": 1,
+   "line": 269
+  },
+  {
+   "fp": "c54f4157ac76d22f",
+   "file": "tools/diary.py",
+   "func": "<module>",
+   "exc": "Exception",
+   "body": "pass",
+   "nth": 1,
+   "line": 30
+  },
+  {
+   "fp": "d3d39781cc88946f",
+   "file": "tools/diary.py",
+   "func": "ready",
+   "exc": "Exception",
+   "body": "pass",
+   "nth": 1,
+   "line": 59
+  },
+  {
+   "fp": "95fb244e02e7d8e0",
+   "file": "tools/diary.py",
+   "func": "_events",
+   "exc": "Exception",
+   "body": "pass",
+   "nth": 1,
+   "line": 79
+  },
+  {
+   "fp": "4a4453496d0bfd8b",
+   "file": "tools/diary.py",
+   "func": "write",
+   "exc": "Exception",
+   "body": "pass",
+   "nth": 1,
+   "line": 113
+  },
+  {
+   "fp": "d3fec3c9d1c54e83",
+   "file": "tools/diary.py",
+   "func": "write",
+   "exc": "Exception",
+   "body": "pass",
+   "nth": 2,
+   "line": 130
+  },
+  {
+   "fp": "a683b3af6125540d",
+   "file": "tools/e2e_lock.py",
+   "func": "_post",
+   "exc": "Exception",
+   "body": "pass",
+   "nth": 1,
+   "line": 58
+  },
+  {
+   "fp": "2523ceb4ad5b36c2",
+   "file": "tools/env_probe.py",
+   "func": "probe_disks",
+   "exc": "Exception",
+   "body": "pass",
+   "nth": 1,
+   "line": 104
+  },
+  {
+   "fp": "e0b58006afd9b71e",
+   "file": "tools/env_probe.py",
+   "func": "probe_python",
+   "exc": "Exception",
+   "body": "pass",
+   "nth": 1,
+   "line": 123
+  },
+  {
+   "fp": "efad0b888bbcc266",
+   "file": "tools/env_probe.py",
+   "func": "probe_torch",
+   "exc": "Exception",
+   "body": "pass",
+   "nth": 1,
+   "line": 200
+  },
+  {
+   "fp": "8f49de835719c9c4",
+   "file": "tools/env_probe.py",
+   "func": "probe_torch",
+   "exc": "Exception",
+   "body": "pass",
+   "nth": 2,
+   "line": 206
+  },
+  {
+   "fp": "cfbb5b1402ca9c6a",
+   "file": "tools/env_probe.py",
+   "func": "<module>",
+   "exc": "Exception",
+   "body": "pass",
+   "nth": 1,
+   "line": 389
+  },
+  {
+   "fp": "d63d1389ae702be6",
+   "file": "tools/first_run.py",
+   "func": "_fix_stdout",
+   "exc": "Exception",
+   "body": "pass",
+   "nth": 1,
+   "line": 44
+  },
+  {
+   "fp": "c4de55ab290bd88b",
+   "file": "tools/first_run.py",
+   "func": "_dir_size",
+   "exc": "OSError",
+   "body": "pass",
+   "nth": 1,
+   "line": 69
+  },
+  {
+   "fp": "df6466ca09aadc57",
+   "file": "tools/first_run.py",
+   "func": "pick_local_target",
+   "exc": "OSError",
+   "body": "continue",
+   "nth": 1,
+   "line": 85
+  },
+  {
+   "fp": "26a382415766ff9e",
+   "file": "tools/fix_sysmark.py",
+   "func": "main",
+   "exc": "Exception",
+   "body": "pass",
+   "nth": 1,
+   "line": 109
+  },
+  {
+   "fp": "5e652085b2e95a0d",
+   "file": "tools/install_to_dsh.py",
+   "func": "<module>",
+   "exc": "Exception",
+   "body": "pass",
+   "nth": 1,
+   "line": 29
+  },
+  {
+   "fp": "60a64facbad197c0",
+   "file": "tools/media_audio.py",
+   "func": "load_transcript",
+   "exc": "Exception",
+   "body": "continue",
+   "nth": 1,
+   "line": 68
+  },
+  {
+   "fp": "c8990deca075f26a",
+   "file": "tools/media_audio.py",
+   "func": "try_asr",
+   "exc": "Exception",
+   "body": "pass",
+   "nth": 1,
+   "line": 127
+  },
+  {
+   "fp": "f209dd7d9acb4bdb",
+   "file": "tools/media_video.py",
+   "func": "main",
+   "exc": "Exception",
+   "body": "pass",
+   "nth": 1,
+   "line": 180
+  },
+  {
+   "fp": "b775a0dd4e6afd02",
+   "file": "tools/mine_habits.py",
+   "func": "load_corpus",
+   "exc": "Exception",
+   "body": "continue",
+   "nth": 1,
+   "line": 70
+  },
+  {
+   "fp": "bacb41a56a153b7a",
+   "file": "tools/open_console.py",
+   "func": "<module>",
+   "exc": "Exception",
+   "body": "pass",
+   "nth": 1,
+   "line": 30
+  },
+  {
+   "fp": "5b24a3d6c5422be3",
+   "file": "tools/portable.py",
+   "func": "_service_running",
+   "exc": "Exception",
+   "body": "pass",
+   "nth": 1,
+   "line": 119
+  },
+  {
+   "fp": "2c721ddffa98801b",
+   "file": "tools/portable.py",
+   "func": "cmd_plan",
+   "exc": "ValueError",
+   "body": "pass",
+   "nth": 1,
+   "line": 314
+  },
+  {
+   "fp": "07d0c99bdf667c13",
+   "file": "tools/portable.py",
+   "func": "cmd_plan",
+   "exc": "Exception",
+   "body": "pass",
+   "nth": 1,
+   "line": 331
+  },
+  {
+   "fp": "59c2d4ae8f7c1586",
+   "file": "tools/portable.py",
+   "func": "_land_apply",
+   "exc": "Exception",
+   "body": "pass",
+   "nth": 1,
+   "line": 744
+  },
+  {
+   "fp": "5aadf738748dd7fc",
+   "file": "tools/portable.py",
+   "func": "cmd_land",
+   "exc": "OSError",
+   "body": "pass",
+   "nth": 1,
+   "line": 1316
+  },
+  {
+   "fp": "4b1df337dfddd69d",
+   "file": "tools/portable.py",
+   "func": "_clear_retired",
+   "exc": "Exception",
+   "body": "pass",
+   "nth": 1,
+   "line": 1374
+  },
+  {
+   "fp": "c01687ed18ef0797",
+   "file": "tools/proactive.py",
+   "func": "load_cfg",
+   "exc": "Exception",
+   "body": "pass",
+   "nth": 1,
+   "line": 57
+  },
+  {
+   "fp": "8761a4eb7d5e9398",
+   "file": "tools/proactive.py",
+   "func": "_spans",
+   "exc": "Exception",
+   "body": "continue",
+   "nth": 1,
+   "line": 93
+  },
+  {
+   "fp": "59b1ae7afff1162e",
+   "file": "tools/proactive.py",
+   "func": "_ping_candidates",
+   "exc": "Exception",
+   "body": "continue",
+   "nth": 1,
+   "line": 177
+  },
+  {
+   "fp": "bc9aa8b9e4544541",
+   "file": "tools/qq_guard.py",
+   "func": "_api_headers",
+   "exc": "OSError",
+   "body": "continue",
+   "nth": 1,
+   "line": 329
+  },
+  {
+   "fp": "5bbca93d10d5800f",
+   "file": "tools/qq_guard.py",
+   "func": "quota_allow",
+   "exc": "Exception",
+   "body": "pass",
+   "nth": 1,
+   "line": 441
+  },
+  {
+   "fp": "627cc7ae1a645a80",
+   "file": "tools/qq_guard.py",
+   "func": "_load_seen",
+   "exc": "Exception",
+   "body": "pass",
+   "nth": 1,
+   "line": 515
+  },
+  {
+   "fp": "26d2ce9dc0bca5fb",
+   "file": "tools/qq_guard.py",
+   "func": "status_load",
+   "exc": "Exception",
+   "body": "pass",
+   "nth": 1,
+   "line": 537
+  },
+  {
+   "fp": "5fbc41ba31f00243",
+   "file": "tools/qq_guard.py",
+   "func": "_FileLock.__enter__",
+   "exc": "OSError",
+   "body": "pass",
+   "nth": 1,
+   "line": 575
+  },
+  {
+   "fp": "063f75b251aa04a2",
+   "file": "tools/qq_guard.py",
+   "func": "_FileLock.__exit__",
+   "exc": "OSError",
+   "body": "pass",
+   "nth": 1,
+   "line": 585
+  },
+  {
+   "fp": "68f9f8b660cef9c3",
+   "file": "tools/qq_guard.py",
+   "func": "read_todo",
+   "exc": "Exception",
+   "body": "continue",
+   "nth": 1,
+   "line": 652
+  },
+  {
+   "fp": "e5031f847f64c2ec",
+   "file": "tools/qq_guard.py",
+   "func": "poll_once",
+   "exc": "Exception",
+   "body": "continue",
+   "nth": 1,
+   "line": 809
+  },
+  {
+   "fp": "bf0155e983909dcd",
+   "file": "tools/qq_guard.py",
+   "func": "_trim_todo",
+   "exc": "Exception",
+   "body": "pass",
+   "nth": 1,
+   "line": 890
+  },
+  {
+   "fp": "cc3da363576cbe7d",
+   "file": "tools/qq_guard.py",
+   "func": "run_forever",
+   "exc": "Exception",
+   "body": "pass",
+   "nth": 1,
+   "line": 1026
+  },
+  {
+   "fp": "dd646eabb55a97a8",
+   "file": "tools/qq_memes.py",
+   "func": "load_index",
+   "exc": "Exception",
+   "body": "pass",
+   "nth": 1,
+   "line": 59
+  },
+  {
+   "fp": "8364293b5c9ddceb",
+   "file": "tools/qq_memes.py",
+   "func": "collect",
+   "exc": "Exception",
+   "body": "continue",
+   "nth": 1,
+   "line": 111
+  },
+  {
+   "fp": "ee1986481788a3ce",
+   "file": "tools/qq_proactive.py",
+   "func": "cfg_windows",
+   "exc": "Exception",
+   "body": "continue",
+   "nth": 1,
+   "line": 86
+  },
+  {
+   "fp": "0ddd03d4ad15176f",
+   "file": "tools/qq_say.py",
+   "func": "main",
+   "exc": "Exception",
+   "body": "pass",
+   "nth": 1,
+   "line": 261
+  },
+  {
+   "fp": "ca2a41fc3ee02a83",
+   "file": "tools/quiet_policy.py",
+   "func": "count_self",
+   "exc": "Exception",
+   "body": "pass",
+   "nth": 1,
+   "line": 46
+  },
+  {
+   "fp": "313c415ed1375258",
+   "file": "tools/quiet_policy.py",
+   "func": "last_self_ts",
+   "exc": "Exception",
+   "body": "pass",
+   "nth": 1,
+   "line": 59
+  },
+  {
+   "fp": "a04a1a7aab0630c6",
+   "file": "tools/replica.py",
+   "func": "_snapshot",
+   "exc": "Exception",
+   "body": "pass",
+   "nth": 1,
+   "line": 127
+  },
+  {
+   "fp": "1faac4bbef3b903d",
+   "file": "tools/replica.py",
+   "func": "_ckpt",
+   "exc": "Exception",
+   "body": "pass",
+   "nth": 1,
+   "line": 143
+  },
+  {
+   "fp": "81c2b64df7e13c29",
+   "file": "tools/smoke.py",
+   "func": "static_checks",
+   "exc": "OSError",
+   "body": "pass",
+   "nth": 1,
+   "line": 84
+  },
+  {
+   "fp": "c34a66765c9614c4",
+   "file": "tools/smoke.py",
+   "func": "static_checks",
+   "exc": "Exception",
+   "body": "pass",
+   "nth": 1,
+   "line": 96
+  },
+  {
+   "fp": "6b9873219c38b6f2",
+   "file": "tools/smoke.py",
+   "func": "static_checks",
+   "exc": "OSError",
+   "body": "pass",
+   "nth": 2,
+   "line": 106
+  },
+  {
+   "fp": "86cd72aabc5c6b6f",
+   "file": "tools/smoke.py",
+   "func": "rollback_checks",
+   "exc": "Exception",
+   "body": "pass",
+   "nth": 1,
+   "line": 208
+  },
+  {
+   "fp": "c6d683a383eba7c4",
+   "file": "tools/smoke.py",
+   "func": "rollback_checks",
+   "exc": "Exception",
+   "body": "pass",
+   "nth": 2,
+   "line": 212
+  },
+  {
+   "fp": "689bd28385a35598",
+   "file": "tools/smoke.py",
+   "func": "rollback_checks",
+   "exc": "Exception",
+   "body": "pass",
+   "nth": 3,
+   "line": 254
+  },
+  {
+   "fp": "0618c6cd3bb0d558",
+   "file": "tools/voice.py",
+   "func": "load_cfg",
+   "exc": "Exception",
+   "body": "pass",
+   "nth": 1,
+   "line": 124
+  },
+  {
+   "fp": "96f409eae5e8d3f7",
+   "file": "tools/voice.py",
+   "func": "save_cfg",
+   "exc": "Exception",
+   "body": "continue",
+   "nth": 1,
+   "line": 143
+  },
+  {
+   "fp": "877ff993fad80f61",
+   "file": "tools/voice.py",
+   "func": "synth",
+   "exc": "OSError",
+   "body": "pass",
+   "nth": 1,
+   "line": 211
+  },
+  {
+   "fp": "f3ca7747375d4d2b",
+   "file": "tools/voice.py",
+   "func": "synth",
+   "exc": "OSError",
+   "body": "pass",
+   "nth": 2,
+   "line": 225
+  },
+  {
+   "fp": "194dd720bd9db63c",
+   "file": "versions.py",
+   "func": "collect",
+   "exc": "Exception",
+   "body": "pass",
+   "nth": 1,
+   "line": 112
+  },
+  {
+   "fp": "b4d542c43b993621",
+   "file": "viscera.py",
+   "func": "inject",
+   "exc": "Exception",
+   "body": "continue",
+   "nth": 1,
+   "line": 445
+  },
+  {
+   "fp": "1bfc8a5bb7180076",
+   "file": "vmath.py",
+   "func": "build_idf",
+   "exc": "Exception",
+   "body": "continue",
+   "nth": 1,
+   "line": 29
+  },
+  {
+   "fp": "f1b1d88ce7cbd458",
+   "file": "whale_mcp.py",
+   "func": "_build.mind_context",
+   "exc": "Exception",
+   "body": "pass",
+   "nth": 1,
+   "line": 145
+  }
+ ]
+}

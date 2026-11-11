@@ -44,3 +44,20 @@ _t7*_*/
 
 # 发布脚本的标记文件
 .builder_meta
+
+# 运行态产物（V7 补齐）
+cache/
+checkpoints/
+device.json
+disks/
+_trash/
+dev/
+probe/
+
+
+# 真实聊天语料/二维码（含群号、uid、登录码，绝不进公开仓）
+qq-corpus*.jsonl
+qq-notes.md
+qq-login-qr*.png
+habits-*-qq.*
+

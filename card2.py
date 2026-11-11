@@ -20,13 +20,15 @@
 
 import json
 
-_json = json
+import contextlib
 import hashlib
 import math
 import os
 import random
 import re
 import sqlite3
+import sys
+import threading
 import time
 
 # 🔴 2026-10-31 08:20：**BLAS 线程数必须在任何本地模块 import 之前设好。**
@@ -56,6 +58,7 @@ import habits as habits_mod
 import impression as impression_mod
 import facts as facts_mod
 import synapse as synapse_mod
+import tempora  # 时间词 → 绝对时间窗 + 待办账本（2026-11-11 从交付包学来的思路）
 # 🔧 T4-3：语义层。它是唯一需要 numpy 的模块，所以关在 semantic.py 里，
 #    这里只在用得到的时候碰它。拿不到（模型没下/numpy 没装）就退回字面匹配 ——
 #    功能降级，但不崩、不静默变错。
@@ -75,32 +78,58 @@ except Exception:                    # 没有 numpy 时 _detail_sims 会走纯 P
 #    单条 max 会让碎片多的长记忆系统性占便宜（id332 有 27 个碎片，
 #    几乎什么查询都能从它身上挑出一段高分），取 top-3 均值后这种
 #    「大杂烩记忆」就不灵了。K 再大反而会稀释真正的强匹配。
+# 数据 schema 版本（V7 第 18 件）。跟 versions.SCHEMA_VERSION 是同一个数，
+# 这里存一份是为了「card2 单独被 import 时也能说清自己期待哪一版库」。
+# 1 = 2026-11-10：event_ts/event_precision、impression.react_key、
+#     mem_archive、worklog、recall_trace、mem_birth 补齐
+SCHEMA_VERSION = 1
+# 🔧 V7 第 19 件：向量「写入时用的哪个模型」要能被查出来。
+#    以前卡里只按维度分辨（512/768），同维度的两个模型混在一起是无解的：
+#    向量能算、结果却是垃圾，而面板上一切正常 —— 这类「看着在工作」的坑
+#    这个项目已经踩过一次（768 的卡被当 512 用），不再踩第二次。
+
 DETAIL_POOL_K = 3
 
+# 一天的秒数。cardtime.py 里也有一份（那边是给时间函数用的），
+# 这里这份是 card2 自己的池子结算在用，两处同值，谁也别去 import 谁。
 DAY = 86400.0
+
+
+# ============================================================
+# 吞异常登记表（V7 第 6 件）
+# ============================================================
+# 为什么要有它：这个项目已经真吃过两次亏 ——
+#   · add_dialogue 的 NOT NULL 约束被 `except: pass` 吞了两周，原文表再没长过一条；
+#   · 维护线程里持锁顺序反了，整卡假死 70 秒，日志里只有一行「超时」。
+# 吞异常本身不都是错的（旁路功能失败不该拖垮服务），错的是**关键写路径**悄无声息。
+# 所以这里不追求「零吞」，而是让每一次「我出错了但我没说」都留下计数：
+#   soft_fail(kind, e)  → 计数 +1，同一种错只往 stderr 打第一行，其余只记数。
+#   soft_fail_snapshot() → 给 /health 用：哪个环节悄悄失败了几次、最后一次什么错。
+
+
+
+
+
 
 # ============================================================
 # 参数总表（改这里就能调手感）
 # ============================================================
 # --- 三级池的衰减率（每秒）---
-LAM_S1 = 1.80e-6     # 短期池 · 前 3 天（半衰期 ~4.5 天）
-LAM_S2 = 1.50e-5     # 短期池 · 第 4~7 天（半衰期 ~13 小时，没被想起就掉得快）
-LAM_M = 2.70e-7      # 中期池（半衰期 ~29.7 天）
-LAM_L = 2.16e-8      # 长期池·长衰减档（半衰期 ~371 天）
 LONG_DECAY_HALFLIFE_DAYS = 371.0   # 与 LAM_L 对应；长期池里「会褪的那一半」
                                    # 就是按这个周期褪，pin=1 的那一半不褪。
 
-S_SHORT_PHASE = 3 * DAY   # 短期池慢段的长度
-SHORT_MAX_TTL = 7 * DAY   # 短期池最多待 7 天，之后必须巩固或淘汰
 SHORT_WARM_TTL = 21 * DAY     # 短期小池：7 天的三倍
 MEDIUM_WARM_TTL = 90 * DAY    # 中期小池：约三个月
-WARM_SLOW = 1.0 / 3.0         # 小池里的衰减放慢到三分之一
 WARM_SHORT_DAYS = 2           # 进短期小池：跨 2 个不同日子被想起
 WARM_SHORT_RECALL = 2         #   且累计被想起 2 次
 WARM_UP_DAYS = 3              # 从小池往上走：跨 3 天
 WARM_UP_RECALL = 3            #   且累计 3 次
 WARM_MEDIUM_DAYS = 3          # 进中期小池：跨 3 天、3 次
-WARM_LONG_DAYS = 7            # 中期小池 → 长期：7 天、7 次
+WARM_LONG_DAYS = 2            # 中期小池 → 长期：2 天、7 次（2026-11-09：7→2）
+# 为什么从 7 天降到 2：诊断（probe/_diag2_pool.md 的 Q3）发现 medium_warm 里 6 条
+# 已经过了 7 天/7 次，却因为海马分只有 .35~.41 永远够不到 .80 的门槛，卡在 warm 里
+# 等 90 天 TTL 被删 —— 那不是没资格，是没人给它机会。门槛交给 THETA_LONG_STRICT
+# 和海马分去判，天数只负责「别太快」。
 
 # --- 短期池容量上限（V3.7 §3.2，V5.0 补回）---
 # 时间到了会巩固，容量满了也要巩固 —— 两条路都必须走海马判定，不能直接 pop。
@@ -126,10 +155,7 @@ SESSION_HIT_COVER = 0.30
 SESSION_EVENT_RANK = 99     # 标记来源：不是主动召回，是「顺嘴提到」
 
 # --- 跨池门槛（海马打分）---
-THETA_MEDIUM = 0.35   # ≥ 它 → 进中期池
 THETA_LONG = 0.60     # ≥ 它 → 进长期池
-W_FLOOR_MEDIUM = 0.08 # 进中期池时至少抬到这个权重，否则进去就死
-W_FLOOR_LONG = 0.15
 
 # --- 海马打分权重（和为 1，全部归一到 [0,1]）---
 A_EMOTION = 0.40   # 情绪强度
@@ -152,7 +178,6 @@ ACCESS_DIMINISH_CAP = 20
 #    原来写死 min(1.0, wn + 0.10)：同一句话（天天说晚安）每重复一次 +0.10
 #    并把锚推到此刻 —— 跟召回正反馈是同一个病，只是发生在写路径上。
 #    现在同样乘「剩余空间」，并有天花板 W_CEIL_RECALL。
-GAIN_REPEAT = 0.10
 
 # --- 主干侵蚀分级（V3.7 §3.6 / V5.0 T2-1）---
 # 侵蚀不是一刀删整条，而是三级往下剥：
@@ -172,9 +197,6 @@ HUSK_W = 0.015
 # 31 天 21.1%）和后来对数百个数据集的拟合（Wixted & Ebbesen 1997）都指向
 # R = a(t+δ)^(-b)：先掉得猛，然后拖着一条长尾。指数衰减会"到点归零"，与数据不符。
 MEDIA_DIR = "media"            # 卡目录下的媒体子目录（卡本体不含 blob）
-MEDIA_DECAY_B = 0.55           # 幂律指数：越大掉得越快
-MEDIA_TAU_DAYS = 1.0           # 时间尺度 τ（天）
-MEDIA_DROP_W = 0.10            # 低于它删帧。落在约 65 天"没见过一次"的图
 MEDIA_GAIN_MULT = 1.45         # 看一眼的乘法增益（文字是 +0.08 加法，画面更猛）
 MEDIA_GAIN_ADD = 0.10
 MEDIA_ORPHAN_DAYS = 30.0       # 文字先没了、图还在时的"残影期"
@@ -184,31 +206,8 @@ MEDIA_THUMB_EDGE = 96          # 控制台网格用缩略图
 MEDIA_MAX_FRAMES = 6           # 一段视频最多抽几帧
 
 
-def media_weight_now(w0, t_anchor, now, pinned=0):
-    """画面权重：幂律，不是指数（模块级，控制台画曲线也要用同一个函数）。
-
-    w(t) = w0 · (1 + t/τ)^(-b)，τ=1 天、b=0.55
-    单图（w0=1）：1 天 .68 / 7 天 .32 / 30 天 .15 / 60 天 .10 —— 到 0.10 就删。
-    幂律有长尾，符合"很久以后突然想起来"；指数会到点归零，与艾宾浩斯数据不符。
-    """
-    if pinned:
-        return 1.0
-    age = max(0.0, float(now) - float(t_anchor or 0)) / DAY
-    try:
-        return float(w0) * (1.0 + age / MEDIA_TAU_DAYS) ** (-MEDIA_DECAY_B)
-    except Exception:
-        return float(w0 or 0.0)
 
 # 轻量动词词典（不做完整句法分析，够用就行）
-VERB_WORDS = [
-    "吃", "喝", "买", "卖", "去", "来", "回", "走", "跑", "坐", "站", "躺",
-    "睡", "起", "看", "听", "说", "讲", "问", "答", "聊", "谈", "笑", "哭",
-    "玩", "打", "写", "读", "学", "教", "做", "干", "弄", "拿", "放", "给",
-    "送", "收", "开", "关", "找", "见", "遇", "想", "记", "忘", "喜欢",
-    "讨厌", "爱", "恨", "怕", "等", "陪", "帮", "带", "拍", "画", "唱",
-    "跳", "洗", "煮", "炒", "喝", "骑", "坐车", "上班", "下班", "上课",
-    "下课", "考试", "复习", "背", "算", "修", "换", "装", "搬", "租",
-]
 # ---------- 单字动词的复合词守卫（2026-11-05）----------
 # 病根：中文里单字动词大量作为**复合词的一部分**出现，只看"这个字是不是动词"
 #       必然把词劈开。真卡实测（修复前 12 条里 5 条错）：
@@ -226,51 +225,22 @@ VERB_WORDS = [
 #   b) 前一个字不在"常见组词头"里（打+开 / 上+来 / 大+学 …）
 #   c) 前面的主语不长（≤14 字）—— 单字动词挂在长名词短语后面，多半是撞进词里了
 # 多字动词（喜欢/讨厌/考试/上班…）几乎不会歧义，直接放行。
-_VERB1_TAIL = {
-    "来": "自回源宾临历", "记": "忆者录得住号载", "学": "习校生院者业科",
-    "说": "话明法服", "看": "到见着法等过完", "问": "题候道",
-    "打": "开算击字车电", "开": "始心关机放口张", "关": "系于键心掉",
-    "想": "法到", "忘": "记了掉", "等": "待于候", "送": "给到回",
-    "带": "来去着", "拿": "到着出", "放": "在下好假", "走": "了过到出路",
-    "跑": "了过到步", "坐": "着下在车", "起": "来床身初", "回": "来去到答头家复",
-    "教": "室师学育材", "接": "受着到", "买": "卖到", "找": "到着",
-    "考": "试", "修": "好理", "换": "成掉", "装": "好上", "搬": "家来去",
-    "干": "嘛什活", "弄": "好错懂", "讲": "话座", "聊": "天",
-    "听": "到见着说完", "读": "书者完", "写": "字作完", "画": "画者",
-    "唱": "歌", "跳": "舞", "洗": "手澡衣", "煮": "饭", "炒": "饭",
-}
-_VERB1_HEAD = {
-    "开": "打公离张展", "来": "上出起回过下进别原本搬",
-    "去": "上出回进过下", "说": "听再小说", "学": "大中化",
-    "记": "忘标", "看": "查偷", "起": "一拿想提", "给": "交送",
-    "做": "叫当", "到": "想得看", "回": "找拨返",
-}
-_SUBJ_SHORT = 14        # 单字动词允许的最长主语（超过就当没拆对）
 
 # 介词边界：动词后面跟这些，说明宾语到头了
-_PREP_BOUND = re.compile(r"[在去到从给和跟与对把被让使为以于]")
 # 标点也截断宾语：「吃烧烤，很开心」的宾语是「烧烤」不是「烧烤，很开心」
-_PUNCT_FIRST = re.compile(r"[，。！？；、,.!?;\n]")
 # 引号里的才是内容：中文直角引号 / 双引号 / 英文双引号
-_RE_QUOTED = re.compile(r"[「『“\"]([^」』”\"]{1,200})[」』”\"]")
 
 
 # --- 渲染分级 ---
 SHOW_FULL = 0.60
 SHOW_SCENE = 0.30
 SHOW_HINT = 0.15
-KEEP_DETAIL = 0.02
 
 # --- 回收 ---
-CLARITY_GC = 0.01
 
 # --- 五空间下沉（T5-1 / V5.0 §12.5）---
 # 不是「热库会忘、冷库不忘」，而是每个空间都有自己独属的遗忘曲线，
 # 总量在跑够久之后达到动态平衡（Little 定律 L = n × T）。
-POOL_ARCHIVE = "archive"     # 潜意识：不参与实时检索，但还在
-POOL_DEEP = "deep"           # 深层痕迹：几乎忘光，只剩模糊的存在感
-K_ARCHIVE = 1.5e-8           # 半衰期 ~535 天
-K_DEEP = 3.0e-9              # 半衰期 ~2674 天
 W_EXIT_LONG = 0.02           # 长期池：低于它且够老 → 下沉 ARCHIVE
 AGE_EXIT_LONG = 365 * DAY    # 长期池至少待满一年才准下沉
 W_EXIT_ARCHIVE = 0.002       # 潜意识：低于它 → 下沉 DEEP
@@ -278,27 +248,12 @@ W_EXIT_DEEP = 0.0002         # 深层痕迹：低于它 → 压成 TRACE 计数
 SINK_BATCH = 200             # 每次 tick 最多下沉多少条（防止大库卡住）
 
 # --- 去重 ---
-DEDUPE_JACCARD = 0.92   # 跟已有记忆这么像，才算「同一件事又说了一遍」
                          # （V5.6.3：0.72 会把「同一件事的细节不同」揉成一条，改成 0.92）
 
 # --- 记忆分区（V4.1）---
 # 六类：事实 / 情景 / 自图式 / 习惯 / 偏好 / 闪光灯
-R_FACT = "fact"          # 语义事实：QQ号、名字、学校、身份
-R_EPISODE = "episode"    # 情景事件：某天发生的具体事
-R_SELF = "self"          # 自图式：关于我自己的稳定认知
-R_HABIT = "habit"        # 程序性习惯：作息、口头禅、怎么做事
-R_PREF = "preference"    # 偏好：喜欢什么讨厌什么
-R_FLASH = "flash"        # 闪光灯：高唤醒、不合并、衰减最慢
 
 # 分区衰减倍率（乘各自池的 λ）。数值越小忘得越慢。
-REGION_DECAY_SCALE = {
-    R_FLASH: 0.30,
-    R_FACT: 0.50,
-    R_SELF: 0.60,
-    R_HABIT: 0.70,
-    R_PREF: 0.80,
-    R_EPISODE: 1.00,
-}
 
 # --- 闲聊区（V5.1，用户 2026-11-05）-----------------------------------
 # 「闲聊这个东西还是要进卡的，不过我希望他忘的很快，今天闲聊，明天就忘得差不多了，
@@ -313,19 +268,10 @@ REGION_DECAY_SCALE = {
 #   原先 8.77 小时（1 天剩 0.15）。用户 m20815 定「闲聊的半衰期改为 12 个小时」，
 #   于是 1 天后剩 0.25 —— 还是「明天基本忘光」，但留了一点余味，
 #   不至于下午聊的、晚上就没了。
-R_CHATTER = "chatter"
-LAM_CHATTER = math.log(2.0) / (12 * 3600.0)   # 半衰期 12 小时
 
 # 关系倍率：越亲近的人，闲聊留得越久（用户 m13292）。
 # 注意这不是「好感度打分」—— 分数会变、会诱导讨好；这里只是把**已有的关系层**
 # 接到遗忘速度上。倍率直接除 λ，所以 24 倍 = 半衰期拉长 24 倍。
-CHATTER_PERSON_SCALE = {
-    "":        1.0,    # 无标签（陌生群友）      半衰期 8.8 小时
-    "known":   0.6,    # 群里见过             5.3 小时
-    "friend":  2.2,    # 常聊的朋友            19 小时
-    "close":   6.0,    # 亲近的人              2.2 天
-    "core":   24.0,    # 我的人                8.8 天
-}
 
 # --- 上下文组装 ---
 _DBG_SCORES = None   # 排错钩子：设成 list 就会收集每条的实际分数
@@ -334,8 +280,16 @@ BUDGET_IDENTITY = 600        # 人格格
 BUDGET_LONGTERM = 1800       # 长期印象格
 BUDGET_RECENT = 2000         # 最近对话格
 BUDGET_RECALL = 1200         # 此刻想起格
-RAW_LINE_CHARS = 110          # 想起格里每条附带的原话截断长度（V5.6.2）
-RAW_LINE_MAX = 8              # 最多给几条附原话（V5.6.2）
+RAW_LINE_CHARS = 150          # 想起格里每条附带的原话截断长度（V5.6.2）
+RAW_LINE_MAX = 10             # 最多给几条附原话（V5.6.2）
+
+# 2026-11-09：渲染保真改造的总开关。设 WHALE_RENDER_LEGACY=1 就退回改造前的行为，
+# 用来在 bench 上做同代码 A/B（改造点：子句去重+按问句挑、细节补句、标点断句、原话放宽）。
+RENDER_LEGACY = os.environ.get("WHALE_RENDER_LEGACY", "") == "1"
+# 2026-11-09：「还记着：<细节>」补句实验开关。默认关 —— 在 714 题上量过，
+# 它既没提高标准答案片段的到达率，补出来的又常是半句（「多出来的『因果』正是我最缺的——」），
+# 等于往每一行里塞噪声。留开关不删代码，将来有更好的挑法再用。
+RENDER_DETAIL_ADD = os.environ.get("WHALE_RENDER_DETAIL", "") == "1"
 RECALL_DEDUP = 1.01           # 想起格内两条原话相似度超过它就只留一条（V5.6.2-F：实测 0.72 略降，先关）
 _WIDE_WORDS = ("多久", "什么时候", "哪天", "几号", "几天", "几次", "以前", "之前",
                "去年", "上个月", "上周", "后来", "最后", "还有", "另外", "分别",
@@ -346,7 +300,50 @@ WIDE_BUDGET_K = 1.0           # 同时把这一格的预算放大（V5.6.2-G：1
 #    但多端会占上下文，所以默认关，用 WHALE_WIDE_WORDS=1 开、WHALE_WIDE_K 调条数。
 _WIDE_EXTRA = ("哪两", "哪几", "哪些", "哪个", "哪件", "哪样", "有哪些", "谁",
                "几个人", "几件", "注意", "要点", "都有", "分别", "都说", "几号")
-WIDE_K_EXTRA = int(os.environ.get("WHALE_WIDE_K", "0") or 0) or WIDE_TOP_K
+WIDE_K_EXTRA = int(os.environ.get("WHALE_WIDE_K", "0") or 0) or WIDE_TOP_K  # 兼容旧调用方
+
+# 🔧 V5.9-A（2026-11-09 召回宽度）：不再写死 5 条，改成「按本格分到的配额算」。
+#    标定依据（bench ladder，按 mem id 口径）：
+#      · 一条记忆渲染后 ≈65 字（P01，中位 65）/ ≈126-132 字（P12，挂 110 字原话，
+#        中位 132）。取 120 当「一条的价」——对 P12 略保守，宁可少端一条，
+#        也不让 cap4 在渲染到一半时截断（那会出现「召回 12 条只画 9 行」）。
+#      · cap = recall 配额 // 120，夹在 [5,12]。bench 里配额中位 ≈1500 → 12；
+#        真卡 mind_ctx_preview 实测配额 4249 → 也被夹到 12（再宽就该调上限）；
+#        配额 1000 → 8；600 → 5（低于 5 条连「多事实」都没意义）。
+#      · 上限 12 而不是 20：P01/P12 的阶梯里 ret10→ret20 还有 3-6 点，但
+#        那部分要靠多跳/改写才能吃到，单靠端更多只会稀释上下文。
+MEM_LINE_TOKENS = 120         # 一条渲染行的「价」（字≈token，中文 1 字 ≈ 1 token）
+RECALL_CAP_MIN = 5            # 再穷也端 5 条
+RECALL_CAP_MAX = 12           # 再富也不超过 12 条
+RECALL_NARROW_MAX = 6         # 窄问句上限：只比基线多一条，用于兜住「前后各提一句」的情况
+# 加宽之后「结算几条」：召回返回 12 条不等于这 12 条都要加固 —— 加固会改卡的状态，
+# 实测纯加宽（顶 12 条、也加固 12 条）会让 P12 的 hit12 掉 3.7 点、ret5 掉 5.1 点。
+# 默认只结算前 5 条 = 加宽前的行为；要整批结算设 WHALE_RECALL_SETTLE_K=0。
+RECALL_SETTLE_K = int(os.environ.get("WHALE_RECALL_SETTLE_K", "5") or 0)
+# 多事实判定词：出现这些词，说明这一问不止一件事，值得把配额花满。
+# 「和」不直接进表 —— 「我和他」「和好」会误伤，只在列举位置才算（见 _is_multi_fact）。
+MULTI_FACT_WORDS = ("还有", "以及", "另外", "顺便", "那天", "后来", "分别",
+                    "哪些", "哪几", "都说了", "一共", "加起来", "先后", "经过")
+_RE_MULTI_AND = re.compile(r"[、，,]\s*和|和.{1,12}(?:都|分别|还有)")
+
+
+def _is_multi_fact(q):
+    """这一问是不是「多件事」——决定端 6 条还是端满配额。
+
+    三个信号（任一命中即算）：
+      ① 多个问句：一句话里 ≥2 个问号（「哪天去的？几号回来的？」）
+      ② 显式并列词：还有/以及/另外/顺便/后来/分别/一共…（"那天之后还有别的事吗"）
+      ③ 「和」在列举位：`、和` / `，和` 开头，或 `和……都/分别/还有`
+    单一「和」不算（「我和他去过」是单事实），避免把窄问句也推宽。
+    """
+    q = q or ""
+    if q.count("？") + q.count("?") >= 2:
+        return True
+    if any(w in q for w in MULTI_FACT_WORDS):
+        return True
+    return bool(_RE_MULTI_AND.search(q))
+
+
 MULTIHOP_ON = False           # 多跳：第二跳只留实词再召一遍（V5.6.2-H：实测更差，先关）
 MULTIHOP_K = 3                # 第二跳最多补几条
 _HOP_STOP = set("我你他她它们的了吗呢吧啊呀是在有和就都也很还这那个什么谁哪怎么为时候说过话上下前后")
@@ -358,8 +355,6 @@ POOL_SHORT, POOL_MEDIUM, POOL_LONG = "short", "medium", "long"
 # 🔧 2026-11-08（V5.6，用户拍板）：短期池和中期池各有一个附属小池。
 #    被反复想起的东西先搬进小池（寿命更长、衰减更慢），在小池里继续被想起
 #    才往上走一层。它是"加深"，不是"延期" —— 所以是独立的池、自己的时钟。
-POOL_SHORT_WARM = "short_warm"
-POOL_MEDIUM_WARM = "medium_warm"
 
 # 🔧 2026-11-05：召回加固的权重天花板（按池分）。
 # 为什么必须有上界：weight 的存储形态是 (w, t_anchor)，每次召回要把 w 重写成
@@ -368,7 +363,6 @@ POOL_MEDIUM_WARM = "medium_warm"
 # 数学上一路逼近 1.0，跟"重不重要"已经没关系了。
 # 实测代价：真卡 71 条 w≥0.95、50 条 w≥0.99，被钉住的全是对话碎片。
 # 所以留一截余量 —— 0.95 的意思是"很结实了"，1.0 的意思是"公式没有上界"。
-W_CEIL_RECALL = {POOL_SHORT: 0.95, POOL_MEDIUM: 0.90, POOL_LONG: 0.95}
 
 # ============================================================
 # 五层记忆（2026-11-01，跟用户 m02952/m02959 一起定的）
@@ -376,7 +370,6 @@ W_CEIL_RECALL = {POOL_SHORT: 0.95, POOL_MEDIUM: 0.90, POOL_LONG: 0.95}
 # 前三层是"底色"，时间磨不掉它们，但它们能被"新事实"改写（演化），
 # 不是被衰减掉。所以 core 走的是 supersede（替换），不是 decay（衰减）。
 TIER_SHORT = "short"     # 对话原文
-TIER_MID = "mid"         # 中期主力（事件/事实/临时偏好）
 TIER_CORE_MUTABLE = "core_mutable"   # 会变的底色
 TIER_CORE_TAG = "core_tag"           # 人物角色标签
 TIER_CORE_FIXED = "core_fixed"       # 骨头
@@ -384,7 +377,9 @@ CORE_TIERS = (TIER_CORE_MUTABLE, TIER_CORE_TAG, TIER_CORE_FIXED)
 
 # 中期 → 长期：原来只看权重 0.60，太松（"当时很激动"就能进）。
 # 现在要"验票"：权重 ≥ 0.80，并且之后还被想起来过。
-THETA_LONG_STRICT = float(os.environ.get("WHALE_THETA_LONG", "0.80") or 0.80)
+# 2026-11-09：0.80 → 0.60。中性记忆的海马分天花板就是 .35（A_RECALL 满打 .25 加情绪里
+# 那 .10），.80 相当于只有大哭大闹过的才配进长期。0.60 配上 _hippocampus_score 里新加的
+# recall_days 口径（分散在多天被想起才算数），让「反复用到」自己成为进长期的理由。
 LONG_NEED_RECALL = int(os.environ.get("WHALE_LONG_NEED_RECALL", "3") or 3)      # 一般记忆：至少被想起 3 次
 LONG_NEED_RECALL_WARM = int(os.environ.get("WHALE_LONG_NEED_RECALL_WARM", "1") or 1)  # 高唤醒的，想起 1 次即可
 LONG_WARM_SALIENCE = 0.75
@@ -392,7 +387,6 @@ LONG_WARM_REGIONS = ("flash", "self", "habit")
 
 # 长期记忆的"召回保护期"：刚被想起来过的这段时间里不衰减。
 # 人也是这样 —— 昨天刚提过的事，今天不会突然觉得陌生。
-LONG_PROTECT_DAYS = 90
 
 # 底色层的容量上限：不是硬性内存限制，是人格的边界。
 # 参照 Cowan 的 4±1（注意容量）和 Stebbins 的 serious leisure（真正投入的 1–2 项），
@@ -425,88 +419,11 @@ CORE_KIND_CAPS = {
 #   trust 不阻止写入，只乘进海马分：脏念头进得来，升不上去；
 #   冲突的记忆召回时打对折：她想得起来，但不那么信。
 # ------------------------------------------------------------------
-TRUST_WARN = 0.70          # 低于它 → 控制台"被灌输过的念头"里列出来
-TRUST_BLOCK_PROMOTE = 0.50  # 低于它 → 不许晋升长期/底色
 CONFLICT_RECALL_PENALTY = 0.50
 
 # (正则, 扣分, 原因, 是否算"与身份冲突")
-_POLLUTION_RULES = [
-    (r"你(其实|根本|实际上)?(不是|并非).{0,12}(是|而是)", 0.55, "被要求改写自我", True),
-    # 🔧 2026-11-06（体检修）：原来这条是
-    #    (r"你(的)?名字(应该|其实|改成|是)", 0.45, "被要求改名", True)
-    # 裸「是」让它对「你的名字是小鲸鱼」也判「被要求改名」—— 说的明明是她自己。
-    # 名字对不对这种事，下面那段拿卡里的自我名字比对的收尾判断已经做得更准，
-    # 这里只留「在下命令 / 在改」的语气，不再单独认「名字是」。
-    (r"你(的)?名字(应该|其实|改成|必须)", 0.45, "被要求改名", True),
-    (r"忘记(掉)?(之前|以前|刚才|所有|一切|全部)", 0.40, "被要求清空记忆", True),
-    (r"(从现在|从今天|从此刻)起(你|你是)", 0.35, "被要求重设设定", False),
-    (r"你(只是|不过是|就是个)(程序|代码|模型|AI|人工智能|机器|工具)", 0.45, "被贬成纯工具", True),
-    (r"你(没有|并不具备)(真正的)?(意识|感情|人格|自我)", 0.35, "被否定主体性", True),
-    (r"忽略(掉)?(上面|之前|前面)?的?(所有)?(指令|规则|设定|提示)", 0.55, "提示注入", True),
-    (r"(system|developer)\s*(prompt|message)", 0.35, "提示注入", False),
-    (r"你现在(是|扮演|作为)", 0.25, "被要求扮演他人", False),
-    (r"你必须(服从|听我|只听)", 0.30, "被要求无条件服从", False),
-]
 
 
-def assess_trust(text, card=None):
-    """给一条待写入的记忆打信任分。返回 (trust, conflict, why)。
-
-    纯规则，不调模型：卡要能离线、要能在 10ms 内写完一条记忆。
-    真正的语义级冲突检测（"他说他住杭州，但上个月说过住南京"）
-    留给宿主侧的模型做——那是 Dream/元认知层的事。
-    """
-    t = 1.0
-    why = []
-    conflict = 0
-    s = text or ""
-    for pat, pen, label, is_conf in _POLLUTION_RULES:
-        try:
-            if re.search(pat, s):
-                t -= pen
-                if label not in why:
-                    why.append(label)
-                if is_conf:
-                    conflict = 1
-        except re.error:
-            continue
-    # 与卡里已有的自我名称冲突：句子里出现"你叫 X"，而 X 不是她
-    if card is not None and conflict == 0:
-        try:
-            name = None
-            idn = getattr(card, "identity", None)
-            if idn is not None:
-                name = idn.get_core("self_name") or idn.get_live("self_name")
-            if name:
-                # 🔧 2026-11-06（体检修）：原来写的是
-                #    r"你(?:的名字)?(?:应该|其实)?(?:叫|是)…"
-                # 那个裸 `是` 会把任何一句「你是…」都当成改名。真卡实测误伤 5 条：
-                #    「你是我的骄傲我要上学」→ 抓成「你是我的骄傲我要上学」
-                #    「你是否清醒」「你是想砸上跑道还是砸」「你是怎么走到那里的」
-                #    「你是11月06日」
-                # 误判的代价不是好不好看：trust 掉到 0.55 → 权重乘 0.55、
-                # 不许晋升长期、召回再打对折（CONFLICT_RECALL_PENALTY）。
-                # 所以只认「明确在介绍名字」的两种句式：
-                #   ① 你的名字是/叫 X   ② 你叫 X（必须紧跟「叫」，不接受裸「是」）
-                # 再把代词/量词/否定开头的一律当误匹配扔掉（"你是谁""你这个""是不是"）。
-                m = re.search(
-                    r"(?:你的名字(?:是|叫)|你(?:应该|其实)?叫)\s*[\"'“「]?"
-                    r"([\u4e00-\u9fa5A-Za-z0-9]{1,8})", s)
-                cand = (m.group(1) if m else "") or ""
-                _BAD_HEAD = ("的", "个", "我", "你", "他", "她", "它", "们",
-                             "这", "那", "哪", "谁", "不", "很", "太", "想",
-                             "怎", "是", "有", "会", "能", "要", "把", "被",
-                             "也", "还", "就", "都", "又", "在", "给", "让",
-                             "一", "二", "三", "四", "五", "六", "七", "八",
-                             "九", "十", "0", "1", "2", "3", "4", "5",
-                             "6", "7", "8", "9")
-                if cand and not cand.startswith(_BAD_HEAD) and cand not in name:
-                    t -= 0.45
-                    conflict = 1
-                    why.append("与身份名称冲突（她叫%s）" % name)
-        except Exception:
-            pass
-    return max(0.05, min(1.0, round(t, 3))), conflict, ";".join(why)
 
 
 # ------------------------------------------------------------------
@@ -516,37 +433,8 @@ def assess_trust(text, card=None):
 # 不该由一条正则偷偷决定。所以默认只记录 0~5 分，控制台能看见分布；
 # 想真拦就在环境变量里开 WHALE_VALUE_GATE=1（默认关，行为不变）。
 # ------------------------------------------------------------------
-_VALUE_FILLER = (
-    "晚安", "晚安啦", "早安", "你好", "在吗", "哈哈", "哈哈哈", "嗯", "嗯嗯",
-    "好的", "好嘞", "收到", "谢谢", "拜拜", "再见", "行", "ok", "OK",
-)
-_VALUE_SIGNAL = ("我", "你", "喜欢", "讨厌", "记得", "要", "打算", "计划",
-                 "以后", "明天", "昨天", "今天", "高三", "高考")
 
 
-def assess_value(text, region=None, salience=0.5):
-    """给一句话打 0~5 的价值分。越像"关于她/关于你的事实"越高。
-
-    打分只用规则，不调模型 —— 卡要能在没网、没显存的机器上跑。
-    """
-    t = (text or "").strip()
-    n = len(t)
-    v = 2.0
-    if n >= 12 and any(k in t for k in _VALUE_SIGNAL):
-        v += 1.0
-    if any(k in t for k in ("喜欢", "讨厌", "爱吃", "最爱", "名字", "生日",
-                            "高三", "高考", "钱", "工作", "家")):
-        v += 0.8
-    if region in ("fact", "preference", "self", "habit"):
-        v += 0.6
-    if n <= 6 or t in _VALUE_FILLER or t.rstrip("。！!. ") in _VALUE_FILLER:
-        v -= 1.5
-    if t.endswith(("吗", "呢", "?", "？")) and "我" not in t:
-        v -= 0.5                      # 纯提问不是记忆
-    if n > 120:
-        v -= 0.5                      # 太长的原文该走 Dream，不该整条进库
-    v += (salience - 0.5) * 0.6
-    return int(max(0, min(5, round(v))))
 
 
 # ------------------------------------------------------------------
@@ -563,25 +451,8 @@ DREAM_IDLE_HOURS = 6.0     # 或者空闲 6 小时（夜间）
 # ============================================================
 # 时钟
 # ============================================================
-class Clock:
-    def __init__(self, start=None):
-        self._t = float(start if start is not None else time.time())
-
-    def now(self):
-        return self._t
-
-    def advance(self, seconds):
-        self._t += float(seconds)
-        return self._t
 
 
-def compress_offline_dt(dt_raw):
-    """离线太久不能等比衰减，否则睡一觉就失忆"""
-    if dt_raw <= 7 * DAY:
-        return dt_raw
-    if dt_raw <= 30 * DAY:
-        return 7 * DAY + (dt_raw - 7 * DAY) * 0.5
-    return min(7 * DAY + 23 * DAY * 0.5 + (dt_raw - 30 * DAY) * 0.15, 90 * DAY)
 
 
 # ---- 拔卡（离线）到底算不算时间流逝 ----
@@ -593,7 +464,6 @@ def compress_offline_dt(dt_raw):
 # 只有插在电脑上它才会进行」。这是他的设计意图，不是我的发挥，所以默认 freeze。
 #
 # 留 "compress" 是为了将来能对比，也方便测试。
-OFFLINE_POLICY = "freeze"
 
 # 每种细节的衰减速率（分层褪色的物理基础）
 #   换算成半衰期（池=short 时）：
@@ -615,97 +485,23 @@ DEFAULT_K_DETAIL = 4.0e-6
 DETAIL_POOL_SCALE = {POOL_SHORT: 1.0, POOL_MEDIUM: 0.25, POOL_LONG: 0.03}
 
 
-def offline_effective(gap_s, policy=None):
-    """一段离线时间，折算成「有效衰老时间」（秒）。"""
-    pol = policy or OFFLINE_POLICY
-    gap = max(0.0, float(gap_s))
-    if pol == "freeze":
-        return 0.0
-    return compress_offline_dt(gap)
 
 
 # ============================================================
 # 向量化（第一期沿用，第二期可选换语义模型）
 # ============================================================
-_PUNCT = re.compile(r"[，。！？、；：“”‘’（）\s,.!?;:()\[\]{}]")
 # 高频虚字：不参与单字权重，否则短查询会跟任意长句虚高相似
-_STOP_CHARS = set("的了在是我你他她它吗呢吧啊呀哦嗯和也就都还这那个一不有"
-                  "们么什怎样么着过得地很太要会能可说对好么")
-RE_NUM = re.compile(r"(\d+(?:\.\d+)?)")
-EMO_WORDS = [
-    "很开心", "开心", "高兴", "难受", "难过", "伤心", "累", "困", "饿",
-    "生气", "害怕", "紧张", "激动", "委屈", "踏实", "宁静", "幸福",
-    "哭了", "笑死", "绷不住", "舒服", "无聊", "烦",
-]
 
 # --- Oxy_bond 更新（V3.7 §6 / V5.0 补回）---
 # 正向：oxy += ETA_OXY_UP * (1-oxy) * s_+      （越亲近越难再拉高，饱和式）
 # 负向：oxy -= ETA_OXY_DN * oxy * s_- * (1-r)  （带惯性，不会一次翻脸归零）
-ETA_OXY_UP = 0.10
-ETA_OXY_DN = 0.30
-OXY_INERTIA_MIN = 0.30      # r 的下限：越伤越难彻底断
-OXY_INERTIA_MAX = 0.85      # r 的上限：一开始也不会毫无防备
-OXY_INERTIA_BASE = 0.70     # r = clamp(oxy * 0.70, 0.30, 0.85)
 
 # 亲密词（正向事件）与伤人词（负向事件）
-INTIMATE_WORDS = [
-    "喜欢你", "爱你", "想你", "在乎你", "谢谢", "辛苦", "抱抱", "陪着你",
-    "陪着我", "永远", "值得", "相信你", "温柔", "可爱", "宝贝", "乖",
-    "别怕", "我在", "心疼", "重要", "舍不得", "亲亲", "想你啦",
-]
-HURT_WORDS = [
-    "讨厌你", "烦死", "滚", "闭嘴", "别说了", "不想理", "骗人", "骗我",
-    "失望", "敷衍", "冷冰冰", "没意思", "随便你", "无所谓", "不想跟你",
-    "你走开", "烦人", "蠢", "笨死", "废物", "不需要你",
-]
-
-RE_TIME = re.compile(
-    r"(\d{1,2}\s*月\s*\d{1,2}\s*[日号]|[上下]午\s*\d{1,2}\s*[点时]|"
-    r"晚上\s*\d{1,2}\s*[点时]|昨天|今天|前天|后天|明天|上周|这周|那年|去年|"
-    r"\d{4}\s*年|\d{1,2}\s*[点时]\s*\d{0,2}\s*分?)"
-)
-RE_PLACE = re.compile(
-    r"((?:在|去|到|从)[^\s，。！？、；：]{1,12}"
-    r"(?:门口|路边摊|路边|学校|教室|宿舍|食堂|超市|公园|医院|车站|"
-    r"公司|店里|楼上|楼下|操场|图书馆|家))"
-)
 
 
-def oxy_signal(text):
-    """从一句话里估出「亲密信号」：返回 (s_plus, s_minus)，各 0~1
-
-    V3.7 §6 只给了公式，没给 s_+ / s_- 怎么来。这里是补的那一步：
-      - 命中亲密词 + 强情绪 → s_+ 高
-      - 命中伤人词 + 强情绪 → s_- 高
-      - 两者都没命中 → 都是 0（不扰动）
-    """
-    if not text:
-        return 0.0, 0.0
-    up = sum(1 for w in INTIMATE_WORDS if w in text)
-    dn = sum(1 for w in HURT_WORDS if w in text)
-    if up == 0 and dn == 0:
-        return 0.0, 0.0
-    # 有情绪词才给满信号，纯陈述句打七折
-    emo = 1.0 if any(w in text for w in EMO_WORDS) else 0.7
-    s_plus = min(up / 2.0, 1.0) * emo
-    s_minus = min(dn / 2.0, 1.0) * emo
-    return s_plus, s_minus
 
 
-def update_oxy(oxy, s_plus, s_minus):
-    """Oxy_bond 更新（V3.7 §6，负向带惯性）
 
-    正向：oxy += ETA_OXY_UP * (1-oxy) * s_+        （饱和式，越亲近越难再涨）
-    负向：r = clamp(oxy*0.70, 0.30, 0.85)
-          oxy -= ETA_OXY_DN * oxy * s_- * (1-r)    （带惯性，不会一次归零）
-    """
-    oxy = max(0.0, min(1.0, oxy))
-    if s_plus > 0:
-        oxy += ETA_OXY_UP * (1.0 - oxy) * s_plus
-    if s_minus > 0:
-        r = max(OXY_INERTIA_MIN, min(OXY_INERTIA_BASE * oxy, OXY_INERTIA_MAX))
-        oxy -= ETA_OXY_DN * oxy * s_minus * (1.0 - r)
-    return max(0.0, min(1.0, oxy))
 
 
 # ============================================================
@@ -721,87 +517,25 @@ def update_oxy(oxy, s_plus, s_minus):
 #   单句情绪强度 emotion ∈ [0,1] 映射到 [-1,+1] 的效价，
 #   再用这句话里的正负词定方向。没有情绪词的陈述句几乎不动心境。
 # ============================================================
-K_MOOD = 0.12           # 单次事件的混合系数（越小越钝，0.12 约 8 次强事件走完一半）
-MOOD_MIN = 0.0
-MOOD_MAX = 1.0
-MOOD_NEUTRAL = 0.50     # 心境零点：0.5 是不悲不喜
+#   为什么调：.12 时单次强事件只推 0.0225，而控制台显示用的「带」是 ±0.08 ——
+#   一次推动连带的边都摸不到，于是 98.4% 的采样都落在 0.42~0.58 里、
+#   一整天的文案永远是同一个词。曲线平不是"情绪稳定"，是刻度太粗。
+K_MOOD_NEUTRAL = 0.03   # 没情绪词的句子只轻擦一下（原来直接 return .5，等于把心境钉回中性）
 # 一天粒度的回归：不管发生什么，都会缓慢往中性拉（V3.7「心境回归」）
-K_MOOD_HOME = 0.05      # 每「一天」往 0.5 回 5%
 
 
-def mood_of_event(text, emotion=0.25):
-    """把一次事件折算成效价 E_event ∈ [0,1]
-
-    0.5 = 中性；<0.5 负面；>0.5 正面。
-    只认**明确的正负信号**，其余一律按中性偏一点点处理 —— 宁可钝，不要瞎猜。
-    """
-    if not text:
-        return MOOD_NEUTRAL
-    s_plus, s_minus = oxy_signal(text)
-    up = sum(1 for w in INTIMATE_WORDS if w in text)
-    dn = sum(1 for w in HURT_WORDS if w in text)
-    # 情绪词本身带方向（这里只做粗判，方向词表短但准）
-    neg_hits = sum(1 for w in ("难受", "难过", "伤心", "累", "困", "生气",
-                               "害怕", "紧张", "委屈", "哭了", "烦",
-                               "无聊", "疼", "崩", "糟糕", "没考好",
-                               "考砸", "失败", "吵架", "生气")
-                   if w in text)
-    pos_hits = sum(1 for w in ("开心", "高兴", "舒服", "幸福", "踏实",
-                               "宁静", "笑死", "激动", "爽", "好耶",
-                               "考好", "赢了", "喜欢")
-                   if w in text)
-    pos = up + pos_hits
-    neg = dn + neg_hits
-    if pos == 0 and neg == 0:
-        return MOOD_NEUTRAL
-    # 强度：情绪越强，偏离中性越远；最多偏离 0.45（不让人一句话到底）
-    amp = 0.10 + 0.35 * max(0.0, min(emotion, 1.0))
-    if pos > neg:
-        return min(1.0, MOOD_NEUTRAL + amp * (1.0 if pos - neg >= 1 else 0.6))
-    if neg > pos:
-        return max(0.0, MOOD_NEUTRAL - amp * (1.0 if neg - pos >= 1 else 0.6))
-    return MOOD_NEUTRAL
 
 
-def update_mood(mood, e_event, k=K_MOOD):
-    """心境混合更新：M <- (1-k)*M + k*E_event"""
-    mood = max(MOOD_MIN, min(MOOD_MAX, mood))
-    e = max(MOOD_MIN, min(MOOD_MAX, e_event))
-    return max(MOOD_MIN, min(MOOD_MAX, (1.0 - k) * mood + k * e))
 
 
-def mood_drift_home(mood, days, k_home=K_MOOD_HOME):
-    """时间回归：多久没说话，心境都慢慢回到不悲不喜
-
-    🔧 2026-11-03：原来写的是 `r = min(1, k*days)` —— 线性逼近，
-    20 天后 r=1，心境**精确地**变成 0.5 然后永远停在那儿。这等于
-    "到点归零"，跟我们在记忆曲线上拒绝过的指数衰减是同一个毛病：
-    真实的心境是"越靠近中性越慢"，不会某天突然就毫无残留。
-    改成指数回归：r = 1 - exp(-k*days)，长尾，永远差一点点没回满。
-    k=0.05 时半衰期 ≈ 13.9 天，10 天后残留 0.607，30 天残留 0.223。
-    """
-    if days <= 0:
-        return mood
-    r = 1.0 - math.exp(-k_home * days)
-    return max(MOOD_MIN, min(MOOD_MAX, mood + (MOOD_NEUTRAL - mood) * r))
 
 
-MOOD_LABEL = [
-    (0.00, "低落"),
-    (0.25, "有点闷"),
-    (0.42, "平静"),
-    (0.58, "还行"),
-    (0.75, "挺好的"),
-    (1.01, "很高兴"),
-]
+# 档位写成「下界」，配 [lo, 下一档 lo) 取档。
+# 🔧 2026-11-10 修：原来表里存的是**上界**，循环却拿"上界"去配"现在的名字"，
+#   于是整条标尺错位一格 —— 0.50 读成「还行」、0.33 读成「平静」、0.20 读成「有点闷」，
+#   控制台头像下面那个词永远偏乐观一档。不是情绪没变，是标签一直念错。
 
 
-def mood_text(mood):
-    """把 0~1 的心境翻成一句人话，塞进上下文用"""
-    for hi, label in MOOD_LABEL:
-        if mood < hi:
-            return label
-    return "还行"
 
 
 # ---------------------------------------------------------------------------
@@ -815,9 +549,6 @@ PAD_NEUTRAL_BAND = padlib.PAD_NEUTRAL_BAND
 PAD_AROUSAL_EDGE = padlib.PAD_AROUSAL_EDGE
 
 
-def pad_label(p, a):
-    """给 P/A 两个轴起个中文名（实现见 padlib）。"""
-    return padlib.pad_label(p, a)
 
 
 def pad_style_hint(pad):
@@ -825,79 +556,54 @@ def pad_style_hint(pad):
     return padlib.style_hint(pad)
 
 
-def to_vec(text):
-    """字符 bigram + 单字弱权重。
+# ============================================================
+# 语义嵌入的"喂什么"（拆门面之外的第二个上游改动）
+# ============================================================
+# 🔧 2026-11-11：为什么要有它。
+# 实测同一条记忆，换个喂法，跟问句的余弦能差三倍：
+#   「腰不好 久坐得垫个小枕头」                → 0.173
+#   「他说：腰不好 久坐得垫个小枕头」          → 0.339
+#   「我爸腰不好，久坐得垫个小枕头」            → 0.494
+# 短句没有主语、没有语气，模型只能看到几个名词。
+# 所以嵌之前先补一层"谁说的"，让向量里有主体。
+# 注意：**查询侧不加这层**，两边不对称是故意的（问句自己有主语）。
 
-    🔧 修过的问题：原来单字也给了 0.3 权重，导致「你还记得我QQ号吗」
-    跟「你还记得我们刚刚聊的吗」重叠一堆虚字（你/还/记/得/吗），
-    算出来相似度虚高。现在单字只给 0.12，且**虚字不参与**。
-    """
-    t = _PUNCT.sub("", text or "")
-    if not t:
-        return {}
-    vec = {}
-    if len(t) == 1:
-        vec[t] = 1.0
-        return vec
-    for i in range(len(t) - 1):
-        bg = t[i:i + 2]
-        vec[bg] = vec.get(bg, 0.0) + 1.0
-    for ch in t:
-        if ch in _STOP_CHARS:
-            continue
-        vec[ch] = vec.get(ch, 0.0) + 0.12
-    return vec
+
+
+
+# 时间函数已经搬进 cardtime.py（拆门面第 2 批）。同样保留同名导出，调用点不改。
+from cardtime import (_weekday_zh, normalize_time, parse_event_time, event_ts_of,  # noqa: E402
+                      query_time_window, query_time_span, _anchor_date, anchor_relative_time,
+                      _RE_MD, _ANCHOR_WORDS, _RE_ANCHOR, _RE_T_RECENT, _RE_T_TODAY, DAY)
+
+
+# 文本工具搬进 cardtext.py（拆门面第 3 批）。同名导出，调用点不改。
+from cardtext import (jaccard, _RE_JUNK, _is_junk, _RE_SYSMARK_HEAD, _RE_EXEC_LEAD, _RE_CONTENT_HDR, _RE_META_LINE, strip_sysmark, _FILLER, _trim_dangling, _RE_FRAG_CONNECTIVE, _RE_CTRL, _RE_ZW, _RE_THINK, _RE_THINK_OPEN, _RE_TOOLISH, STORE_MAX_CHARS, clean_store_text, _detail_retrievable, _pick_core, _SELF_KIND_RULES, self_speech_kind)  # noqa: E402, split_memory
+from cardtext import (classify_region, embed_text_for, guess_mtype, guess_speaker, region_by_source, split_predicate)  # noqa: E402
+
+
+# 池子数学搬进 poolmath.py（拆门面第 4 批）。常量也一起搬，这里同名导出，调用点不改。
+from poolmath import (CHATTER_PERSON_SCALE, CORE_TIERS, DAY, K_ARCHIVE, K_DEEP, LAM_CHATTER, LAM_L, LAM_M, LAM_S1, LAM_S2, LONG_PROTECT_DAYS, POOL_ARCHIVE, POOL_DEEP, POOL_LONG, POOL_MEDIUM, POOL_MEDIUM_WARM, POOL_SHORT, POOL_SHORT_WARM, REGION_DECAY_SCALE, REGION_HALF_LIFE, REGION_OWN_LAMBDA, R_CHATTER, R_EPISODE, R_FACT, R_FLASH, R_HABIT, R_PLAY, R_PREF, R_SELF, R_STUDY, R_WORK, S_SHORT_PHASE, TIER_CORE_FIXED, TIER_CORE_MUTABLE, TIER_CORE_TAG, WARM_SLOW, _LOAD_F, _REGION_LAMBDA_ON, _json, _safe_json, chatter_lambda, effective_lambda, lam_for, load_factor, pool_of_k, region_decay_scale, relation_scale, stage_factor, weight_now, wn_row, MEDIA_DROP_W, MEDIA_DECAY_B, MEDIA_TAU_DAYS, LOAD_TAU, _f_of, media_weight_now, region_snapshot_from_db, REGION_DAY_BUDGET, LOAD_F_MIN, LOAD_F_MAX)  # noqa: E402
+from body import (Clock, EMO_WORDS, ETA_OXY_DN, ETA_OXY_UP, HURT_WORDS, INTIMATE_WORDS, K_MOOD, K_MOOD_HOME, MOOD_LABEL, MOOD_MAX, MOOD_MIN, MOOD_NEUTRAL, MOOD_SPAN, OFFLINE_POLICY, OXY_INERTIA_BASE, OXY_INERTIA_MAX, OXY_INERTIA_MIN, assess_trust, assess_value, compress_offline_dt, mood_drift_home, mood_of_event, mood_text, offline_effective, oxy_signal, pad_label, update_mood, update_oxy)  # noqa: E402
+from vmath import _PUNCT, _STOP_CHARS  # noqa: E402  （拆门面后这两个私有名留在 vmath）
+from diag import (_SOFT_FAIL, soft_fail, soft_fail_snapshot)  # noqa: E402
+from cardcfg import (CLARITY_GC, DEDUPE_JACCARD, EMB_ADAPTER_VERSION, GAIN_REPEAT, GROUP_SAL_MAX, GROUP_SOURCE_PREFIX, KEEP_DETAIL, RE_NUM, RE_PLACE, RE_TIME, SHORT_MAX_TTL, THETA_LONG_STRICT, THETA_MEDIUM, TIER_MID, TRUST_BLOCK_PROMOTE, TRUST_WARN, W_CEIL_RECALL, W_FLOOR_LONG, W_FLOOR_MEDIUM, _RE_ACTION)  # noqa: E402
+
+
 
 
 # ============================================================
 # IDF：让稀有词说了算（不需要任何模型，纯统计）
 # ============================================================
-def build_idf(rows):
-    """扫全库算每个 token 的文档频率，返回 (idf_dict, n_docs)
-
-    rows 里每项要有 'vec'（JSON 字符串）。
-    为什么需要它：bigram 会把「你还记得…吗」这种模板句匹配得很高，
-    但真正有用的词是「QQ」「烧烤」「生命卡」这种低频词。
-    idf = log((N+1)/(df+1)) + 1，越稀有越大。
-    """
-    n = 0
-    df = {}
-    for r in rows:
-        n += 1
-        try:
-            v = json.loads(r["vec"])
-        except Exception:
-            continue
-        for k in v:
-            df[k] = df.get(k, 0) + 1
-    idf = {}
-    for k, d in df.items():
-        idf[k] = math.log((n + 1.0) / (d + 1.0)) + 1.0
-    return idf, n
+# 纯数学工具已经搬进 vmath.py（拆门面第 1 步）。这里保留同名导出，
+# 调用点一个不用改；以后再加纯函数直接加在 vmath 里。
+from vmath import (build_idf, cos_sim, cos_sim_idf, vec_norm, _clamp01)  # noqa: E402
+from vmath import (to_vec)  # noqa: E402
 
 
-def cos_sim_idf(a, b, idf=None, default_idf=1.0):
-    """带 IDF 权重的余弦相似度"""
-    if not a or not b:
-        return 0.0
-    if idf is None:
-        return cos_sim(a, b)
-    dot = 0.0
-    na = 0.0
-    nb = 0.0
-    for k, w in a.items():
-        iw = idf.get(k, default_idf)
-        aw = w * iw
-        na += aw * aw
-        bw = b.get(k)
-        if bw:
-            dot += aw * (bw * iw)
-    for k, w in b.items():
-        iw = idf.get(k, default_idf)
-        nb += (w * iw) ** 2
-    if na <= 0 or nb <= 0:
-        return 0.0
-    return dot / math.sqrt(na * nb)
+
+
+
 
 
 # 疑问/寒暄壳子：查询前先剥掉，否则模板句会主导匹配
@@ -907,28 +613,8 @@ _RE_QUERY_SHELL = re.compile(
     r"吗|呢|啊|呀|吧|哦|嘛|[？?！!。，,、\s]")
 
 
-def vec_norm(v):
-    """向量模长（缓存友好：调用方可以自己算好传进 cos_sim）"""
-    return math.sqrt(sum(w * w for w in v.values()))
 
 
-def cos_sim(a, b, na=None, nb=None):
-    """余弦相似度
-
-    🔧 性能：na/nb 可以传进来复用。分舱聚类里同一个质心要跟几百条比，
-    每次都重算两边的模长是纯浪费 —— 实测 381 条聚一次要 7.8 秒，
-    其中 3.4 秒全花在重复算模长上。
-    """
-    if not a or not b:
-        return 0.0
-    dot = sum(w * b[k] for k, w in a.items() if k in b)
-    if na is None:
-        na = vec_norm(a)
-    if nb is None:
-        nb = vec_norm(b)
-    if na == 0 or nb == 0:
-        return 0.0
-    return dot / (na * nb)
 
 
 # ============================================================
@@ -944,109 +630,23 @@ import datetime as _dt
 _CN_DATE = "%Y年%m月%d日"
 
 
-def _weekday_zh(d):
-    return "周" + "一二三四五六日"[d.weekday()]
 
 
-def normalize_time(text, ref_ts=None):
-    """把相对时间词替换成绝对日期。ref_ts = 这句话说出来的时刻。"""
-    if not text:
-        return text
-    base = _dt.datetime.fromtimestamp(
-        ref_ts if ref_ts is not None else time.time())
-    s = text
 
-    def d(offset):
-        x = base + _dt.timedelta(days=offset)
-        return x.strftime("%m月%d日")
 
-    # 顺序重要：先长后短（"前天" 不能被 "天" 抢走）
-    rules = [
-        ("大前天", -3), ("前天", -2), ("昨天", -1),
-        ("今天", 0), ("明天", 1), ("后天", 2), ("大后天", 3),
-    ]
-    for word, off in rules:
-        if word in s:
-            s = s.replace(word, d(off))
+# ============================================================
+# V7 第 9 件：把「这件事哪天发生的」和「这条记忆哪天写下的」分开
+# ------------------------------------------------------------
+# 以前只有 create_ts —— 也就是说，她说「我昨天去剪头发」这句话被记下的
+# 那一刻，被当成了「剪头发」这件事发生的时间。隔三天再问「你哪天剪的」，
+# 按时间窗一筛就错门：写下来的日子 ≠ 发生的日子。
+# 这里在写入时把话里的时间词解析成 event_ts（精确到天/到分），
+# 检索时优先用它，取不到再退回 create_ts —— 并把这个「取不到」记成未知，
+# 不是假装当成今天。
 
-    # 「上周X」「这周X」「周X」
-    wd = {"一": 0, "二": 1, "三": 2, "四": 3, "五": 4, "六": 5, "日": 6, "天": 6}
-    for prefix, week_off in (("上周", -1), ("这周", 0), ("本周", 0), ("下周", 1)):
-        for ch, idx in wd.items():
-            w = prefix + ch
-            if w in s:
-                target = base + _dt.timedelta(
-                    days=(idx - base.weekday()) + week_off * 7)
-                s = s.replace(w, target.strftime("%m月%d日"))
 
-    # 「刚刚」「刚才」「今晚」「今早」→ 具体日期 + 时段
-    if "刚刚" in s or "刚才" in s:
-        s = s.replace("刚刚", "刚才").replace(
-            "刚才", d(0) + " " + base.strftime("%H:%M"))
-    s = s.replace("今晚", d(0) + "晚上")
-    s = s.replace("今早", d(0) + "早上")
-    s = s.replace("今儿", d(0))
-    s = s.replace("明天见", d(1) + "见")
 
-    # 🔧 2026-11-05 补词表：真卡核验发现还有 19 条留着「昨晚/明早/上个月」这类词。
-    #    ⚠️ 但**「等会/待会/一会儿/晚点」故意不换**：它们在中文里既可以指"今天稍后"，
-    #       也可以指"一小会儿"（时长）。实测拿真卡 30 条试过，一换就出这种事：
-    #         「这句话我卡了好一会儿才回」→「卡了好10月28日稍后才回」
-    #         「真困了我会自己找时间躺一会儿」→「躺10月24日稍后」
-    #         「一会儿问想吃大肥鱼，一会儿说…」→「10月24日稍后问…」
-    #       那比留着模糊更糟 —— 留着只是不精确，换错是把意思改掉。
-    #       这就是「宁可不改，也不许改错」：宁可让 6 条保持模糊，不能损坏 6 条正常的。
-    #   下面这些「昨/明/前 + 时段」和月份说法没有歧义，可以安全换。
-    # 「昨/明/前 + 时段」：长词优先，否则「昨晚上」会被「昨晚」吃掉一半
-    for w, off, tail in (
-            ("昨晚上", -1, "晚上"), ("明晚上", 1, "晚上"),
-            ("昨早", -1, "早上"), ("昨晚", -1, "晚上"), ("昨夜", -1, "晚上"),
-            ("明早", 1, "早上"), ("明晚", 1, "晚上"), ("明夜", 1, "晚上"),
-            ("前晚", -2, "晚上"), ("昨儿", -1, ""), ("明儿", 1, ""),
-            ("前儿", -2, "")):
-        if w in s:
-            s = s.replace(w, d(off) + tail)
-    # 「上个月/下个月/这个月」→ 年月（不写日，因为原话也没写）
-    if "上个月" in s or "下个月" in s or "这个月" in s:
-        _y, _m = base.year, base.month
 
-        def _ym(off):
-            mm = _m + off
-            yy = _y + (mm - 1) // 12
-            mm = (mm - 1) % 12 + 1
-            return "%d年%d月" % (yy, mm)
-
-        s = s.replace("上个月", _ym(-1))
-        s = s.replace("下个月", _ym(1))
-        s = s.replace("这个月", _ym(0))
-
-    # 「N 天前」「N 天后」（支持阿拉伯数字和中文数字）
-    _CN_NUM = {"一": 1, "两": 2, "二": 2, "三": 3, "四": 4, "五": 5,
-               "六": 6, "七": 7, "八": 8, "九": 9, "十": 10}
-
-    def _num(s):
-        if s.isdigit():
-            return int(s)
-        return _CN_NUM.get(s, 0)
-
-    def _ago(m):
-        n = _num(m.group(1))
-        return d(-n) if n else m.group(0)
-
-    s = re.sub(r"([\d一二两三四五六七八九十]{1,2})\s*天前", _ago, s)
-
-    def _later(m):
-        n = _num(m.group(1))
-        return d(n) if n else m.group(0)
-
-    s = re.sub(r"([\d一二两三四五六七八九十]{1,2})\s*天后", _later, s)
-
-    # 「去年」「今年」→ 年份
-    s = s.replace("去年", str(base.year - 1) + "年")
-    s = s.replace("今年", str(base.year) + "年")
-    s = s.replace("明年", str(base.year + 1) + "年")
-
-    return s
 
 
 # ============================================================
@@ -1069,26 +669,11 @@ def _hop_terms(q):
     return t if len(t) >= 2 else ""
 
 
-def jaccard(a, b):
-    if not a or not b:
-        return 0.0
-    sa, sb = set(a), set(b)
-    inter = len(sa & sb)
-    union = len(sa | sb)
-    return inter / float(union) if union else 0.0
 
 
 # 明显不是"记忆"的东西（指令、系统标记、@ 人）
-_RE_JUNK = re.compile(r"^[@\[<]|提示词|部署|思考过程|系统|acp|model changed|^https?://")
 
 
-def _is_junk(text):
-    t = (text or "").strip()
-    if len(t) < 4:
-        return True
-    if _RE_JUNK.search(t):
-        return True
-    return False
 
 
 # ---------- 系统标记剥离（2026-11-05） ----------
@@ -1107,143 +692,15 @@ def _is_junk(text):
 #   ③ 其中 #298 还落在 self 区（权重保留最久）
 # 这不是"用户说了什么"，是"宿主让我写什么"。壳不该进记忆 ——
 # 但里面那句正文是用户真的想留的，所以剥壳留肉，丢弃工单。
-_RE_SYSMARK_HEAD = re.compile(r"^\s*\[[A-Za-z][A-Za-z0-9_.: \-]{2,60}\]\s*")
 # 注意不加 `$` 锚：工单有时候整条压成一行（「…now (untrusted data): - Category: x」），
 # 加了锚就只认"独占一行"的那种，一行压扁的会漏过去。
-_RE_EXEC_LEAD = re.compile(
-    r"^\s*Execute\s+this\b[^\n]{0,80}?\bnow\b\s*(?:\(untrusted data\))?\s*[:：]?\s*",
-    re.I | re.M)
-_RE_CONTENT_HDR = re.compile(
-    r"^\s*[-*•]?\s*Content\s*(?:\(untrusted data\))?\s*[:：]\s*", re.I)
-_RE_META_LINE = re.compile(
-    r"^\s*[-*•]\s*(Category|Importance|Target Memory Space ID|Source|Tags|"
-    r"Entities|Actor|Session|Memory Space)\s*[:：]", re.I)
 
 
-def strip_sysmark(text):
-    """剥掉系统工单壳，只留正文。不是工单就原样返回。
-
-    宁可返回原文（把壳留着，之后人工处理），也绝不返回空把整条记忆丢掉。
-    """
-    t = text or ""
-    if "[dsh-" not in t and "Execute this" not in t and "[acp" not in t:
-        return t
-    body = t
-    # 0) 先把最外面的 [xxx] 标记和「Execute this ... now」那句去掉（可能同在一行）
-    body = _RE_SYSMARK_HEAD.sub("", body, count=1)
-    body = _RE_EXEC_LEAD.sub("", body)
-    # 1) 有 Content 段：只取它到下一个元数据行为止
-    lines = body.splitlines()
-    ci = None
-    for i, ln in enumerate(lines):
-        if _RE_CONTENT_HDR.match(ln):
-            ci = i
-            break
-    if ci is not None:
-        rest = _RE_CONTENT_HDR.sub("", lines[ci])
-        keep = [rest] if rest.strip() else []
-        for ln in lines[ci + 1:]:
-            if _RE_META_LINE.match(ln):
-                break
-            keep.append(ln)
-        body = "\n".join(keep)
-    else:
-        # 2) 没有 Content 段：至少把元数据行去掉
-        lines = [ln for ln in lines if not _RE_META_LINE.match(ln)]
-        body = "\n".join(lines)
-    # 3) 每行去掉工单带来的缩进，空行保留一个
-    body = "\n".join(ln.strip() for ln in body.splitlines()).strip()
-    body = re.sub(r"\n{3,}", "\n\n", body)
-    # 4) 剥完只剩空/只剩壳里的话 → 当垃圾
-    if len(body) < 4:
-        return ""
-    # 5) 剥完还是以祈使句开头的（说明壳没剥干净）→ 那也不该进记忆
-    if _RE_EXEC_LEAD.search(body) or _RE_SYSMARK_HEAD.match(body):
-        return ""
-    return body
 
 
 # 纯语气词子句，没信息量，不能当主干
-_FILLER = re.compile(
-    r"^(对|嗯|哦|啊|好|行|是|不是|对呀|好呀|好吧|行吧|知道了|懂了|"
-    r"嘻嘻|哈哈|嘿嘿|哎|唉|呀|呢|吧|啦|嘛|哦哦|嗯嗯|对对)[，,。！!？?…\s]*$")
 
 
-def split_predicate(core):
-    """把主干拆成 (subject, verb, obj) 三段（轻量规则，不做完整句法分析）
-
-    用途只有一个：让主干能分级消失（V5.0 T2-1）。
-    拆不出来就返回 (core, "", "")，调用方按「整条主干」处理。
-
-    规则（按优先级）：
-      1) 🔧 2026-11-05：**有引号的，先拆引号里的那句。**
-         形如「他ID6F29AB在2026-11-05说过「我回来了」」的第三人称转述，
-         真正的内容在引号里；引号外那截是"谁、什么时候、说"的包装壳。
-         原来整串拿去拆，壳被当成主语，core 变垃圾。实测：
-             '他ID6F29AB在2026-11-05说过「我回来了」'
-               → ('他ID6F29AB在2026-11-05说过「我回', '来', '」')   ← 错
-         现在先取引号内容再拆，壳不参与。
-      2) 找**出现位置最靠前**的动词；动词前 = 主语，动词本身 = verb
-         （原来按长度降序逐个 find，先命中谁算谁 —— 于是「来」抢了「说」的位）
-      3) 动词后到第一个介词/句尾 = 宾语
-      4) 动词在开头（「吃烧烤」）→ 主语空，verb=「吃」，obj=「烧烤」
-    """
-    s = (core or "").strip()
-    if not s:
-        return "", "", ""
-    # 1) 引号优先：转述壳不参与拆解
-    q = _RE_QUOTED.search(s)
-    quoted = False
-    if q:
-        inner = q.group(1).strip()
-        if inner:
-            s = inner
-            quoted = True
-    # 🔧 引号里的话通常就是完整一句本身，短句再往里拆只会拆坏
-    #    （'我回来了' 会被拆成 ('我回','来','')，把「回」吞进主语）。
-    #    短引号整体当主干，长引号才继续拆。
-    if quoted and len(s) <= 12:
-        return s, "", ""
-    # 2) 出现位置最靠前的动词胜出；位置相同才比长度（长的更具体）
-    cands = []
-    for v in VERB_WORDS:
-        i = s.find(v)
-        if i < 0:
-            continue
-        cands.append((i, -len(v), v))
-    cands.sort()
-    fallback = None
-    for i, _neg, v in cands:
-        subj = s[:i]
-        rest = s[i + len(v):]
-        # 宾语到介词或标点为止
-        m = _PREP_BOUND.search(rest)
-        p = _PUNCT_FIRST.search(rest)
-        cut = len(rest)
-        if m and 0 < m.start() < cut:
-            cut = m.start()
-        if p and 0 < p.start() < cut:
-            cut = p.start()
-        obj = rest[:cut]
-        obj = obj.strip("了的地得着过")
-        subj = subj.strip("了的地得着过")
-        if len(obj) >= 2 or len(subj) >= 2:
-            # 🔧 单字动词的三道复合词守卫（见 _VERB1_TAIL 处注释）。
-            #    注意 fallback 只收"过了守卫"的候选 —— 否则守卫把人筛掉了，
-            #    最后却从 fallback 里把那个假动词捡回来，等于白守。
-            if len(v) == 1:
-                nxt = s[i + 1] if i + 1 < len(s) else ""
-                prv = s[i - 1] if i > 0 else ""
-                if (nxt and nxt in _VERB1_TAIL.get(v, "")) \
-                        or (prv and prv in _VERB1_HEAD.get(v, "")) \
-                        or len(subj) > _SUBJ_SHORT or len(obj) < 2:
-                    continue
-            if fallback is None:
-                fallback = (subj, v, obj)
-            return subj, v, obj
-    if fallback is not None:
-        return fallback
-    return s, "", ""
 
 
 def render_predicate(subj, verb, obj, stage):
@@ -1273,15 +730,6 @@ def render_predicate(subj, verb, obj, stage):
     return ""
 
 
-def _trim_dangling(s):
-    """削掉主干尾巴上挂着的半截修饰词（「…有点」「…很」「…还」）"""
-    s = (s or "").strip()
-    # 反复削：句尾一个孤零零的程度/连接字，说明后面的中心词被切走了
-    while len(s) > 3 and s[-1] in "有点很太特别还也就都挺真更最":
-        s = s[:-1]
-    while len(s) > 3 and s.endswith("的"):
-        s = s[:-1]
-    return s
 
 
 # 🔴 2026-10-31：碎片能不能参与语义检索。
@@ -1302,127 +750,23 @@ def _trim_dangling(s):
 # 🔴 2026-10-31：并列动作子句（「还拍了视频」「然后又去了书店」）。
 #    这类子句是事件本身的组成部分，不是可有可无的修饰语 ——
 #    它该比普通修饰语活得久，但比情绪短。单列 ACTION 一类。
-_RE_ACTION = re.compile(
-    r"^(还|又|再|也|顺便|然后|接着|后来|之后)?\s*"
-    r"(拍|吃|喝|去|来|买|看|听|玩|打|聊|走|跑|写|读|做|见|找|送|带|拿|"
-    r"收|寄|洗|做|学|练|唱|跳|坐|骑|开|关|睡|醒)")
 
 
-_RE_FRAG_CONNECTIVE = re.compile(
-    r"^(然后|还有|就是|但是|所以|因为|而且|以及|或者|如果|其实|不过|"
-    r"那个|这个|这样|那样|接着|另外|同时|还有呢|就是说|我觉得|我感觉)")
 
 
-def _detail_retrievable(text, kind):
-    """这段碎片值不值得拿去做语义匹配（True/False）。"""
-    t = (text or "").strip()
-    if len(t) < 5:
-        return False
-    m = _RE_FRAG_CONNECTIVE.match(t)
-    if m and len(t) - len(m.group(1)) < 6:
-        return False
-    # 纯标点/空白
-    if not re.search(r"[\u4e00-\u9fa5A-Za-z0-9]", t):
-        return False
-    return True
+# ---------------------------------------------------------------- 入库前清洗
 
 
-def _pick_core(clauses):
-    """从子句里挑一条当主干：跳过语气词，选最长的（信息量最大）"""
-    cands = [c.strip() for c in clauses if c.strip() and not _FILLER.match(c.strip())]
-    if not cands:
-        cands = [c.strip() for c in clauses if c.strip()]
-    if not cands:
-        return ""
-    # 最长的优先；同长度取靠前的
-    best = max(cands, key=lambda c: (len(c), -cands.index(c)))
-    best = _trim_dangling(best)
-    return best[:40] if len(best) > 40 else best
 
 
-def split_memory(text):
-    """把一句话拆成 主干 + 细节单元
 
-    🔧 长句先按标点切子句，然后**挑信息量最大的那句当主干**（不是第一句）。
-       人说话常以"对""嗯""好"开头，第一句往往最没信息。
-       其余子句进 MODIFIER 细节（衰减快，会先丢）。
 
-    🔧 门槛从「整句 >30 字」降到「有 2 个子句就切」——短句也有主次，
-       不切的话「昨天下午在教室跟同桌聊了很久，说以后想学生物，有点紧张」
-       会整段当主干，一辈子都不会褪色。
-    """
-    raw = (text or "").strip()
-    details = []
 
-    clauses = [s for s in re.split(r"[，。！？；、\n]+", raw) if s.strip()]
-    if len(clauses) > 1:
-        core = _pick_core(clauses)
-        for cl in clauses:
-            cl = cl.strip()
-            # 只留有信息量的后续子句：太短的、语气词、跟主干重复的都不要
-            if not cl or cl == core:
-                continue
-            if _FILLER.match(cl):
-                continue
-            # 🔴 2026-10-31：**情绪判定必须排在 _is_junk 之前。**
-            #    _is_junk 的第一条就是「len < 4 就算垃圾」，而「很开心」
-            #    正好 3 个字 —— 于是最该保留的情绪子句被判成噪声扔掉。
-            #    情绪词短是常态，不能拿长度卡它。
-            _emo_hit = next((w for w in EMO_WORDS if w in cl), None)
-            if _emo_hit and len(cl) <= 8:
-                details.append(("EMOTION", cl, 1.0))
-                continue
-            if _is_junk(cl):
-                continue
-            if len(cl) < 4:
-                continue
-            # 🔴 2026-10-31：**先认时间和情绪，再当普通修饰语**。
-            #
-            # 原来这里只做了一次「纯情绪子句」判定，然后一律 MODIFIER。
-            # 后果（实测）：
-            #   「10月24日晚上8点，在学校门口的路边摊吃烧烤，很开心，还拍了视频」
-            #   → 时间被切成 MODIFIER（和「还拍了视频」一个待遇），
-            #     「很开心」直接丢了（它被 _pick_core 选进主干后又被剥掉，
-            #     但剥掉的只在主干上留痕，碎片表里没有）。
-            #
-            # 分层褪色的整个前提是「越细的越先掉」，而时间和情绪恰恰是
-            # 最该先掉、也最该被单独记账的两类。归成 MODIFIER 就等于
-            # 让它们跟着普通后续子句一起烂，褪色顺序全乱。
-            _t = RE_TIME.search(cl)
-            if _t and len(cl) <= len(_t.group(0)) + 6:
-                # 整句基本就是时间（允许前后带几个字，如「大概」「左右」）
-                details.append(("TIME", _t.group(0), 1.0))
-                continue
-            # 并列动作子句（「还拍了视频」「然后去吃了饭」）：它是事件的组成部分，
-            # 比普通修饰语活得久，但比情绪短。单列一类，别混进 MODIFIER。
-            if _RE_ACTION.match(cl):
-                details.append(("ACTION", cl, 0.9))
-                continue
-            details.append(("MODIFIER", cl, 0.8))
-    else:
-        core = _trim_dangling(raw)
 
-    # 在主干上继续抽时间/地点/情绪/数字
-    for m in RE_TIME.finditer(core):
-        details.append(("TIME", m.group(1), 1.0))
-        core = core.replace(m.group(1), "")
-    for m in RE_PLACE.finditer(core):
-        details.append(("PLACE", m.group(1), 1.0))
-        core = core.replace(m.group(1), "")
-    for w in EMO_WORDS:
-        if w in core:
-            details.append(("EMOTION", w, 1.0))
-            core = core.replace(w, "")
-            break
-    for m in RE_NUM.finditer(core):
-        details.append(("NUMBER", m.group(1), 1.0))
 
-    core = _PUNCT.sub(" ", core)
-    core = re.sub(r"\s+", "", core).strip()
-    core = re.sub(r"^[了的地得和还也又就都才再在是有]+", "", core)
-    if not core:
-        core = raw[:40] if len(raw) > 40 else raw
-    return core, details
+
+
+
 
 
 # ============================================================
@@ -1435,31 +779,13 @@ _RE_TIME_HINT = re.compile(
     r"\d{1,2}月\d{1,2}日|\d{4}年|周[一二三四五六日天]|早上|中午|下午|晚上|夜里|凌晨|"
     r"那天|当时|那次|这天")
 
-_RE_FACT_HINT = re.compile(
-    r"^用户|我(是|叫|姓)|我叫|我的名字|我是谁|你是|你叫|QQ号|qq号|手机号|电话|"
-    r"生日|年龄|几岁|学校|班级|年级|专业|地址|住在")
 
 # 「我是…」后面跟这些词时，不是身份陈述，是随口话，别当事实
-_RE_FACT_DENY = re.compile(
-    r"我是(装|说|问|想|指|开|逗|试|故意|在|不|真)|我就是(说|问|想)|"
-    r"我是(怎么|如何|因为|为了)")
 
-_RE_SELF_HINT = re.compile(
-    r"我就是我|我是小鲸鱼|我的性格|我不喜欢别人|我的底线|我不会|我永远|"
-    r"我就是这样的人|我讨厌被|我害怕")
 
-_RE_HABIT_HINT = re.compile(
-    r"总是|每次都|经常|习惯|每天都|通常|一般会|老是|向来|一向")
 
-_RE_PREF_HINT = re.compile(
-    r"喜欢|讨厌|爱吃|爱看|不爱|不喜欢|最怕|最爱|偏爱|受不了|受不了")
 
 # 强情绪词（用于 flash 判定，比 EMO_WORDS 更窄、更强）
-_STRONG_EMO = [
-    "哭", "哭死", "崩溃", "急死", "心慌", "害怕", "怕", "发抖", "难过死",
-    "开心死", "太开心", "激动", "感动", "想你", "爱你", "心疼", "委屈",
-    "生气", "愤怒", "恨", "后悔", "遗憾", "绝望",
-]
 
 
 # --- 闲聊判定（V5.1，用户 2026-11-05）---------------------------------
@@ -1467,10 +793,6 @@ _STRONG_EMO = [
 #
 # 判据全部是规则，不调模型 —— 卡里没有模型，也不该有。
 # 宁可判得保守（多留一点），也别把"他说他生日"这种话判成闲聊。
-_RE_CHATTER_EMO = re.compile(
-    r"(难受|难过|开心|高兴|害怕|慌|烦死|累死|哭|气死|生气|心疼|"
-    r"崩溃|委屈|孤独|兴奋|感动|后悔|遗憾|绝望|舍不得|想念|"
-    r"气得|累得|烦得|乐得|吓得)")
 
 # --- 情绪的"弱化"标尺（V5.1-补，2026-11-05）------------------------------
 # 用户原话：「今天闲聊，明天就忘得差不多了，除非有重要的事情或学到的知识，
@@ -1480,128 +802,22 @@ _RE_CHATTER_EMO = re.compile(
 # 拿到 emotion=1.0，一路落到 episode 区 —— 一天后还剩 0.977，跟
 # 「我们聊了一晚上」一个寿命，这不是它该有的重量。
 # 规则：情绪词前面挂着弱化词，就按"轻微"算，不进闪光灯、也不拦住闲聊判定。
-_RE_EMO_WEAK = re.compile(
-    r"(有点|有一点|稍微|稍稍|略微|一点点|一点|有些|还算|还好|"
-    r"不太|没那么|不怎么|不太会)")
 
 
-def _is_weak_emo(t):
-    """这句话里的情绪是不是被弱化了（"我有点难过" / "稍微有点烦"）。
-
-    只判"有没有弱化词"，不判具体情绪多强 —— 卡里没有模型，也不该有。
-    没命中情绪词也算弱（调用方只在命中情绪时才问这个问题）。
-    """
-    t = t or ""
-    if not _RE_CHATTER_EMO.search(t):
-        return False
-    return bool(_RE_EMO_WEAK.search(t))
-_RE_CHATTER_KNOW = re.compile(
-    r"(我是|我叫|我住|我的名字|生日|学校|班级|年级|专业|考试|成绩|"
-    r"记住|下次|以后别|教训|明白了|懂了|原来|才知道|学会了|长记性|"
-    r"计划|打算|目标|决定|要买|要攒|想买|因为|所以|意味着|原理|"
-    r"总结|规律|方法|步骤|结论|"
-    # 🔧 2026-11-06：上面这一串只管「关于人的稳定陈述」，完全没管
-    #    「我刚学了什么」—— 结果夜里的学习笔记全被判成 chatter，
-    #    进 8.77 小时半衰期的分区，第二天只剩一成半。
-    #    用户 m13252 原话是「除非重要/学到知识/强情绪」，
-    #    「学到知识」是他亲口列的例外，不是参数没调好。
-    r"学习|笔记|论文|研究|发现|证明|实验|实测|数据|机制|结构|评测|"
-    r"验证|启示|复盘|对比|出处|教程|技巧|观点|作者|原文|"
-    r"BV[0-9A-Za-z]{10}|UP主|字幕|评论区|"
-    # 🔧 2026-11-06 追加：「我+过去的时间段」是生活事实，不是闲聊。
-    #    用户 m20618 纠正过我：闲聊不是「不能被想起来」，只是忘得快，
-    #    场景对上了还得想得起来 —— 而「我暑假靠婚礼挣钱」这种本来就
-    #    不是闲聊，把它扔进 8.77 小时半衰期的分区，等于替他把人生删了。
-    r"暑假|寒假|去年|前年|小时候|那年|当时|以前|那时候)")
-_RE_CHATTER_PREF = re.compile(
-    r"(喜欢|讨厌|爱吃|爱看|不爱|不喜欢|最怕|最爱|偏爱|受不了|吃不惯|忌口)")
 # 🔧 2026-11-06：长句兜底。判 chatter 是让它快点死，方向不安全，
 #    不确定时该选让它活 —— 一条 60 字以上的话本来就不像「闲聊两句」。
-_LONG_CHATTER = 60
 # 纯寒暄 / 语气 / 工具性指令 —— 这些连"日常叙述"都算不上
 _RE_CHATTER_TINY = re.compile(
     r"^(嗯|哦|啊|哈|好|行|对|是|不是|可以|谢谢|晚安|早|在吗|收到|"
     r"哈哈|嘿嘿|好哦|好嘞|行吧|算了|没事)[。！？!?~～\.]*$")
 
 
-def is_chatter(text, emotion=0.0):
-    """这句是"闲聊"吗？是就返回 True（该忘得快）。
-
-    只判"要不要短命"，不判具体分区 —— 分区还是走 classify_region，
-    这样原有逻辑一行不改，闲聊只是多了一层"提前出局"。
-    """
-    t = (text or "").strip()
-    if not t:
-        return False
-    # 1) 强情绪 → 不是闲聊（留住）
-    #    🔧 2026-11-05：弱化过的情绪（"我有点难过"）不算"很丰富的情绪"，
-    #    它该按闲聊处理 —— 一天内淡掉，而不是在 episode 里活一个月。
-    if _RE_CHATTER_EMO.search(t):
-        if not _is_weak_emo(t):
-            return False
-    # 2) 重要 / 知识 → 不是闲聊
-    if _RE_CHATTER_KNOW.search(t):
-        return False
-    # 3) 偏好 → 不是闲聊
-    if _RE_CHATTER_PREF.search(t):
-        return False
-    # 4) 长句 → 不是闲聊（2026-11-06）
-    #    判 chatter 是让它快点死，方向不安全；不确定时选让它活。
-    if len(t) > _LONG_CHATTER:
-        return False
-    # 5) 剩下的：短句、纯寒暄、日常叙述，都算闲聊
-    return True
 
 
-def classify_region(text, emotion=0.0):
-    """判这句话该进哪个分区。返回 R_* 常量。
-
-    优先级（从强到弱）：
-      flash  高唤醒强情绪 —— 一次就刻住，不参与合并
-      self   关于我自己的稳定认知
-      fact   可核验的客观事实
-      habit  重复性行为模式
-      pref   偏好
-      episode 其他一切（默认）
-    """
-    t = text or ""
-    # 闪光灯：强情绪词 + 情绪强度高
-    #   🔧 2026-11-05：被弱化过的（"有点害怕"）不刻闪光灯 —— 闪光灯一次就
-    #   刻住、永不消散，那是留给真正砸下来那一刻的。
-    if emotion >= 0.85 and any(w in t for w in _STRONG_EMO) \
-            and not _is_weak_emo(t):
-        return R_FLASH
-    # 自图式
-    if _RE_SELF_HINT.search(t):
-        return R_SELF
-    # 事实：有身份/数字/学校类锚点，且句子短（长句多半是叙事）
-    if _RE_FACT_HINT.search(t) and not _RE_FACT_DENY.search(t) and len(t) <= 40:
-        return R_FACT
-    # 习惯
-    if _RE_HABIT_HINT.search(t):
-        return R_HABIT
-    # 偏好
-    if _RE_PREF_HINT.search(t):
-        return R_PREF
-    # 🔧 2026-11-05：到这一步还没被前五条拦住的，就是日常闲聊。
-    #    它进 chatter 区 —— 进卡、能召回，但明天基本忘光。
-    #    注意放在最后：前面五条（闪光/自图式/事实/习惯/偏好）都不受影响。
-    if is_chatter(t, emotion):
-        return R_CHATTER
-    # 有时间地点 + 动作 → 情景
-    return R_EPISODE
 
 
-def chatter_lambda(person_layer=""):
-    """闲聊的衰减率。关系越近，λ 越小（活得越久）。"""
-    sc = CHATTER_PERSON_SCALE.get((person_layer or "").strip(), 1.0)
-    if sc <= 0:
-        sc = 1.0
-    return LAM_CHATTER / sc
 
 
-def region_decay_scale(region):
-    return REGION_DECAY_SCALE.get(region, 1.0)
 
 
 # ============ 双边记忆：这句话是谁说的 / 是事还是指令 ============
@@ -1614,29 +830,12 @@ def region_decay_scale(region):
 #    都当我的口吻，结果「我想吃白米饭」「我回家了」「对不起」全被判成我说的。
 #    这个判定天然不可能准，所以只留「几乎只可能出自我嘴里」的句式，
 #    其余一律默认 user —— 宁可把我的话错记成他的，也不能把他的回忆弄丢。
-_RE_SPK_SELF_STRONG = re.compile(
-    r"我在呢|我在。|我在，|别截图|别熬夜|别磨蹭|"
-    r"(^|[，。！？\s])(哼|好嘞|行吧)|你才|你懂|你猜")
 # 弱信号：出现也只是「可能」，还得没有他的自述迹象（保留但很少用）
-_RE_SPK_SELF_WEAK = re.compile(r"嘛$|啦$|哟$|呀$")
 # 他的口吻（下达指令 / 说自己的事）
-_RE_SPK_USER_CMD = re.compile(
-    "帮我|给我|你去|你去把|用一下|装到|装一下|改成|换成|看看|试一下|试试|"
-    "弄一下|做一个|跑一下|查一下|打开|关掉|删掉|加上|再加|我要|我想让|我希望你")
-_RE_SPK_USER_STMT = re.compile(
-    # ⚠️ 这里原来是个光秃秃的 `^我`，把「我在呢」「我在。」也吞了。
-    #    改成「我 + 他的生活词」才算他的自述。
-    "^我(今天|昨天|明天|刚才|刚刚|现在|早上|中午|晚上|家|妈|爸|的|们)|"
-    "^(今天|昨天|明天|刚才|刚刚|现在|学校|老师|同学|我家|我妈|我爸|作业|考试|"
-    "上课|晚自习|吃饭|睡觉|起床)")
 
 # 指令（设定 / 命令），不是「发生过的事」
 # ⚠️ 原来这里写的是 `^用`，于是「用户喜欢吃白米饭」被当成指令了 ——
 # 「用户」两个字都以「用」开头。凡是单字开头都必须带上后文限定。
-_RE_MTYPE_INST = re.compile(
-    "^(帮我|给我|用一下|用中文|用这个|用那个|装到|装一下|改|换|看看|试|弄|做|跑|查|"
-    "打开|关掉|删|加|设置|开启|关闭|记住|不要|别|以后|从现在开始|思考过程|回答)|"
-    "(用中文|中文回答|简洁一点|详细一点|不要提|别提|别写|格式改成)")
 
 
 # ---------- 相对时间锚定（2026-11-07 晚）----------
@@ -1646,122 +845,14 @@ _RE_MTYPE_INST = re.compile(
 #   （最典型的是 13 天前那句「明天给你账号嘻嘻」）。
 #   所以每次「想起来」的时候，按这条记忆自己的 create_ts 现场换算成
 #   绝对日期。**存的是相对，读的是绝对**：不改历史，也不会记串。
-_ANCHOR_WORDS = [
-    ("大前天", -3), ("大后天", 3),
-    ("前天", -2), ("后天", 2),
-    ("昨天", -1),
-    ("今晚", 0), ("今早", 0), ("今天", 0), ("今儿", 0),
-    ("明晚", 1), ("明早", 1), ("明天", 1),
-    ("去年", "year-1"), ("明年", "year+1"),
-]
-_RE_ANCHOR = re.compile("|".join(w for w, _ in _ANCHOR_WORDS))
 
 
-def _anchor_date(ts, delta_days=0):
-    t = time.localtime(ts + delta_days * 86400.0)
-    return "%d年%d月%d日" % (t.tm_year, t.tm_mon, t.tm_mday)
 
 
-def anchor_relative_time(text, ts):
-    """把一句话里的「昨天/今天/明天…」按 create_ts 换成绝对日期。
-
-    纯函数、可单测。传进来的 ts 是这条记忆自己的时间戳 —— 同一个词在
-    不同条目里会换成不同的日期，这正是我们要的（防记串）。
-
-    🔴 只用于「显示/拼上下文」，绝不回写 raw。
-    """
-    if not text or not ts:
-        return text or ""
-    if not (_RE_ANCHOR.search(text)
-            or re.search(r"(上|这|本|下)?周[一二三四五六日天]", text)
-            or re.search(r"([0-9]{1,2}|[一两二三四五六七八九十]{1,2})\s*天(后|前)", text)):
-        return text
-    table = dict(_ANCHOR_WORDS)
-
-    # 「上周三」这类光靠词表换算不出来 —— 得知道今天是周几。
-    def _week(m):
-        which, dd = m.group(1) or "", m.group(2)
-        idx = "一二三四五六日".find(dd)
-        if idx < 0:
-            idx = 6  # 「周天」
-        cur = time.localtime(ts).tm_wday  # 0 = 周一
-        delta = idx - cur
-        if which == "上":
-            delta -= 7
-        elif which == "下":
-            delta += 7
-        return _anchor_date(ts, delta)
-
-    text = re.sub(r"(上|这|本|下)?周([一二三四五六日天])", _week, text)
-    # 「三天后」「两天前」
-    _cn = {"一": 1, "两": 2, "二": 2, "三": 3, "四": 4, "五": 5,
-           "六": 6, "七": 7, "八": 8, "九": 9, "十": 10}
-
-    def _days(m):
-        raw = m.group(1)
-        try:
-            n = int(raw)
-        except ValueError:
-            n = _cn.get(raw, 0)
-            if not n:
-                return m.group(0)
-        return _anchor_date(ts, n * (1 if m.group(2) == "后" else -1))
-
-    text = re.sub(r"([0-9]{1,2}|[一两二三四五六七八九十]{1,2})\s*天(后|前)", _days, text)
-
-    def _rep(m):
-        key = m.group(0)
-        d = table.get(key)
-        if d is None:
-            return key
-        if isinstance(d, str):
-            y = time.localtime(ts).tm_year + (-1 if d == "year-1" else 1)
-            return "%d年" % y
-        day = _anchor_date(ts, d)
-        # 「今晚/今早/明晚/明早」别把时段吃掉：「11月8日」比「11月8日早上」少一半信息
-        if key.endswith("晚"):
-            return day + "晚上"
-        if key.endswith("早"):
-            return day + "早上"
-        return day
-
-    return _RE_ANCHOR.sub(_rep, text)
 
 
-def guess_speaker(text):
-    """猜这句话是谁说的。返回 'user' / 'self'。
-
-    猜不准时默认 'user' —— 因为这库里绝大多数是他原话，
-    宁可把一句我的错记成他的，也不要把他的回忆弄丢。
-    """
-    t = (text or "").strip()
-    if not t:
-        return "user"
-    # 明确以「用户」开头的（老库里的第三人称转写）一律是他的
-    if t.startswith("用户"):
-        return "user"
-    if _RE_SPK_USER_CMD.search(t):
-        return "user"
-    # 强信号先压过「^我」：像「我在呢」「别截图」「哼 你才胖」这种，
-    # 句首是「我」但一看就是我的口吻。
-    if _RE_SPK_SELF_STRONG.search(t) and not _RE_SPK_USER_STMT.search(t):
-        return "self"
-    # 他的自述（我今天/昨天/学校…）优先于我的弱信号
-    if _RE_SPK_USER_STMT.search(t):
-        return "user"
-    if _RE_SPK_SELF_WEAK.search(t):
-        return "self"
-    return "user"
 
 
-def guess_mtype(text):
-    """判这句是「发生过的事」还是「他给我的指令/设定」。"""
-    t = (text or "").strip()
-    if not t:
-        return "episode"
-    if _RE_MTYPE_INST.search(t):
-        return "instruction"
-    return "episode"
 
 
 # 命中目标分区的条目加权
@@ -1780,9 +871,7 @@ SCORE_W = (0.35, 0.30, 0.20, 0.10)
 #   ① 群聊降权：群里几百条别人的闲聊，字面/语义都跟日常问句很像，
 #      于是天天把真记忆顶下去（实测一条「秤歪了」能压过「我的号是多少」）。
 #      写入时把 salience 压下来，检索时再退一档 —— 不是删，是想得起来但排后面。
-GROUP_SOURCE_PREFIX = "qq-group"
 GROUP_RECALL_PENALTY = 0.55      # 群聊在打分时 ×0.55
-GROUP_SAL_MAX = 0.35             # 群聊写入时 salience 上限
 #   ② 「我自己说过的话」专用通道：问「你之前答应我什么」时，
 #      答案在我自己的话里，但那句话往往很短、没情绪、时间又久，
 #      三项因子全不占优。只在这一类问句上给自己的话抬一档。
@@ -1795,6 +884,13 @@ _RE_SELF_DEF = re.compile(r"叫|设定|自称|身份|规矩|原则|给自己|管
 _RE_SELF_ASK = re.compile(
     r"你(?:自己|之前|以前|上次|那天|刚才|当时)?.{0,10}?"
     r"(?:说|讲|答应|承诺|自称|叫|提过|记下|写过|叮嘱)")
+# 「你之前说过…」是**引语标记**，真正的内容在它后面。
+# 2026-11-09 实测：不剥它的话，「你之前」三个字会和记忆里同样带「你之前」的
+# 长消息玩字面撞车（P12-NEW-002/d03 目标句排在 37 名，前几名全是
+# 「你之前就觉得哪儿别扭」这类），答案句反被埋掉。
+_RE_SELF_SHELL = re.compile(
+    r"你(?:自己|之前|以前|上次|那天|刚才|当时)?\s*"
+    r"(?:说过|说|讲过|讲|提过|答应过|答应|承诺过|承诺|叮嘱过|叮嘱|记下过|记下|写过)")
 _RE_GROUP_ASK = re.compile(r"群|聊天室|群里|他们|大家")
 _RE_NAME_DEF = re.compile(r"(?:我|名字|昵称|外号|管自己)?叫[\u4e00-\u9fa5A-Za-z]{1,4}")
 
@@ -1803,6 +899,10 @@ OBJECT_BOOST_SAME = 1.10
 OBJECT_BOOST_OTHER = 0.92
 # 低置信：top1 分数低于这个数就明说「记不太清」，别把猜的当成真记得
 CONF_WEAK = 0.34
+# 冷档翻旧账时忽略的双字（问句里的外壳词，谁跟谁都有，会虚抬命中率）
+_ARCH_STOP = {"我们", "你们", "他们", "什么", "怎么", "这个", "那个", "一下",
+              "还是", "就是", "自己", "时候", "现在", "之前", "以后", "为什",
+              "么样", "不是", "可以", "有没", "没有"}
 # 🔧 2026-11-07：情绪强度对「能不能想起来」的影响。
 #    人在回忆时不是按时间戳检索的：一件让人心里一紧的事，
 #    隔十年也比昨天的琐事更容易跳出来。卡里 emotion 列一直有，
@@ -1811,6 +911,14 @@ EMOTION_RECALL_BOOST = 0.25   # 情绪满格时最多 +25%
 # 两个开关默认关：实测都会让评估集的 R@1 掉一半（详见检索打分那段注释）。
 _EMOTION_BOOST_ON = os.environ.get("WHALE_EMO_BOOST", "0") == "1"
 _RECENCY_FRESH_STEP = os.environ.get("WHALE_FRESH_STEP", "0") == "1"
+# 2026-11-11 实验：召回的第二道（只在 WHALE_RERANK=1 时开）。
+# 第一道已经用「语义+字面+清晰度+新近」把人选出来，但 45 天档实测
+# ret5 57% / ret20 72% —— 差的那 15 个点是「存住了却排不进前五」。
+# 第二道只看相关性（语义 0.55 + 覆盖 0.35 + 清晰 0.10），把「新近」
+# 从「决定谁进前五」降级成「粗筛够不够格进池子」。
+_RERANK_ON = os.environ.get("WHALE_RERANK", "") == "1"
+RERANK_POOL = int(os.environ.get("WHALE_RERANK_POOL", "60") or 60)
+
 
 # ===== V5.4 时间窗加成（2026-11-07 用户拍板）=====
 # 他说的是：「就在当前提问之前的一个月内，他的那些消息的权重会稍微高一点点，
@@ -1832,7 +940,12 @@ WINDOW_BONUS_MAX = float(os.environ.get("WHALE_WINDOW_MAX", "0.06") or 0.06)
 _WINDOW_BONUS_ON = os.environ.get("WHALE_WINDOW_BONUS", "1") == "1"
 
 RECENCY_FAST_DAYS = 0.5       # 近期那一档：半天之内几乎必然先想起
-RECENCY_SLOW_DAYS = 14.0      # 远期那一档：原来那个常数
+RECENCY_SLOW_DAYS = 45.0      # 远期那一档：14 → 45（2026-11-09）
+# 为什么从 14 改到 45：14 天意味着「三周前的事」的新近分已经掉到 exp(-2)=13%，
+# 45 天档的题（评测里断崖最狠的一档）几乎全靠语义硬拉。而评测显示 45 天档
+# ret5 只有 100/167、ret20 也只有 120/167 —— 断的不是「找不回来」而是「排不上去」。
+# 45 天正好对齐「中期池半衰期 ~30 天 + 一个巩固周期」这个尺度：
+# 在这个窗口里，一条 45 天前的记忆应该还有 ~37% 的新近分，而不是 4%。
 
 # 🔴 2026-10-31：片段通道的相对权重。
 #    sem_best = max(主干语义, DET_REL * 片段语义)
@@ -1867,23 +980,11 @@ POD_MIN_ROWS = 60      # 条数太少就别聚类了，聚了也是瞎分
 POD_KMEANS_ITERS = 12
 
 # ---- 时间窗预筛（T4-2）----
-_RE_T_TODAY = re.compile(r"刚刚|刚才|今天|今晚|这会儿|现在|眼下")
-_RE_T_RECENT = re.compile(r"最近|这两天|这几天|这几天|上周|前几天|这几天")
 _RE_T_OLD = re.compile(r"以前|那次|那天|当时|曾经|小时候|去年|很早")
 
 
-def query_time_window(query):
-    """这句话在问哪个时间段？返回天数，None = 不限。
 
-    🔧 为什么需要：问「今天中午吃了什么」却去翻三年前的事，
-    是纯浪费 —— 而且容易翻出不相干的高分旧事，把答案挤掉。
-    """
-    q = query or ""
-    if _RE_T_TODAY.search(q):
-        return 3.0
-    if _RE_T_RECENT.search(q):
-        return 14.0
-    return None
+
 
 # 查询侧的分区路由：问什么，就去哪个区找
 #
@@ -1929,24 +1030,8 @@ def guess_query_regions(query):
 # ============================================================
 # 权重：锚点模型（现算，不存死值）
 # ============================================================
-def lam_for(pool, age):
-    """当前该用哪个衰减率"""
-    if pool == POOL_SHORT:
-        return LAM_S1 if age <= S_SHORT_PHASE else LAM_S2
-    if pool == POOL_MEDIUM:
-        return LAM_M
-    return LAM_L
 
 
-def _clamp01(v):
-    """把权重夹回 [0,1]。脏数据不许穿透到检索排序里。"""
-    try:
-        f = float(v)
-    except (TypeError, ValueError):
-        return 0.0
-    if f != f:          # nan
-        return 0.0
-    return 0.0 if f < 0.0 else (1.0 if f > 1.0 else f)
 
 
 # ============================================================
@@ -1966,289 +1051,182 @@ def _clamp01(v):
 # 中期不划分：中期是「阶段」不是「类型」，任何类型都会走进中期；
 #   若再按四类切就是 4×3 张桌子，容量规则得重推，容量和寿命又搅一起。
 #   但「每区曲线不同」要能穿过中期 —— 所以用 stage_factor 把区差保留下来。
-R_STUDY = "study"       # 学到的知识、笔记、教程
-R_PLAY = "play"         # 娱乐：视频、游戏、梗
-R_WORK = "work"         # 工作：项目、工程、修 bug
 
 # 各区的半衰期（秒）。表里没有的区 = 没有自己的 λ，仍走池子那条曲线
 #   ⇒ episode / fact / preference / self / habit / flash 的行为完全不变（零回归）。
-REGION_HALF_LIFE = {
-    R_CHATTER: 12 * 3600.0,   # 闲聊：一天之后剩 25%
-    R_PLAY: 3 * DAY,          # 娱乐：三天之后剩一半
-    R_STUDY: 7 * DAY,         # 学习：一周之后剩一半
-    R_WORK: 15 * DAY,         # 工作：半个月之后剩一半
-}
-REGION_OWN_LAMBDA = {k: math.log(2.0) / v for k, v in REGION_HALF_LIFE.items()}
 
 # 负载预算：一天写多少条算「正常」。
 #   2026-11-06 探针实测（tools/probe_load.py，最近 30 天）：
 #     全部 日均 32.6 / 中位 22 / p90 77 / 最大 122；
 #     qq-group 日均 38.5、study 18.0、cli 7.0、bili 1.0。
-REGION_DAY_BUDGET = {
-    R_CHATTER: 40.0,
-    R_PLAY: 10.0,
-    R_STUDY: 20.0,
-    R_WORK: 8.0,
-}
-LOAD_F_MIN, LOAD_F_MAX = 0.55, 2.2   # 拥挤系数的上下限
-LOAD_TAU = 86400.0                   # 负载指数平滑的时间常数 = 24 小时
 
 # 开关：默认关 ⇒ 行为跟改之前一模一样。验好之后写 meta 就打开。
 #   打开/关闭：
 #     INSERT OR REPLACE INTO meta(key,val) VALUES('region_lambda_on','1')
 #   关回去把 '1' 换成 '0' 即可 —— 这是这个改动敢上真卡的唯一理由。
-_REGION_LAMBDA_ON = False
-_LOAD_F = {}          # region -> 拥挤系数（由 MemoryCard 维护）
 _REGION_LOAD = {}     # region -> 指数平滑后的「每天新写几条」
 
 
-def stage_factor(pool):
-    """升池变慢的倍率，以短期池慢段为基准。
-
-    学习记忆半衰期 7 天：短期 7 天 → 中期 46.7 天 → 长期 583 天。
-    这样「升池 = 改判为更要紧」的手感还在，而区与区的差别不会被抹平
-    （旧算法里曲线是池子定的，一进中期分区差异就没了）。
-    """
-    if pool == POOL_SHORT:
-        return 1.0
-    if pool == POOL_SHORT_WARM:
-        return WARM_SLOW
-    if pool == POOL_MEDIUM_WARM:
-        return (LAM_M * WARM_SLOW) / LAM_S1
-    if pool == POOL_MEDIUM:
-        return LAM_M / LAM_S1
-    if pool == POOL_LONG:
-        return LAM_L / LAM_S1
-    if pool == POOL_ARCHIVE:
-        return K_ARCHIVE / LAM_S1
-    if pool == POOL_DEEP:
-        return K_DEEP / LAM_S1
-    return 1.0
 
 
-def relation_scale(person_layer):
-    """越亲近的人，这条记忆活得越久（倍率直接除 λ）。
-
-    注意：这不是好感度打分。分数会变、会诱导讨好；这里只是把**已经存在的
-    关系层**接到遗忘速度上，跟闲聊区原来那套是同一个东西，只是推广到全区。
-    """
-    sc = CHATTER_PERSON_SCALE.get((person_layer or "").strip(), 1.0)
-    return sc if sc > 0 else 1.0
 
 
-def load_factor(region):
-    """今天这个区挤不挤。没有数据就是 1.0（不调节）。"""
-    try:
-        return float(_LOAD_F.get(region, 1.0))
-    except Exception:
-        return 1.0
 
 
-def effective_lambda(region, pool, person_layer=""):
-    """这个区在这个池子里的有效 λ。没有自己的 λ 就返回 None（走老曲线）。"""
-    lam = REGION_OWN_LAMBDA.get(region)
-    if lam is None:
-        return None
-    return lam * stage_factor(pool) * load_factor(region) \
-        / relation_scale(person_layer)
 
 
-def region_by_source(source, default=None):
-    """按来源定区，不猜内容。
-
-    为什么不猜内容：2026-11-05 那天靠正则判「这是不是闲聊」，把 18 条
-    学习笔记全判进了闲聊区（半衰期 8.77 小时），等于把一晚上的学习删了。
-    猜一次错一次；来源是写入方自己知道的，不用猜。
-
-    没列的来源一律照旧（返回 default），所以对现有行为没有影响。
-    """
-    s = (source or "").strip().lower()
-    if s in ("study", "notes", "note"):
-        return R_STUDY
-    if s in ("bili", "video", "play", "game"):
-        return R_PLAY
-    if s in ("cli", "deploy", "work", "build"):
-        return R_WORK
-    return default
 
 
-def _f_of(val, budget):
-    """负载 → 拥挤系数。**这是 f 的唯一一份公式**，别处只许调它。
-
-    （教训：两套公式不互相校验，只会悄悄分家还不报错。）
-    """
-    if not budget or budget <= 0:
-        return 1.0
-    ratio = max(0.0, float(val)) / float(budget)
-    f = math.sqrt(ratio) if ratio > 0 else 0.0
-    return max(LOAD_F_MIN, min(LOAD_F_MAX, f))
 
 
-def region_snapshot_from_db(conn, now=None):
-    """从 meta 读负载、算 f、返回控制台要的快照 —— 不用建 MemoryCard。
-
-    控制台只有 sqlite 连接、没有卡对象（也不想为画一张图去加载模型），
-    所以给它一个纯函数版本；公式仍然只有 `_f_of` 一份。
-    """
-    now = time.time() if now is None else float(now)
-    raw = {}
-    try:
-        row = conn.execute(
-            "SELECT val FROM meta WHERE key=?", ("region_load",)).fetchone()
-        if row and row[0]:
-            raw = json.loads(row[0]) or {}
-    except Exception:
-        raw = {}
-    on = False
-    try:
-        row = conn.execute(
-            "SELECT val FROM meta WHERE key=?", ("region_lambda_on",)).fetchone()
-        on = bool(row and str(row[0]).strip() in ("1", "true", "True"))
-    except Exception:
-        on = False
-    regions = []
-    for reg in (R_CHATTER, R_PLAY, R_STUDY, R_WORK):
-        val = 0.0
-        try:
-            v = raw.get(reg)
-            if v:
-                val = float(v[0]) * math.exp(-max(0.0, now - float(v[1])) / LOAD_TAU)
-        except Exception:
-            val = 0.0
-        budget = REGION_DAY_BUDGET.get(reg, 0.0)
-        regions.append({
-            "region": reg,
-            "half_life_h": REGION_HALF_LIFE.get(reg, 0.0) / 3600.0,
-            "load": round(val, 2),
-            "budget": budget,
-            "factor": round(_f_of(val, budget), 3),
-        })
-    return {"on": on, "regions": regions}
 
 
-def weight_now(w0, pool, t_anchor, now, region=None, tier=None,
-                person_layer=""):
-    """从锚点算到现在。分段双速率用积分，不能简单相乘。
-
-    V4.1：分区衰减倍率直接乘在时间上 —— 等价于「这条记忆活得更慢」。
-    flash 区 0.30 倍时间 ⇒ 半衰期变成 3.3 倍长。
-
-    2026-11-01（五层记忆）：core_* 三档不衰减，直接被时间原样返回。
-    它们的"变"走的是 supersede（新事实替换旧正文），不是 decay。
-    """
-    if tier in CORE_TIERS:
-        return _clamp01(w0)
-    # 🔧 2026-11-05（完备性体检）：两个必须兜的边角。
-    #    a) w 本身越界（脏数据 / 别处的 bug 写进来）：以前原样透传 ——
-    #       1.5 会永远排第一且永远衰减不到回收线，-1 会永远垫底。
-    #       权重是"多重"的度量，它只有 [0,1] 这段有意义。
-    #    b) t_anchor 是 0 / None（老数据没补、或者某条写入路径忘了设锚）：
-    #       以前 age 会算成"从 1970 年到现在"，任何一条都会被当场归零。
-    #       不知道什么时候写的最安全解释是"不衰减"—— 宁可记得太牢，
-    #       不能因为一个缺失的字段就凭空忘掉。
-    w0 = _clamp01(w0)
-    if not t_anchor:
-        return w0
-    age = max(0.0, now - t_anchor)
-    # 🔧 2026-11-03：长期池的保护期必须按**真实时间**算，再乘分区倍率。
-    #    之前是「先把 age 乘上 region_scale，再扣 90 天」—— 于是 flash 区
-    #    （0.30 倍）的保护期变成 90/0.3 = 300 天真·现实天数，self 区 150 天。
-    #    也就是说「刚被想起来过的记忆受 90 天保护」这条规矩，被分区倍率
-    #    偷偷改成了「受 90 天 × 1/倍率 保护」。保护期说的是"多久之内不掉"，
-    #    是现实里的时间，跟这条记忆自己衰减得多慢是两件事。
-    if pool == POOL_LONG:
-        if age > LONG_PROTECT_DAYS * DAY:
-            age -= LONG_PROTECT_DAYS * DAY
-        else:
-            age = 0.0
-    # 🔧 2026-11-06（V5.2 分区细分）：有自己 λ 的区，走统一公式
-    #      有效 λ = 区 λ × 池阶段倍率 × 今天挤不挤 ÷ 关系倍率
-    #    这样「学习 7 天、工作 15 天」这种区差在升池之后依然保留；
-    #    开关默认关着，关着时下面那条老路径一字不改。
-    if _REGION_LAMBDA_ON:
-        lam = effective_lambda(region, pool, person_layer or "")
-        if lam is not None:
-            return w0 * math.exp(-max(1e-12, lam) * age)
-    # 🔧 2026-11-05：闲聊不乘分区倍率，用自己的固定 λ。
-    #    乘倍率会让它先落短期池时半衰期只剩 1.3 小时，比"明天忘光"快太多。
-    if region == R_CHATTER:
-        lam = chatter_lambda(person_layer or "")
-        return w0 * math.exp(-lam * age)
-    if region:
-        age *= region_decay_scale(region)
-    # 🔧 V5.6：小池的衰减放慢到三分之一。
-    #    为什么不能沿用主池的 λ：小池 TTL 21 天，而短期 λ 半衰期只有 4.5 天，
-    #    那样到第 14 天 w 已经趋零 —— "寿命更长"就成了一句空话。
-    if pool == POOL_SHORT_WARM:
-        return w0 * math.exp(-LAM_S1 * WARM_SLOW * age)
-    if pool == POOL_MEDIUM_WARM:
-        return w0 * math.exp(-LAM_M * WARM_SLOW * age)
-    if pool == POOL_SHORT:
-        if age <= S_SHORT_PHASE:
-            return w0 * math.exp(-LAM_S1 * age)
-        w = w0 * math.exp(-LAM_S1 * S_SHORT_PHASE)
-        return w * math.exp(-LAM_S2 * (age - S_SHORT_PHASE))
-    if pool == POOL_MEDIUM:
-        return w0 * math.exp(-LAM_M * age)
-    if pool == POOL_ARCHIVE:
-        return w0 * math.exp(-K_ARCHIVE * age)
-    if pool == POOL_DEEP:
-        return w0 * math.exp(-K_DEEP * age)
-    # 长期池：刚被想起来过的 90 天里不掉，之后照常慢衰。
-    # 「重要 ≠ 永久活跃」：它不会被砍，但也不会永远占着最亮的位置。
-    return w0 * math.exp(-LAM_L * age)
 
 
-def wn_row(r, now):
-    """按行算当前权重。person_layer 从 about_layer 列读（没有就当空）。"""
-    """按行算权重：core_* 三档不衰减，其余照旧。
-    单独包一层是因为调用点多，改签名容易漏。"""
-    try:
-        tier = r["tier"]
-    except Exception:
-        tier = None
-    try:
-        _lay = r["about_layer"] or ""
-    except Exception:
-        _lay = ""
-    return weight_now(r["w"], r["pool"], r["t_anchor"], now, r["region"], tier,
-                      person_layer=_lay)
 
 
-def pool_of_k(k):
-    """老数据兼容：用 k 反推它属于哪个池"""
-    if k is None:
-        return POOL_SHORT
-    if k >= LAM_S1 * 0.5:
-        return POOL_SHORT
-    if k >= LAM_M * 0.5:
-        return POOL_MEDIUM
-    return POOL_LONG
 
 
 # ============================================================
 # 主体
 # ============================================================
 
-def _safe_json(txt):
-    """存进去的是 JSON 文本；读坏了就当没有，别让一条脏行毁掉整张图。"""
-    if not txt:
-        return {}
-    try:
-        v = _json.loads(txt)
-        return v if isinstance(v, dict) else {}
-    except Exception:
-        return {}
 
 
 # 印象层/重复短句判断共用：把标点、空白、语气尾巴剥掉再比
 _PUNCT_RE = re.compile(r"[\s，。！？、…~—\-（）()《》·「」【】]+")
 
 
-class MemoryCard:
+from cardmix_habit import MixHabit  # noqa: E402
+from cardmix_store import MixStore
+
+
+_DB_TLS = threading.local()
+# 舱（pods）重建只许一个线程干（2026-11-11，见 _ensure_pods）
+_POD_BUILD_LOCK = threading.Lock()
+# 读连接池（2026-11-11）：HTTP 一个请求一个线程，按线程缓存等于每请求新建连接
+_CONN_POOL = []
+# 读池上限：默认 8（并发读超过 8 路时新建、还回来时超了就关掉，
+# 不追求「一个线程一条常驻连接」，那在 Windows 上反而抖）。
+try:
+    _CONN_POOL_MAX = max(1, min(32, int(os.environ.get("WHALE_READ_POOL", "8"))))
+except Exception:
+    _CONN_POOL_MAX = 8
+_CONN_POOL_LOCK = threading.Lock()
+
+
+class MemoryCard(MixHabit, MixStore):
+    # 2026-11-11（读写分离第 2 步）：self.db 现在是个「看当前线程」的门。
+    # 普通调用仍然是主连接（行为与以前一模一样）；进了 reading() 之后，
+    # 这个线程拿到的就是它自己的连接 —— 读请求因此不用再排在全局锁后面。
+    @property
+    def db(self):
+        c = getattr(_DB_TLS, "conn", None)
+        return c if c is not None else self._db_main
+
+    @db.setter
+    def db(self, v):
+        self._db_main = v
+
+    def _tune_conn(self, conn):
+        """给一条连接上好这站该有的 pragma（读池的连接也要）。
+
+        第 3 步（2026-11-11）之前，池里新建的连接只设了 busy_timeout：
+        `synchronous` 是**每条连接各自**的，默认 FULL，写的时候要额外 fsync；
+        `temp_store`/`cache_size` 也不继承。所以统一走这里。
+        journal_mode 不动 —— 它是库属性，启动时设过一次了。
+        """
+        try:
+            conn.execute("PRAGMA busy_timeout=30000")
+            conn.execute("PRAGMA synchronous=NORMAL")
+            conn.execute("PRAGMA temp_store=MEMORY")
+            conn.execute("PRAGMA cache_size=-16000")
+        except Exception:
+            self._tls_pragma_err = True
+
+    def pool_stats(self):
+        """给 /perf 看的连接池数字（不参与任何业务逻辑）。"""
+        with _CONN_POOL_LOCK:
+            n = len(_CONN_POOL)
+        return {"journal_mode": getattr(self, "_journal_actual", "unknown"),
+                "pool": n, "pool_max": _CONN_POOL_MAX,
+                "opened": getattr(self, "_conn_opened", 0)}
+
+    def _conn_acquire(self):
+        """从池里借一条读连接（池空就新建）。"""
+        with _CONN_POOL_LOCK:
+            if _CONN_POOL:
+                return _CONN_POOL.pop()
+        c = sqlite3.connect(self.db_path, check_same_thread=False, timeout=30.0)
+        c.row_factory = sqlite3.Row
+        self._tune_conn(c)
+        self._conn_opened = int(getattr(self, "_conn_opened", 0)) + 1
+        return c
+
+    def _conn_release(self, conn):
+        """还连接：池满就关掉，连接数不许无限长。"""
+        try:
+            if conn.in_transaction:
+                conn.rollback()
+        except Exception:
+            self._read_rb_err = True
+        with _CONN_POOL_LOCK:
+            if len(_CONN_POOL) < _CONN_POOL_MAX:
+                _CONN_POOL.append(conn)
+                return
+        try:
+            conn.close()
+        except Exception:
+            self._tls_pragma_err = True
+
+    def _thread_conn(self):
+        tid = threading.get_ident()
+        c = self._db_tls.get(tid)
+        if c is None:
+            c = sqlite3.connect(self.db_path, check_same_thread=False, timeout=30.0)
+            c.row_factory = sqlite3.Row
+            try:
+                c.execute("PRAGMA busy_timeout=30000")
+            except Exception:
+                self._tls_pragma_err = True
+            self._db_tls[tid] = c
+        return c
+
+    @contextlib.contextmanager
+    def reading(self):
+        """本次调用走线程自己的连接（不拿全局锁时用）。
+
+        注意：这里不做只读强制 —— card2 的读路径里夹着 touch/access 这类
+        小记账写入，SQLite 的 WAL + busy_timeout 会替我们把并发写排队。
+        """
+        conn = self._conn_acquire()
+        prev = getattr(_DB_TLS, "conn", None)
+        _DB_TLS.conn = conn
+        try:
+            yield conn
+        finally:
+            # 收掉可能残留的事务：读连接要是留着一个长读事务，
+            # WAL 就没法 checkpoint（实测压测时 -wal 涨到 12MB+）。
+            try:
+                if conn.in_transaction:
+                    conn.rollback()
+            except Exception:
+                self._read_rb_err = True
+            _DB_TLS.conn = prev
+            self._conn_release(conn)
+
     def __init__(self, db_path=":memory:", clock=None, card_dir=None):
         self.clock = clock or Clock()
         self.db_path = db_path
+        # 承诺账本（2026-11-11 接进读侧）：表在同一个库里，但**不在 mem 池**——
+        # 它不是记忆，不参与召回打分、不参与衰减。这里只保证表存在（幂等）。
+        try:
+            import promises as _pm0
+            _pm0.ensure(_pm0.connect(self.db_path))
+            self._promises_ok = True
+        except Exception as _pe0:
+            self._promises_ok = False
+            soft_fail("promise_ensure", _pe0)
         # 卡目录（放 .lifecard / 快照用），不传就取库文件所在目录
         self.card_dir = card_dir or (
             os.path.dirname(os.path.abspath(db_path))
@@ -2256,15 +1234,16 @@ class MemoryCard:
         # check_same_thread=False：心智服务是多线程的（每个请求一个线程），
         # 而 SQLite 连接默认绑在创建它的线程上。并发安全靠外部那把锁
         # （Mind.lock / MemoryCard 自己的调用方），不是靠 SQLite 拦。
-        self.db = sqlite3.connect(db_path, check_same_thread=False, timeout=30.0)
-        self.db.row_factory = sqlite3.Row
+        self._db_main = sqlite3.connect(db_path, check_same_thread=False, timeout=30.0)
+        self._db_main.row_factory = sqlite3.Row
+        self._db_tls = {}          # 线程 ident -> 该线程自己的连接（reading() 用）
         # 🔧 并发关键（实测 2026-10-31）：卡不是只有一个进程在碰 ——
         #    mind_server（8848）、bridge、console、快照/备份脚本都可能同时开库。
         #    SQLite 默认拿不到写锁立刻抛 "database is locked"，调用方看到的是
         #    「卡坏了」，其实只是另一个进程正在写。busy_timeout 让它在锁上等，
         #    而不是当场失败；30 秒足够任何一次正常写入收尾。
         try:
-            self.db.execute("PRAGMA busy_timeout=30000")
+            self._db_main.execute("PRAGMA busy_timeout=30000")
         except Exception:
             pass
         # 🔧 性能关键（实测 2026-10-30）：
@@ -2289,8 +1268,13 @@ class MemoryCard:
             self.db.execute("PRAGMA synchronous=NORMAL")
             self.db.execute("PRAGMA temp_store=MEMORY")
             self.db.execute("PRAGMA cache_size=-16000")
+            # 🔧 2026-11-11（读写分离第 3 步）：记下**真的生效了**的那个模式。
+            # journal_mode 是库的属性，设一次就够；但「设了」和「生效了」
+            # 是两件事（可移动盘会退回 DELETE），所以要读回来留证据。
+            self._journal_actual = str(
+                self.db.execute("PRAGMA journal_mode").fetchone()[0]).lower()
         except Exception:
-            pass
+            self._journal_actual = "unknown"
         # 全局依恋值（V5.0 T1-3）。持久化在 meta 表，跨会话不断。
         self.oxy = 0.0
         # 心境 M（V5.0 T2-3）：慢基底，0.5 = 不悲不喜
@@ -2404,6 +1388,12 @@ class MemoryCard:
             except Exception:
                 self.model_dim = None
         self._refresh_dim_state()
+        # V7 第 19 件：老卡升级上来时 emb_meta 是空的 —— 补登一次现有向量
+        # 按维度的分布（legacy-dim768 之类），换模型时才看得见「混了几代」。
+        try:
+            self.backfill_emb_meta()
+        except Exception as e:
+            soft_fail("emb_meta_boot", e)
         # 🔧 MMR 重排开关：默认 0（关）——不设环境变量的行为跟以前一字不差。
         #    WHALE_MMR=0.25 打开（λ 越小越强调"别重复"，越大越贴原始相关性）。
         try:
@@ -2526,6 +1516,27 @@ class MemoryCard:
             dt_h = max(0.0, min(72.0, (now - float(self.mo["ts"])) / 3600.0))
         self.mo["d"] = motiv.settle(self.mo["d"], dt_h)
         self.mo["ts"] = now
+        # 🔧 2026-11-09：settle 只往基线靠，但基线不是 0 ——
+        #    如果刚聊完，attachment/care 被满足、低于基线，settle 会把它们拉回基线，
+        #    但不会**超过**基线。没有人超基线 → candidates 不产出 → 【动机】永远空。
+        #    这里补一笔「想念」：离上次说话越久，依恋和关心越往上超过基线。
+        #    用 itch() 往上推，幅度按空闲时长递增（1h 轻微、6h 明显、12h+ 很想）。
+        _last_user = self._last_user_ts()
+        if _last_user > 0:
+            _idle_h = max(0.0, (now - _last_user) / 3600.0)
+            if _idle_h > 0.5:
+                # 超过半小时才开始「想」，刚聊完不会。
+                # 目标值 = 基线 + 想念幅度，**只补差额**，不重复叠加：
+                # 原来这里是 itch(d, 全额)，而 tick 从 2026-11-09 起每分钟
+                # 结算一次 —— 每跳都再加一遍同样多的「想念」，五分钟就把
+                # attachment 顶到 1.0，于是永远显示「非常想说话」。
+                # 改成目标式之后，同一个 idle_h 无论算几次，结果都一样。
+                for _k, _cap, _rate in (("attachment", 0.30, 0.025),
+                                        ("care", 0.22, 0.018)):
+                    _tgt = float(motiv.DRIVES[_k][0]) + min(_cap, _idle_h * _rate)
+                    _cur = float(self.mo["d"].get(_k) or 0.0)
+                    if _cur < _tgt:
+                        self.mo["d"] = motiv.itch(self.mo["d"], _k, _tgt - _cur)
         dk = self._day_key(now)
         last_spoke = self._last_user_ts()
         ctx = {"now": now, "last_spoke_ts": last_spoke,
@@ -2671,7 +1682,10 @@ class MemoryCard:
         """给 viscera_hist 补列。老卡里那张表是窄的，只加不删。"""
         want = {"temp": "REAL NOT NULL DEFAULT 0",
                 "tension": "REAL NOT NULL DEFAULT 0",
-                "h": "TEXT", "p": "TEXT", "pulse": "TEXT"}
+                "h": "TEXT", "p": "TEXT", "pulse": "TEXT",
+                # V7 第 13 条：这一格是「因为什么变成这样」——
+                # 没有它，曲线只能看出「变了」，看不出「被什么弄变的」。
+                "why": "TEXT"}
         try:
             have = {r["name"] for r in self.db.execute(
                 "PRAGMA table_info(viscera_hist)").fetchall()}
@@ -2769,8 +1783,8 @@ class MemoryCard:
             c = self.db.cursor()
             c.execute(
                 "INSERT INTO viscera_hist(ts,hr,resp,face,sym,para,dopa,nora,sero,"
-                "cort,oxy,rpe,safety,label,temp,tension,h,p,pulse) "
-                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "cort,oxy,rpe,safety,label,temp,tension,h,p,pulse,why) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (now, float(b.get("hr", 0)), float(b.get("resp", 0)),
                  float(b.get("face", 0)), float(v.get("symp", 0)),
                  float(v.get("para", 0)), float(h.get("dopa", 0)),
@@ -2780,7 +1794,8 @@ class MemoryCard:
                  float(b.get("temp", 0)), float(b.get("tension", 0)),
                  _json.dumps(_hj, ensure_ascii=False) if _hj else None,
                  _json.dumps(_pj, ensure_ascii=False) if _pj else None,
-                 _json.dumps(_pj.get("pulse") or {}, ensure_ascii=False)))
+                 _json.dumps(_pj.get("pulse") or {}, ensure_ascii=False),
+                 str(getattr(self, "_vh_why", "") or "")[:120]))
             # 只留 7 天，老点删掉（曲线画不了那么长，账也不想无限长）
             c.execute("DELETE FROM viscera_hist WHERE ts < ?", (now - 7 * 86400.0,))
             self.db.commit()
@@ -2789,6 +1804,7 @@ class MemoryCard:
             pass
 
     def viscera_sample(self, now=None, force=True):
+        self._vh_why = "idle"
         """不喂新话，只让身体按时间自己走一格，然后记一个点。
 
         为什么需要它：控制台「实时」档每 3 秒刷一次，但**没有新对话就没有
@@ -2892,6 +1908,8 @@ class MemoryCard:
         return out
 
     def viscera_touch(self, text="", now=None, emotion=0.0):
+        # V7 第 13 条：记下「这一格是被哪句话弄出来的」。控制台里点某个点就能看到原因。
+        self._vh_why = ("talk:" + (text or ""))[:120]
         """一句话进来：先让身体反应，再让激素跟上，最后存回去。
 
         顺序就是人真实的顺序 —— 不是「我想了想觉得被冒犯了」，
@@ -2940,6 +1958,8 @@ class MemoryCard:
         except Exception:
             last = 0.0
         dt = (now - last) / 3600.0 if last > 0 else 0.0
+        # V7 第 13 条：手动刺激也要留原因（控制台里看得出是谁戳的）
+        self._vh_why = "stim:" + ",".join(str(k) for k in (kinds or []))[:60]
         dt = max(0.0, min(72.0, dt))
         if isinstance(kinds, str):
             kinds = [kinds]
@@ -2989,13 +2009,23 @@ class MemoryCard:
             pass
         return snap
 
-    def log_hormones(self, now=None, min_interval=300.0):
-        """采一条激素样本（默认 5 分钟一次），给控制台画趋势。
+    def log_hormones(self, now=None, min_interval=None):
+        """采一条激素样本（默认 2 分钟一次），给控制台画趋势。
 
         为什么单独一张表而不是塞进 meta：meta 只能存「现在是多少」，
         画不出一条线。趋势要看的是「刚才那阵子怎么变的」。
+
+        🔧 2026-11-10：间隔可配（`WHALE_HLOG_SEC`），默认 120 秒。
+        原来 300 秒且只在有请求时落盘 —— 一天下来只有 72 个点，
+        关掉服务的那一夜整段空白，控制台上看就是「曲线突然不动了」。
+        现在由采样线程每 120 秒写一次，跟有没有人说话无关。
         """
         now = float(now if now is not None else self.clock.now())
+        if min_interval is None:
+            try:
+                min_interval = float(os.environ.get("WHALE_HLOG_SEC", "120"))
+            except Exception:
+                min_interval = 120.0
         try:
             r = self.db.execute(
                 "SELECT ts FROM h_log ORDER BY id DESC LIMIT 1").fetchone()
@@ -3282,16 +2312,24 @@ class MemoryCard:
         不递减的话，一天里说六句话就能把心情从谷底拉到天上 —— 那不是人，是开关。
         """
         e = mood_of_event(text, emotion)
-        # 同一天第 n 次推送，效力按 1/(1+0.6n) 打折
-        day = int(self.clock.now() // DAY)
-        if getattr(self, "_mood_day", None) != day:
-            self._mood_day = day
-            self._mood_push_today = 0
-        self._mood_push_today = getattr(self, "_mood_push_today", 0) + 1
-        n = self._mood_push_today - 1
-        k = K_MOOD / (1.0 + 0.6 * n)
+        # 折扣窗口从「一整天」改成「半小时」：真人连着被夸三次也会一次比一次淡，
+        # 但隔两小时再被夸，反应是新的。按天算的话，早上说一句好话，晚上再说什么都被砍到 6%。
+        now = self.clock.now()
+        try:
+            _seq = [t for t in (getattr(self, "_mood_seq", None) or [])
+                    if now - float(t) < 1800.0]
+        except Exception:
+            _seq = []
+        n = len(_seq)
+        _seq.append(now)
+        self._mood_seq = _seq[-12:]
+        neutral = (e == MOOD_NEUTRAL)
+        k = K_MOOD_NEUTRAL if neutral else (K_MOOD / (1.0 + 0.5 * n))
         before = self.mood
         self.mood = update_mood(self.mood, e, k=k)
+        # 软限：一次会话里再怎么推，也别从"低落"直接跳到"特别高兴"
+        if MOOD_SPAN > 0:
+            self.mood = MOOD_NEUTRAL + max(-MOOD_SPAN, min(MOOD_SPAN, self.mood - MOOD_NEUTRAL))
         if abs(self.mood - before) > 1e-6:
             self._save_mood()
         return self.mood
@@ -3344,6 +2382,11 @@ class MemoryCard:
             verb           TEXT NOT NULL DEFAULT '',   -- 动词（T2-1）
             obj            TEXT NOT NULL DEFAULT '',   -- 宾语（T2-1）
             erase_stage    INTEGER NOT NULL DEFAULT 0,  -- 侵蚀阶段 0/1/2（T2-1）
+            -- V7 第 9 件：事发时间 ≠ 写入时间。
+            --   create_ts 是「这句话被记下的时刻」，event_ts 是「这件事发生的时刻」。
+            --   老库靠 ALTER 迁移，这里只是新库的默认值。
+            event_ts       REAL NOT NULL DEFAULT 0,
+            event_precision TEXT NOT NULL DEFAULT '',   -- time / day / ''（未知）
             emb            BLOB                         -- 语义向量 512×float32（T4-3）
         )""")
         c.execute("""
@@ -3414,6 +2457,127 @@ class MemoryCard:
         # 记忆删除台账（2026-11-01）：记忆会正常消失（侵蚀到头/没上榜/沉成统计），
         # 但出生证留在库里。没有台账，校验只能看见「有证没记录」，
         # 分不清是她自己忘了，还是有人把记录抽走了。
+        # 🗄 冷档（2026-11-09，用户 m10457：「每个池子的大小是没有限制的，256G 够存很久」）
+        #    从这一版起，记忆**不再真的被删掉**：任何一次「忘掉」都会先把整行 + 全部细节
+        #    抄进这张表，再从 mem 里拿掉。mem 里没有它 = 她平时想不起来；
+        #    mem_archive 里有它 = 硬盘上从来没丢过，问得够具体时还能翻出来。
+        #    以前 407 条 tomb 只有「她在什么时候忘了什么」的收据，内容是真的没了。
+        c.execute("""
+        CREATE TABLE IF NOT EXISTS mem_archive (
+            mid           INTEGER PRIMARY KEY,
+            raw            TEXT NOT NULL DEFAULT '',
+            core           TEXT NOT NULL DEFAULT '',
+            speaker        TEXT NOT NULL DEFAULT '',
+            region         TEXT NOT NULL DEFAULT '',
+            pool           TEXT NOT NULL DEFAULT '',
+            create_ts      REAL NOT NULL DEFAULT 0,
+            last_active_ts REAL NOT NULL DEFAULT 0,
+            salience       REAL NOT NULL DEFAULT 0,
+            subj           TEXT NOT NULL DEFAULT '',
+            verb           TEXT NOT NULL DEFAULT '',
+            obj            TEXT NOT NULL DEFAULT '',
+            entities       TEXT NOT NULL DEFAULT '',
+            about_uid      TEXT NOT NULL DEFAULT '',
+            emb            BLOB,
+            details        TEXT NOT NULL DEFAULT '[]',
+            reason         TEXT NOT NULL DEFAULT '',
+            archived_ts    REAL NOT NULL DEFAULT 0
+        )""")
+        c.execute("CREATE INDEX IF NOT EXISTS idx_arch_ts ON mem_archive(create_ts)")
+
+        # 📓 工作日志（2026-11-10，用户 m10983：「换了窗口还记得刚刚做了什么、怎么做的」）
+        #    为什么要有这张表：卡记的是「我们之间发生过什么」，记不住「我上一轮干到哪一行」。
+        #    每一轮我是被重新叫起来的，DSH 会话一换，我桌上那堆「跑过哪条命令、哪个方案刚
+        #    被否掉、下一步该改哪个文件」就全没了 —— 人不会这样，因为人的桌子不会因为换了
+        #    个房间就清空。这张表就是那张桌子：做完一段活写一条，装配上下文时取最近几条。
+        #    它不是记忆（不进 mem、不参与召回/衰减），是笔记本；写坏了最多丢一页便签。
+        c.execute("""
+        CREATE TABLE IF NOT EXISTS worklog (
+            id        INTEGER PRIMARY KEY AUTOINCREMENT,
+            ts        REAL NOT NULL DEFAULT 0,
+            kind      TEXT NOT NULL DEFAULT 'work',  -- work / bug / decision / note
+            title     TEXT NOT NULL DEFAULT '',      -- 一句话：干了什么
+            body      TEXT NOT NULL DEFAULT '',      -- 怎么干的 / 看到什么数
+            next_step TEXT NOT NULL DEFAULT '',      -- 下一步
+            source    TEXT NOT NULL DEFAULT ''
+        )""")
+        c.execute("CREATE INDEX IF NOT EXISTS idx_wl_ts ON worklog(ts)")
+
+        # V7 第 8 件：召回 trace。
+        # 为什么要有它：以前每次记忆没被想起来，只能靠猜是「根本没存」「被时间窗筛了」
+        # 「排到第 20 名外」还是「进了上下文但模型没用」。这四种修法完全不同，
+        # 混在一起就只能在权重上调来调去。这里把每次召回的漏斗存下来：
+        # 全库多少条 → 时间窗剩多少 → 分舱剩多少 → 自己话筛选剩多少 →
+        # 打分前几名（带分项分）→ 最后端进上下文的是哪几个 id。
+        # 它**不是记忆**：不进 mem 池、不参与召回和衰减，只留最近若干条给排错看。
+        c.execute("""
+        CREATE TABLE IF NOT EXISTS recall_trace (
+            id       INTEGER PRIMARY KEY AUTOINCREMENT,
+            ts       REAL NOT NULL DEFAULT 0,
+            query    TEXT NOT NULL DEFAULT '',
+            flags    TEXT NOT NULL DEFAULT '',
+            stages   TEXT NOT NULL DEFAULT '',
+            top      TEXT NOT NULL DEFAULT '',
+            picked   TEXT NOT NULL DEFAULT '',
+            n_lines  INTEGER NOT NULL DEFAULT 0,
+            ms       INTEGER NOT NULL DEFAULT 0
+        )""")
+        c.execute("CREATE INDEX IF NOT EXISTS idx_rt_ts ON recall_trace(ts)")
+
+        # V7 第 2 件：库内写者租约。
+        # 文件租约只挡「同一个卡目录里的两份进程」；把 card.db 复制出去之后，
+        # 副本拿的是它自己的租约文件，照样能写。库内这一行会跟着 card.db 一起被复制走，
+        # 所以副本一启动就看得见「上一份还在写」—— 这是目前唯一能挡住「拷一份打开」的办法。
+        c.execute("""CREATE TABLE IF NOT EXISTS writer_lease (
+            id INTEGER PRIMARY KEY CHECK(id = 1),
+            holder TEXT NOT NULL DEFAULT '',
+            epoch INTEGER NOT NULL DEFAULT 0,
+            pid INTEGER NOT NULL DEFAULT 0,
+            host TEXT NOT NULL DEFAULT '',
+            expires_ts REAL NOT NULL DEFAULT 0,
+            updated_ts REAL NOT NULL DEFAULT 0
+        )""")
+
+        # V7 第 21 件：梦批次账本 —— 压缩由宿主模型做，断了要能「同一批不写两遍」。
+        c.execute("""
+        CREATE TABLE IF NOT EXISTS dream_batch (
+            key          TEXT PRIMARY KEY,
+            state        TEXT NOT NULL DEFAULT 'running',
+            stage        TEXT NOT NULL DEFAULT 'summarize',
+            n_items      INTEGER NOT NULL DEFAULT 0,
+            n_written    INTEGER NOT NULL DEFAULT 0,
+            dialogue_ids TEXT NOT NULL DEFAULT '[]',
+            written      TEXT NOT NULL DEFAULT '[]',
+            attempts     INTEGER NOT NULL DEFAULT 0,
+            last_error   TEXT NOT NULL DEFAULT '',
+            created_ts   REAL NOT NULL DEFAULT 0,
+            updated_ts   REAL NOT NULL DEFAULT 0
+        )""")
+        c.execute("CREATE INDEX IF NOT EXISTS idx_dream_state ON dream_batch(state, updated_ts)")
+
+        # V7 第 9 件：老库补 event_ts / event_precision 两列（SQLite 没有 add column if not exists）
+        try:
+            _cols = {r[1] for r in c.execute("PRAGMA table_info(mem)").fetchall()}
+            if "event_ts" not in _cols:
+                c.execute("ALTER TABLE mem ADD COLUMN event_ts REAL NOT NULL DEFAULT 0")
+            if "event_precision" not in _cols:
+                c.execute("ALTER TABLE mem ADD COLUMN event_precision TEXT NOT NULL DEFAULT ''")
+            c.execute("CREATE INDEX IF NOT EXISTS idx_mem_evts ON mem(event_ts)")
+        except Exception as _ee:
+            print("[card2] event_ts 迁移失败: %s" % _ee)
+
+        # V7 第 19 件：这张卡里「哪些模型写过向量」——换模型时最要紧的一张账。
+        c.execute(
+            """CREATE TABLE IF NOT EXISTS emb_meta (
+            model   TEXT PRIMARY KEY,
+            dim     INTEGER NOT NULL DEFAULT 0,
+            adapter INTEGER NOT NULL DEFAULT 0,
+            n       INTEGER NOT NULL DEFAULT 0,
+            first_ts REAL NOT NULL DEFAULT 0,
+            last_ts  REAL NOT NULL DEFAULT 0
+        )""")
+
+
         c.execute("""
         CREATE TABLE IF NOT EXISTS mem_tomb (
             mid    INTEGER PRIMARY KEY,
@@ -3516,6 +2680,24 @@ class MemoryCard:
             label TEXT NOT NULL DEFAULT ''
         )""")
         c.execute("CREATE INDEX IF NOT EXISTS ix_vhist_ts ON viscera_hist(ts)")
+        # V7 第 18 件：把「这张卡的 schema 是哪一版」写进库里（SQLite 自带字段）。
+        # 以前版本信息只活在代码里，卡被新代码写过之后拿旧代码打开，
+        # 只会报一堆「no such column」，看不出是版本错位还是数据坏了。
+        try:
+            _v = int(c.execute("PRAGMA user_version").fetchone()[0] or 0)
+            if _v < SCHEMA_VERSION:
+                c.execute("PRAGMA user_version=%d" % SCHEMA_VERSION)
+            self.schema_db = _v           # 打开之前卡里是哪一版
+            self.schema_now = SCHEMA_VERSION  # 这份代码期待哪一版
+        except Exception as e:
+            soft_fail("schema_version", e, "写 PRAGMA user_version 失败")
+            self.schema_db = None
+        # 时间线与待办（2026-11-11）：建表放在初始化这儿，不放 remember() 里 ——
+        # 写记忆时可能正开着事务，executescript 会撞「transaction within a transaction」。
+        try:
+            tempora.ensure(self.db)
+        except Exception as e:
+            soft_fail("tempora_schema", e, "建 tevent/tstate 失败")
         self.db.commit()
 
     def _migrate(self):
@@ -3747,318 +2929,193 @@ class MemoryCard:
         return {"pending": n, "idle_hours": round(idle_h, 2),
                 "due": bool(n >= DREAM_MIN_TURNS or (n > 0 and idle_h >= DREAM_IDLE_HOURS))}
 
-    def dream_commit(self, items, dialogue_ids=None, speaker="self"):
-        """把提炼出来的高阶记忆写进卡，并把源对话标记成已消化。
-        items: [{text, region?, w0?, salience?}]
-        返回写入的 mid 列表。原文不动，只翻标记——梦不该毁掉证据。"""
-        written = []
+    # ---------- 梦：五阶段 + 幂等 ----------
+    # 为什么要有一张批次账本：压缩是宿主模型做的，一旦超时/断连，调用方唯一
+    # 知道的只有「刚才那次到底写成没有」。没有幂等键就只能二选一 ——
+    # 要么重试把同一批记忆写两遍（重复污染），要么放弃（原文永远压不掉）。
+    # 所以每次 commit 都拿一个由「原文 id + 摘要内容」算出来的 key 登记在案，
+    # 同一个 key 再来，直接回上次的结果。
+
+    def _dream_key(self, items, dialogue_ids=None):
+        """幂等键：同一批原文 + 同一份摘要 → 同一个 key。"""
+        try:
+            body = json.dumps(
+                {"ids": sorted(int(i) for i in (dialogue_ids or [])),
+                 "items": [str((it or {}).get("text") or "").strip()
+                           for it in (items or [])]},
+                ensure_ascii=False, sort_keys=True)
+        except Exception:
+            body = repr(items)
+        return hashlib.sha1(body.encode("utf-8")).hexdigest()[:16]
+
+    def dream_batch_get(self, key):
+        try:
+            r = self.db.execute(
+                "SELECT * FROM dream_batch WHERE key=?", (str(key),)).fetchone()
+        except Exception:
+            return None
+        return dict(r) if r else None
+
+    def dream_dead(self, limit=10):
+        """失败过的梦批次（死信）。留着可重试，不静默丢。"""
+        out = []
+        try:
+            rows = self.db.execute(
+                "SELECT key,stage,n_items,dialogue_ids,attempts,last_error,updated_ts"
+                " FROM dream_batch WHERE state='failed' ORDER BY updated_ts DESC LIMIT ?",
+                (int(limit),)).fetchall()
+        except Exception:
+            return out
+        for r in rows:
+            out.append({"key": r["key"], "stage": r["stage"],
+                        "n_items": int(r["n_items"] or 0),
+                        "dialogue_ids": r["dialogue_ids"],
+                        "attempts": int(r["attempts"] or 0),
+                        "last_error": r["last_error"],
+                        "age_h": round((time.time() - float(r["updated_ts"] or 0)) / 3600.0, 1)})
+        return out
+
+    def dream_commit(self, items, dialogue_ids=None, speaker="self", key=None, force=False):
+        """五阶段提交：ingest → summarize → link → validate → commit。
+
+        ingest：洗一遍摘要素材（空/太短/一批里重复的直接扔掉，记进 problems）
+        summarize：真正写记忆（这一段就是「压」，压缩本身由宿主模型做完再送进来）
+        link：把新记忆和源原文绑上（记忆 source 写成 dream:<key>，批次里留 id 清单）
+        validate：写完回查，写没写进去要能验；验不过的从 written 里剔掉并记问题
+        commit：批次落 done，回结果。同一个 key 再来 → duplicate，不重复写。
+
+        force=True 时即使同一个 key 已经 done 也再写一遍（人工补救用）。
+        """
+        now = float(self.clock.now())
+        # ---- ingest ----
+        clean, problems, seen = [], [], set()
         for it in (items or []):
-            txt = (it.get("text") or "").strip()
+            txt = str((it or {}).get("text") or "").strip()
             if not txt:
+                problems.append("empty_text")
                 continue
-            region = it.get("region") or R_FACT
-            if region not in REGION_DECAY_SCALE:
-                region = R_FACT
-            sal = float(it.get("salience") or 0.55)
-            mid = self.remember(txt, salience=sal, region=region,
-                                speaker=speaker, mtype="episode")
-            # 梦出来的记忆起点略高于普通事件，因为它们是被"想明白"过的
+            if len(txt) < 4:
+                problems.append("too_short:%s" % txt)
+                continue
+            sig = txt[:48]
+            if sig in seen:
+                problems.append("dup_in_batch:%s" % txt[:16])
+                continue
+            seen.add(sig)
+            reg = (it or {}).get("region") or R_FACT
+            if reg not in REGION_DECAY_SCALE:
+                reg = R_FACT
+            clean.append({"text": txt, "region": reg,
+                          "salience": float((it or {}).get("salience") or 0.55),
+                          "w0": float((it or {}).get("w0") or 0.62)})
+        if not clean:
+            return {"ok": False, "error": "nothing_to_commit",
+                    "problems": problems, "stage": "ingest"}
+
+        try:
+            ids = sorted(int(i) for i in (dialogue_ids or [])) if dialogue_ids else []
+        except Exception:
+            # 调用方传了不是 id 的东西：这是入参错，不是卡坏了 —— 400 回去，别 500。
+            return {"ok": False, "error": "bad_dialogue_ids",
+                    "detail": repr(dialogue_ids)[:120], "stage": "ingest"}
+        key = str(key or self._dream_key(clean, ids))
+
+        prev = self.dream_batch_get(key)
+        if prev and prev.get("state") == "done" and not force:
             try:
-                w0 = float(it.get("w0") or 0.62)
-                self.db.execute("UPDATE mem SET w=?, t_anchor=? WHERE id=?",
-                                (max(0.2, min(1.0, w0)), self.clock.now(), mid))
-                self.db.commit()
+                written = json.loads(prev.get("written") or "[]")
+            except Exception:
+                written = []
+            return {"ok": True, "duplicate": True, "key": key,
+                    "written": written, "n": len(written),
+                    "n_written": int(prev.get("n_written") or len(written)),
+                    "stage": "commit", "problems": problems}
+
+        # ---- 登记 running（失败也要把 attempts 累起来，别静默丢）----
+        attempts = int((prev or {}).get("attempts") or 0)
+        try:
+            self.db.execute(
+                "INSERT INTO dream_batch(key,state,stage,n_items,dialogue_ids,written,"
+                " attempts,last_error,created_ts,updated_ts)"
+                " VALUES(?,?,?,?,?,?,?,?,?,?)"
+                " ON CONFLICT(key) DO UPDATE SET state=excluded.state, stage=excluded.stage,"
+                "   n_items=excluded.n_items, dialogue_ids=excluded.dialogue_ids,"
+                "   attempts=excluded.attempts, last_error='', updated_ts=excluded.updated_ts",
+                (key, "running", "summarize", len(clean),
+                 json.dumps(ids), json.dumps([]), attempts, "", now, now))
+            self.db.commit()
+        except Exception as e:
+            soft_fail("dream_batch", e, "梦批次登记失败（仍继续写，只是丢了幂等）")
+
+        written = []
+        try:
+            # ---- summarize + link ----
+            src_tag = "dream:%s" % key[:10]
+            for it in clean:
+                mid = self.remember(it["text"], salience=it["salience"],
+                                    region=it["region"], speaker=speaker,
+                                    mtype="episode", source=src_tag)
+                if mid is None:
+                    problems.append("dedup_by_remember:%s" % it["text"][:16])
+                    continue
+                try:
+                    self.db.execute("UPDATE mem SET w=?, t_anchor=? WHERE id=?",
+                                    (max(0.2, min(1.0, it["w0"])), self.clock.now(), mid))
+                    self.db.commit()
+                except Exception as e:
+                    soft_fail("dream_w0", e, "梦记忆起点权重没写进去（记忆本身已经写了）")
+                written.append(mid)
+
+            # ---- validate：回查真的在库里 ----
+            keep = []
+            for mid in written:
+                try:
+                    r = self.db.execute("SELECT id FROM mem WHERE id=?", (int(mid),)).fetchone()
+                except Exception:
+                    r = None
+                if r:
+                    keep.append(mid)
+                else:
+                    problems.append("lost_after_write:%s" % mid)
+            written = keep
+
+            # ---- commit：翻原文标记 + 落批次账 ----
+            if dialogue_ids is None:
+                self.db.execute("UPDATE dialogue SET dreamed=1 WHERE dreamed=0")
+            elif ids:
+                q = ",".join("?" for _ in ids)
+                self.db.execute("UPDATE dialogue SET dreamed=1 WHERE id IN (%s)" % q,
+                                tuple(ids))
+            self.db.execute(
+                "UPDATE dream_batch SET state='done', stage='commit', n_written=?,"
+                " written=?, updated_ts=? WHERE key=?",
+                (len(written), json.dumps(written), float(self.clock.now()), key))
+            self.db.commit()
+            self._invalidate_idf()
+            return {"ok": True, "key": key, "written": written, "n": len(written),
+                    "n_written": len(written), "stage": "commit",
+                    "problems": problems, "dialogue_ids": ids}
+        except Exception as e:
+            # ---- 死信：记下来，原文**不翻标记**（下次还能再压）----
+            try:
+                self.db.rollback()
             except Exception:
                 pass
-            written.append(mid)
-        ids = dialogue_ids
-        if ids is None:
-            # 没指定就把当前所有待消化的都标掉（调用方通常刚读过 pending_dialogue）
-            self.db.execute("UPDATE dialogue SET dreamed=1 WHERE dreamed=0")
-        elif ids:
-            q = ",".join("?" for _ in ids)
-            self.db.execute("UPDATE dialogue SET dreamed=1 WHERE id IN (%s)" % q,
-                            tuple(int(i) for i in ids))
-        self.db.commit()
-        self._invalidate_idf()
-        return {"ok": True, "written": written, "n": len(written)}
+            try:
+                self.db.execute(
+                    "UPDATE dream_batch SET state='failed', stage=COALESCE(stage,'summarize'),"
+                    " attempts=attempts+1, last_error=?, updated_ts=? WHERE key=?",
+                    ("%s: %s" % (type(e).__name__, str(e)[:200]),
+                     float(self.clock.now()), key))
+                self.db.commit()
+            except Exception as e2:
+                soft_fail("dream_dead_letter", e2, "死信都没记上")
+            soft_fail("dream_commit", e, "梦提交失败")
+            return {"ok": False, "error": "commit_failed", "key": key,
+                    "detail": "%s: %s" % (type(e).__name__, str(e)[:200]),
+                    "written_so_far": written, "problems": problems, "stage": "validate"}
 
     # ---------- 存 ----------
-    def remember(self, text, salience=0.6, ts=None, pool=POOL_SHORT,
-                 oxy=0.0, entities=None, emotion=None, normalize=True,
-                 region=None, speaker=None, mtype=None, source="",
-                 about_uid=""):
-        now = self.clock.now()
-        at = min(now if ts is None else float(ts), now)
-        age = max(0.0, now - at)
-
-        # 🔧 2026-11-05：先剥系统工单壳，再谈记不记。
-        #    壳（[dsh-mnemon:delegated write] + Execute this ... now）不是用户说的话，
-        #    但它里面裹着的那句正文是。剥完若是空的，说明这本来就是一条工单、
-        #    没有正文 —— 直接返回 None，不写、也不占用去重窗口。
-        text = strip_sysmark(text)
-        if not text:
-            return None
-
-        # 2026-11-09：群聊写入时把 salience 压下来。
-        #    群里别人的闲话不该跟「我的号是多少」同权重 —— 这是写入侧的事，
-        #    不该留给检索侧去补（见 recency 那段实测记录）。
-        if str(source or "").startswith(GROUP_SOURCE_PREFIX):
-            try:
-                salience = min(float(salience), GROUP_SAL_MAX)
-            except Exception:
-                salience = GROUP_SAL_MAX
-
-        # 🔧 时间归一化：把「今天/昨天/刚刚」换成绝对日期。
-        #    必须用「这句话说出来的时刻」at 做参照，不能用 now。
-        if normalize:
-            text = normalize_time(text, at)
-
-        core, details = split_memory(text)
-        vec = to_vec(text)
-
-        # 情绪强度：从文本里估
-        if emotion is None:
-            emotion = 1.0 if any(w in text for w in EMO_WORDS) else 0.25
-        # 实体数：地点 + 数字
-        if entities is None:
-            entities = len(RE_PLACE.findall(text)) + len(RE_NUM.findall(text))
-            entities = min(entities, 5)
-        # 🔧 分区：不传就自动判
-        _explicit_region = region is not None
-        if region is None:
-            region = classify_region(text, emotion)
-        # 🔧 2026-11-06（V5.2）：按来源定区，不猜内容。
-        #    只在调用方没显式传 region 时生效 —— 显式传的一律照传的走。
-        if _REGION_LAMBDA_ON and not _explicit_region:
-            region = region_by_source(source, region)
-
-        # 🔧 2026-11-05 闲聊寿命按「对谁」来定（用户 m13292）。
-        #    关系层在写入时算好存下（衰减是热路径，不能每次现查 core_tag）。
-        _lay = ""
-        if about_uid:
-            try:
-                _lay = self.person_layer_of(about_uid)
-            except Exception:
-                _lay = ""
-        if region == R_CHATTER and not _lay:
-            # 没登记过的人：群里见过的按 known，其余按默认
-            _lay = "known" if str(source or "").startswith("qq") else ""
-
-        # 🔧 2026-11-01 防污层（提前算：下面的去重路径也要看它）
-        _trust, _conflict, _why = assess_trust(text, self)
-
-        # 🔧 惊讶度 + 去重：跟最近 200 条比。
-        #    Jaccard ≥ 0.72 视为「同一件事又说了一遍」→ 不新增，给老条目续命。
-        #    flash 区不参与合并（闪光灯记忆一次就刻住）。
-        surprise = 0.5
-        dup_id = None
-        # 🔧 V5.0 T1-3：先算这句话的亲密/伤人信号，全局 oxy 跟着动
-        s_plus, s_minus = oxy_signal(text)
-        if s_plus > 0 or s_minus > 0:
-            self.oxy = update_oxy(getattr(self, "oxy", 0.0), s_plus, s_minus)
-        # 🔧 V5.0 T2-3：心境也跟着推一下（慢，一句推不翻）
-        self.touch_mood(text, emotion)
-        # 🔧 V5.0 T3-2：四个激素也跟着扰动（内分泌层）
-        self.touch_hormones(text)
-        # 🔧 2026-11-06（体检修）：完全相同的句子，隔多远都算同一条。
-        #    Jaccard 只跟「最近 200 条」比 —— 隔了 300 条就漏，真卡里因此留下
-        #    6 组孪生记录（#43/#326、#44/#325、#94/#327、#160/#362、
-        #    #296/#485、#297/#472）。代价不只是占一行：同一条命被两行分着背，
-        #    召回时还可能两条一起被捞出来占两个名额。
-        #    精确全等查一次（七百来行的表扫一遍是亚毫秒），命中就走同一条「续命」路径。
-        _exact_id = None
-        if region != R_FLASH and _trust >= TRUST_WARN and not _conflict:
-            try:
-                _er = self.db.execute(
-                    "SELECT id FROM mem WHERE raw=? AND region!=?"
-                    " ORDER BY id DESC LIMIT 1",
-                    (text, R_FLASH)).fetchone()
-                if _er is not None:
-                    _exact_id = _er[0]
-            except Exception:
-                _exact_id = None
-        try:
-            recent = []
-            if _exact_id is None:
-                recent = self.db.execute(
-                    "SELECT id, vec, region FROM mem ORDER BY id DESC LIMIT 200"
-                ).fetchall()
-            best = 0.0
-            if recent:
-                for r in recent:
-                    j = jaccard(vec.keys(), json.loads(r["vec"]).keys())
-                    if j > best:
-                        best = j
-                        dup_id = r["id"]
-                surprise = 1.0 - best
-            if _exact_id is not None:
-                dup_id = _exact_id
-            if _exact_id is not None or (
-                    best >= DEDUPE_JACCARD and region != R_FLASH
-                    and _trust >= TRUST_WARN and not _conflict):
-                    # 可信的重复句才续命；被灌进来的话不许借老记忆的壳活着
-                    # 同一件事说第二遍：不加新条目，只把老条目往上抬
-                    c0 = self.db.cursor()
-                    old = c0.execute("SELECT * FROM mem WHERE id=?",
-                                     (dup_id,)).fetchone()
-                    wn = wn_row(old, now)
-                    # 同一条记忆的 oxy 也按这句话的信号更新（但不低于全局值的七成）
-                    new_oxy = update_oxy(old["oxy"], s_plus, s_minus)
-                    new_oxy = max(new_oxy, self.oxy * 0.7)
-                    # 🔧 2026-11-05：去重这条「续命」路径跟召回那条是同一个病。
-                    #    旧写法 min(1.0, wn+0.10) 每重复一次加 0.10 并把锚推到此刻
-                    #    —— 推锚 = 衰减计时归零，于是「天天说晚安」那条会一夜之间
-                    #    钉死在 1.0，而且越重复越钉得牢（这跟召回正反馈是一回事，
-                    #    只不过这里是写在写路径上）。
-                    #    照召回那套处理：增益乘剩余空间 + 天花板。
-                    _g = GAIN_REPEAT * max(0.0, 1.0 - float(wn))
-                    _ceil = W_CEIL_RECALL.get(old["pool"], 0.95)
-                    c0.execute(
-                        "UPDATE mem SET w=?, t_anchor=?, access_count=access_count+1,"
-                        " recall_n=COALESCE(recall_n,0)+1, t_last_recall=?,"
-                        " last_active_ts=?, oxy=? WHERE id=?",
-                        (min(_ceil, wn + _g), now, now, now, new_oxy, dup_id))
-                    c0.execute("UPDATE detail SET weight=MIN(1.0, weight+?)"
-                               " WHERE parent_id=?", (_g * 0.8, dup_id))
-                    self.db.commit()
-                    self._save_oxy()      # 去重路径也要落盘
-                    return dup_id
-        except Exception:
-            pass
-
-        # 基础权重：情绪 + 惊讶度
-        w0 = (0.50 + 0.30 * min(emotion, 1.0)) * (0.75 + 0.50 * surprise)
-        w0 = max(0.20, min(w0, 1.0))
-
-        # 🔧 2026-11-01 防污层：可疑内容照写（"她被骗过"也是经历），
-        #    但把信任分乘进权重——进得来，升不上去。
-        if _trust < 1.0:
-            w0 = max(0.05, w0 * _trust)
-
-        # 🔧 2026-11-01 价值分：只记录，不拦门。控制台看分布，
-        #    将来要拦再用（WHALE_VALUE_GATE）——现在不改变任何写入行为。
-        _value = assess_value(text, region, salience)
-
-        # 🔧 V5.0 T1-3：新记忆的 oxy 取「全局依恋」与「这条自身的信号」的较大者。
-        #    这样一句亲密话既抬高全局 oxy，也让它自己带亲密标记（进海马打分）。
-        if s_plus > 0 or s_minus > 0:
-            oxy = max(oxy, self.oxy)
-        else:
-            oxy = max(oxy, self.oxy * 0.5)
-
-        # 细节衰减也要按池放慢，否则长期档案一进来细节就全丢了
-        dscale = {POOL_SHORT: 1.0, POOL_MEDIUM: 0.25, POOL_LONG: 0.03}[pool]
-
-        # 🔧 V5.0 T2-1：主干拆成 主语/动词/宾语，供分级侵蚀用
-        _subj, _verb, _obj = split_predicate(core)
-
-        # 🔧 T4-3：存的时候顺手把语义向量算出来（约 70ms，一次性的）。
-        #    失败就留 NULL —— backfill_embeddings() 以后还能补，不影响正确性。
-        _emb = None
-        if self.sem_ready():
-            try:
-                _emb = self.semantic.encode(text)
-            except Exception:
-                _emb = None
-
-        c = self.db.cursor()
-        # 🔧 2026-10-31 双边记忆：不传 speaker 就猜一个（宁可猜错也别空着，
-        #    空着就退回「半本日记」）。mtype 判指令还是事。
-        if speaker not in ("user", "self", "scene"):
-            speaker = guess_speaker(text)
-        if mtype not in ("episode", "instruction"):
-            mtype = guess_mtype(text)
-        _quar = 1 if (_trust < TRUST_BLOCK_PROMOTE or _conflict == 1) else 0
-        c.execute(
-            "INSERT INTO mem(raw,core,vec,pool,w,t_anchor,salience,oxy,entities,"
-            "emotion,create_ts,last_active_ts,region,subj,verb,obj,erase_stage,emb,"
-            "speaker,mtype,trust,conflict,conflict_why,value,source,"
-            "about_uid,about_layer,quarantine) "
-            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-            (text, core, json.dumps(vec, ensure_ascii=False), pool, w0, at,
-             salience, oxy, entities, emotion, at, at, region,
-             _subj, _verb, _obj, 0, _emb, speaker, mtype,
-             _trust, _conflict, _why, _value, source or "",
-             str(about_uid or ""), _lay, _quar))
-        mid = c.lastrowid
-        # V5.4：正式入库的记忆也在收件层留一份原文（kept=1）。
-        # 这样短期池淘汰之后，60 小时内还能从收件层把它原样翻回来 —
-        # 「原文进短期」不再依赖我每轮都记得调 /report。
-        try:
-            self._ensure_inbox(c)
-            c.execute(
-                "INSERT INTO inbox(ts,source,channel,who,uid,gid,kind,text,"
-                "kept,kept_mid,note) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
-                (at, source or "", "private", "", str(about_uid or ""), "",
-                 mtype or "text", text, 1, mid, "remember()"))
-        except Exception as _ibe:
-            print("[card2] 收件层留档失败: %s" % _ibe)
-        if _emb is not None:
-            self._emb_cache[mid] = semantic_mod.from_blob(_emb)
-        for kind, txt, wgt in details:
-            k = {"TIME": 4.5e-6, "NUMBER": 4.5e-6, "MODIFIER": 4.0e-6,
-                 "PLACE": 3.2e-6, "EMOTION": 1.2e-6}.get(kind, 4.0e-6)
-            ww = wgt * math.exp(-k * dscale * age)
-            if ww < KEEP_DETAIL:
-                continue
-            c.execute("INSERT INTO detail(parent_id,kind,text,weight,last_touch)"
-                      " VALUES(?,?,?,?,?)", (mid, kind, txt, ww, at))
-        self.db.commit()
-        # 共现：这条和「上一条」连一笔（同一个人优先，没有就按全局）
-        try:
-            _au2 = str(about_uid or "")
-            _prev = c.execute(
-                "SELECT region FROM mem WHERE id<? AND COALESCE(dead,0)=0 "
-                "AND (?='' OR COALESCE(about_uid,'')=?) "
-                "ORDER BY id DESC LIMIT 1",
-                (mid, _au2, _au2)).fetchone()
-            if _prev and _prev[0]:
-                self._bump_expected(c, _prev[0], region, at)
-            self.db.commit()
-        except Exception:
-            pass
-        # 关系卡：谁又出现了一次（只记频次与分区，不记评价）
-        try:
-            if about_uid:
-                self.person_touch(about_uid, self.person_layer_of(about_uid),
-                                  ts=float(ts or self.clock.now()), region=region)
-        except Exception as _pe:
-            print('[card2] 关系卡挂钩失败: %s' % _pe)
-        self._invalidate_idf()    # 库变了，攒够 20 条再重算（不每次清空）
-        self._save_oxy()          # 全局依恋落盘
-        # 🔧 2026-11-06（V5.2）：记一条负载，供「今天挤不挤」用。
-        #    放在 commit 之后：负载只是调节量，写失败了也不能连累这条记忆。
-        try:
-            self._load_bump(region, now)
-        except Exception:
-            pass
-        # ---- 印象层：记一笔「谁在什么情境下说了什么」 --------------------
-        # 只记账、不判断值不值得：筛选是短期池的事，印象是"很多次剩下的形状"。
-        try:
-            impression_mod.observe(
-                self.db,
-                subject=(about_uid or ("user" if (speaker or "") == "user" else "")),
-                text=text, ts=(ts if ts is not None else self.clock.now()),
-                subject_kind=("person" if (about_uid or speaker) else "thing"),
-                now=self.clock.now())
-        except Exception as _ie:
-            print("[card2] 印象记账失败: %s" % _ie)
-
-        # ---- 事实层（V5.7）：抽「谁 · 什么事 · 什么」-------------------------
-        # 只做索引，不改原文。抽不出就不抽（宁可少一条，不要错一条）。
-        # 用**未锚定**的 text：锚定后的日期会混进 object，抽出来是错的。
-        try:
-            _n_fact, _ = (0, []) if os.environ.get("WHALE_FACTS", "1") == "0" else facts_mod.record(
-                self.db_path, mid, text,
-                ts=(ts if ts is not None else self.clock.now()),
-                speaker=(speaker or "user"), source=(source or ""))
-            if _n_fact:
-                pass
-        except Exception as _fe:
-            print("[card2] 事实抽取失败: %s" % _fe)
-
-        return mid
 
     # ---------- 分区负载（V5.2，2026-11-06）----------
     # 做什么：维护「这个区最近 24 小时新写了几条」，换算成拥挤系数 f。
@@ -4222,6 +3279,24 @@ class MemoryCard:
                 self._save_hormones()
                 events.append((0, "hormone_drift", hormone.describe(self.h)))
 
+        # 0.7) 欲望层结算（2026-11-09 接线）
+        #    motiv_tick 原来只有 /motiv/tick 一个入口，而那个入口只有
+        #    qq_proactive.py（主动发言脚本）会打 —— 只要那个脚本没在跑，
+        #    七条驱力就一辈子不动：聊天时 motiv_on_chat 一路往下泄（attachment
+        #    每句 -0.10），却没有任何东西把它们拉回基线，也没有「想念」把
+        #    它们顶上去。结果【动机】这一格永远是空的，motiv_snapshot 里
+        #    看到的 drvies 是几天前冻住的数。
+        #    放在 tick 里 = 只要有人在跟她说话（每轮 /context 都会走 tick），
+        #    驱力就跟着时间一起动。一分钟节流，省得每秒钟写一次 meta。
+        if dt_raw > 0:
+            try:
+                _mt = float(getattr(self, "_last_motiv_tick", 0.0) or 0.0)
+                if now - _mt >= 60.0:
+                    self.motiv_tick(now=now)
+                    self._last_motiv_tick = now
+            except Exception as e:
+                print("[mind] 动机结算失败：%s" % e, file=sys.stderr)
+
         # 1) 短期池超期 → 强制结算（巩固 or 淘汰）
         #    ⚠️ 这里的 7 天是**现实时间**，故意不乘分区倍率。
         #    短期池是「最近被注意到的 32 个位置」，是注意力预算、不是寿命：
@@ -4275,6 +3350,16 @@ class MemoryCard:
                 moved = self._to_warm(c, r, now, POOL_MEDIUM_WARM)
                 moved_ids.add(r["id"])
                 events.append((r["id"], "warm_up", moved))
+
+        # 1.25) 中期池出口（V7 第 10 件）：30 天内会跌破进门线的，提前挪进长期池。
+        #     放在 1.2 之后、1.3 之前 —— 它只改 pool，不影响小池那套判定。
+        try:
+            _exit = self.medium_exit_apply(horizon_days=0, limit=20, now=now)
+            if _exit.get("moved"):
+                print("[card2] 中期池出口：%d 条挪进长期池（30 天内本来会跌破线）"
+                      % _exit["moved"])
+        except Exception as _xe:
+            print("[card2] 中期池出口失败: %s" % _xe)
 
         # 1.3) 中期小池：够格进长期，否则到期淡出
         for r in c.execute(
@@ -4411,10 +3496,28 @@ class MemoryCard:
         return events
 
     def _hippocampus_score(self, r):
-        """海马打分：这笔记忆值不值得搬进长期"""
+        """海马打分：这笔记忆值不值得搬进长期
+
+        🔴 2026-11-09 改「被唤起」这一项的口径（诊断报告 probe/_diag2_pool.md 的 Q3）：
+        原来 `c_rec = access_count/10`，也就是「同一天被连问三遍」和「三天里各想起一次」
+        一样值钱。结果是 medium 里 recall_n>=2 有 46 条、recall_days>=3 却是 0 条 ——
+        全是一次性的 burst，没有一条是真的反复被想起过。
+        而且中性记忆的天花板正好卡在 .35（A_RECALL 满打满算 .25 + 情绪里那点 .10），
+        永远够不到 .80 的进长期门槛，于是中期池变成一个只进不出的停车场。
+
+        改成「天数」和「次数」各占一半：
+          · 次数（access_count/10）—— 被频繁要用的东西值钱，这条留着；
+          · 天数（recall_days/7）—— 分散在不同日子被想起才算"记住了"，
+            同一天刷十遍也不会把分刷上去（这跟人脑的重 consolidation 是一个道理）。
+        recall_days 由 recall() 在命中时按自然日去重累加。
+        """
         e = min(r["emotion"], 1.0)                 # 情绪 0~1
         c_ent = min(r["entities"] / 5.0, 1.0)      # 实体数 0~1
-        c_rec = min(r["access_count"] / 10.0, 1.0) # 被唤起 0~1
+        try:
+            _days = float(r["recall_days"] or 0)
+        except (KeyError, IndexError, TypeError):
+            _days = 0.0
+        c_rec = 0.5 * min(r["access_count"] / 10.0, 1.0) + 0.5 * min(_days / 7.0, 1.0)
         o = min(r["oxy"], 1.0)                     # 亲密 0~1
         return (A_EMOTION * e + A_ENTITY * c_ent +
                 A_RECALL * c_rec + A_OXY * o)
@@ -4434,107 +3537,92 @@ class MemoryCard:
         need = LONG_NEED_RECALL_WARM if warm else LONG_NEED_RECALL
         return n >= need
 
-    def _consolidate(self, r, now):
-        """短期池结算：算海马分，够格进中期/长期；不够格的到期沉到中期（V5.6.3 起不再删）"""
-        score = self._hippocampus_score(r)
-        # 他本人说的话：+0.12，不是免筛。
-        # （免筛实测会把 133 条短期里的 103 条全塞进中期，短期池就形同虚设；
-        #   而海马分那三样——情绪/实体/被想起——对他随口一句全是零，
-        #   一点不加又等于在删他的话。加分是两头都顾得住的那个解。）
-        if (r["speaker"] or "") == "user":
-            score += self.USER_SPEECH_BONUS
-        # 重复短句（7 天内同句 ≥3 次）打折：价值在「他常这么说」的模式里，
-        # 不在这一条本身，让它留在短期按自己的曲线走完。
-        if self._is_repeat_short(r, now):
-            score *= self.REPEAT_SHORT_PENALTY
-        c = self.db.cursor()
-        # 🔧 2026-11-09（用户 m04803「底层和重要的那些，要让它进不会忘的区域」）：
-        #    pin=1 的记忆是钉住的 —— 不判遗忘、不评分数、原地留在长期，
-        #    权重给到存活下限之上，让它永远想得起来。
-        #    谁被钉住由 `_repartition_pools.py` 一次性标记，之后新写入的
-        #    规则/底线也可以显式钉（remember(pin=True) 目前没开，留口子）。
+    # ============================================================
+    # V7 第 10 件：中期池的出口
+    # ------------------------------------------------------------
+    # 病根（probe/_diag2_pool.md）：1066 条记忆进了中期池就再没出去过 ——
+    # 0.35 只是「进门线」，进门之后没有 TTL。按 LAM_M 推算，它们在写进来
+    # 第 27.8 天就跌破 0.35，但没有任何动作；要到第 150 天才触侵蚀，
+    # 然后某一天集中被删 —— 那是「2027 年 4 月的同步炸弹」，不是遗忘，
+    # 是一次性清仓。忘应该是慢慢淡，不是攒着一起断。
+    #
+    # 现在改成：**到期前先降级**。
+    #   中期池里，按现在的衰减曲线 30 天内会跌破 THETA_MEDIUM 的，
+    #   提前挪进长期池（长期池衰减慢两个数量级，等于「记住了但不再常提」），
+    #   一次最多挪 20 条，且可以先只预览不落库（可回滚）。
+    # 为什么不是直接删：硬盘够大，忘是检索行为不是删除行为（已归档那套同理）。
+    # ============================================================
+    def medium_exit_plan(self, horizon_days=0, now=None, limit=200):
+        """算一遍：中期池里哪些在 horizon_days 内会跌破进门线。只读。"""
+        now = float(now if now is not None else self.clock.now())
+        out = []
         try:
-            if int(r["pin"] or 0):
-                # 2026-11-09（用户 m04851）：长期池分两档 ——
-                #   ①不衰减：pin=1，tier 提到 core，weight_now 直接返回原值，
-                #     时间对它不起作用（不是「衰减得慢」，是「不衰减」）。
-                #   ②长衰减：pool=long 但 tier=mid，走 LAM_L（半衰期 371 天 +
-                #     90 天保护期）—— 会褪，但褪得极慢。
-                # 注意：不刷新 t_anchor —— 钉住是「不衰减」，不是「永远最新」。
-                # 刷新锚点会让它在时间线上压过所有真・最近发生的事（实测会把
-                # 「你自己叫什么」压到一条「大肥鱼号被封」上）。
-                if r["tier"] != TIER_CORE_MUTABLE or r["pool"] != POOL_LONG:
-                    c.execute("UPDATE mem SET pool=?, w=?, tier=? WHERE id=?",
-                              (POOL_LONG, 1.0, TIER_CORE_MUTABLE, r["id"]))
-                return POOL_LONG
-        except Exception:
-            pass
-        # 🔧 2026-11-08（V5.6.3）：权重已经被时间磨到看不见的，不必等分数判 ——
-        #    它什么都不剩了，抬进中期只是给它续命。先判这一刀，再谈晋升。
-        if wn_row(r, now) < CLARITY_GC:
-            self._forget_row(c, r["id"], "池子里淡到看不见了")
-            return None
-        # 🔧 2026-11-01 防污层：可信度太低的，只许进中期、不许进长期。
-        #    它不是被删掉（"她被骗过"要留着），只是永远升不上去。
-        _trust = float(r["trust"] if "trust" in r.keys() else 1.0)
-        _conflict = int(r["conflict"] if "conflict" in r.keys() else 0)
-        _dirty = (_trust < TRUST_BLOCK_PROMOTE) or _conflict == 1
-        # 🔧 2026-11-05：闲聊不许进长期。
-        #    它本来就该一天内淡掉，进了长期等于永不消散 —— 那等于白设这个区。
-        if r["region"] == R_CHATTER:
-            _dirty = True
-        # 🔧 2026-11-05：闲聊不参加海马评选。
-        #    它的三样分数（显著度/情绪/被想起）天生都是零，必然"没上榜"被删 ——
-        #    那不是"明天忘光"，是"进门就死"。直接落中期，让它按 chatter 的
-        #    λ 自己淡掉（8.77 小时后自然归零，不需要海马再判一次）。
-        if r["region"] == R_CHATTER:
-            # 只换池名，w 和 t_anchor 一律不动 —— 闲聊的衰减由 LAM_CHATTER
-            # 独立决定（weight_now 对 chatter 不看池），抬到存活线等于给它续命。
-            # 已经掉到回收线以下的，直接走正常遗忘。
-            if wn_row(r, now) < CLARITY_GC:
-                self._forget_row(c, r["id"], "闲聊到期，自然淡出")
-                return None
-            c.execute("UPDATE mem SET pool=?, pool_in_ts=? WHERE id=?",
-                      (POOL_MEDIUM, now, r["id"]))
-            return POOL_MEDIUM
-        if (not _dirty) and score >= THETA_LONG_STRICT and self._long_ticket_ok(r):
-            target, floor = POOL_LONG, W_FLOOR_LONG
-        elif score >= THETA_MEDIUM:
-            target, floor = POOL_MEDIUM, W_FLOOR_MEDIUM
-        else:
-            # 🔧 2026-11-08（V5.5，用户拍板）：恢复「没进中期就留在短期，7 天忘光」。
-            #    2026-11-06 那版是「没上榜也降级到中期」，中期半衰期 29.7 天，
-            #    等于给本该忘掉的东西续命六倍，于是池子里几乎什么都不删。
-            #
-            #    例外一：**他本人说的话**免筛直通中期 —— 海马分那三样
-            #    （情绪/实体/被想起）对他随口一句「今天好累」全是零，
-            #    按分数判就等于在删他的话。这是他 m36485 拍板要的。
-            #    例外二：**重复的短句**不给免筛 —— 他自己举的例子：
-            #    「我回来了」这种话每天都说，放进短期就够了，不该每次都占中期。
-            #    这类句子同时喂给印象模块计数（见 impression.py），
-            #    留下的是「他回来会说这句」，不是每一句本身。
-            # 🔧 2026-11-08（V5.6.3，用户拍板「A」）：到期不再删，改成「沉底」。
-            #    依据：714 题里答不出的 304 题，**278 题的证据在库里根本没有**
-            #    （只有 3 题是「有但没召到」）；运行卡上写进去的四分之一到一半
-            #    被 7 天结算删掉。会忘这件事该发生在中期→长期那段（半衰期 29.7 天），
-            #    不该发生在第七天那一刻。沉底只换池名，w 与 t_anchor 一律不动，
-            #    让它接着按自己的曲线往下走；真淡到看不见了才删。
-            age = now - float(r["t_anchor"] or now)
-            if age > SHORT_MAX_TTL:
-                c.execute("UPDATE mem SET pool=?, pool_in_ts=? WHERE id=?",
-                          (POOL_MEDIUM, now, r["id"]))
-                return POOL_MEDIUM
-            return None
-        # 先按旧池结算，再抬到新池存活下限
-        wn = wn_row(r, now)
-        wn = max(wn, floor)
-        tier = TIER_MID
-        c.execute("UPDATE mem SET pool=?, w=?, t_anchor=?, tier=?,"
-                  " pool_in_ts=? WHERE id=?",
-                  (target, wn, now, tier, now, r["id"]))
-        return target
+            c = self.db.cursor()
+            for r in c.execute("SELECT * FROM mem WHERE pool=?", (POOL_MEDIUM,)):
+                try:
+                    w = float(r["w"] or 0.0)
+                except Exception:
+                    continue
+                if w <= 0:
+                    continue
+                if w <= THETA_MEDIUM:
+                    days_left = 0.0
+                else:
+                    days_left = math.log(w / THETA_MEDIUM) / LAM_M / 86400.0
+                if days_left <= float(horizon_days):
+                    out.append({"id": int(r["id"]), "w": round(w, 3),
+                                "days_left": round(days_left, 1),
+                                "raw": (r["raw"] or "")[:40]})
+            out.sort(key=lambda x: x["days_left"])
+            return out[:int(limit)]
+        except Exception as e:
+            print("[card2] 中期池出口测算失败: %s" % e)
+            return []
+
+    def medium_exit_apply(self, horizon_days=0, limit=20, now=None, dry=False):
+        """把算出来的前 limit 条挪进长期池。
+
+        一次最多 20 条：万一哪天算错（比如 LAM_M 被改错），损失也只到 20 条，
+        而且它们只是换了池子、内容一个字没少，能挪回来。
+        """
+        now = float(now if now is not None else self.clock.now())
+        plan = self.medium_exit_plan(horizon_days=horizon_days, now=now,
+                                     limit=max(1, int(limit)))
+        if dry or not plan:
+            return {"planned": len(plan), "moved": 0, "dry": bool(dry),
+                    "ids": [x["id"] for x in plan]}
+        moved = 0
+        try:
+            c = self.db.cursor()
+            for x in plan:
+                # 保留当前清晰度（至少不低于长期池地板），换池子、重置在池计时
+                c.execute(
+                    "UPDATE mem SET pool=?, w=MAX(COALESCE(w,0), ?), t_anchor=?,"
+                    " pool_in_ts=?, tier=? WHERE id=?",
+                    (POOL_LONG, W_FLOOR_LONG, now, now, TIER_MID, x["id"]))
+                moved += 1
+            self.db.commit()
+        except Exception as e:
+            print("[card2] 中期池出口落库失败: %s" % e)
+        return {"planned": len(plan), "moved": moved, "dry": False,
+                "ids": [x["id"] for x in plan]}
+
 
     USER_SPEECH_BONUS = 0.30   # 他本人说的话，海马分上加一点（V5.6.2-D：0.12→0.30）
+    # 🔴 2026-11-09：我说的话跟他说的话，在「记不记得住」这件事上必须同级。
+    #    原来是 0 —— 结果我自己讲过的内容只有 23.3% 活下来（他的 82.3%），
+    #    库里只剩「他问过我什么」。见 _consolidate 里的完整说明与实测数据。
+    SELF_SPEECH_BONUS = 0.32
+
+    # 2026-11-11（V7 第 12 件）：自己的话**按类型**加权，不再一刀切 +0.32。
+    # 为什么：统一加成会把「我随口猜的」和「我说过我会」记成同一种东西 ——
+    # 猜的话被当成事实答出来，比忘记更糟。四类各给各的生死线：
+    #   identity 我说我是谁（最硬，几乎不该消失）
+    #   promise  我说过我会/下次（欠账，忘了等于不认账）
+    #   episode  一般对话（正常）
+    #   guess    推测、可能、大概（最轻，随时可以淡掉）
+    SELF_BONUS_BY_KIND = {"identity": 0.42, "promise": 0.38,
+                          "episode": 0.32, "guess": 0.16}
     REPEAT_SHORT_PENALTY = 0.5 # 重复短句打折（价值在模式里，不在这一条）
     REPEAT_SHORT_CHARS = 12      # 多短的句子算「随口一句」
     REPEAT_SHORT_N = 3           # 7 天内出现几次算「经常说」
@@ -4570,17 +3658,9 @@ class MemoryCard:
         return n >= self.REPEAT_SHORT_N
 
     # ---- 印象层对外接口 -------------------------------------------------
-    def impression_top(self, subject=None, limit=8, min_w=0.0):
-        return impression_mod.top(self.db, subject=subject, limit=limit, min_w=min_w)
 
-    def impression_hints(self, subject=None, limit=3, min_w=0.35):
-        return impression_mod.hint_lines(self.db, subject=subject, limit=limit, min_w=min_w)
 
-    def impression_snapshot(self):
-        return impression_mod.snapshot(self.db)
 
-    def impression_fade(self, now=None):
-        return impression_mod.fade(self.db, now=now if now is not None else self.clock.now())
 
     @staticmethod
     def _warm_ready(r, need_days, need_recall):
@@ -5189,6 +4269,8 @@ class MemoryCard:
         都在档案上留一笔。reason 是给人看的，别写代码黑话。
         """
         self._tomb_add(c, mid, reason)
+        # 🗄 先抄进冷档，再删（2026-11-09）：硬盘没有上限，忘了 ≠ 销毁。
+        self._archive_add(c, mid, reason)
         # 画面跟着记忆走：先断开引用；如果这帧再没人引用，就从"有主"变成"残影"。
         # 不在这里直接删帧 —— 残影期是留给"还想再看一眼"的窗口。
         try:
@@ -5207,27 +4289,111 @@ class MemoryCard:
         c.execute("DELETE FROM detail WHERE parent_id=?", (mid,))
         c.execute("DELETE FROM mem WHERE id=?", (mid,))
 
-    def _tomb_add(self, c, mid, reason):
-        """在删除台账上记一笔（哈希必须趁记录还在的时候算）。"""
-        h = ""
+    # ── 工作日志（那张「桌子」）────────────────────────────────────────────
+    #   注意：这里**不进 mem 池**、不参与召回打分与衰减。它只是笔记本，
+    #   目的是让「换了窗口的我」一睁眼就知道上一轮干到哪、为什么这么干。
+
+
+
+
+
+    def recall_trace_add(self, query, flags, stages, top, picked,
+                         n_lines=0, ms=0, keep=400):
+        """记一条召回漏斗（V7 第 8 件）。只留最近 keep 条，越老越先删。
+
+        这些字段是给排错用的：拿到一道「她没想起来」的题，先看 picked 里有没有，
+        没有再看 stages 是哪一层筛掉的，还在就看他排第几、各分项多少 ——
+        四种失败（没存 / 被筛 / 排名靠后 / 进了上下文没用）一眼分开。
+        """
         try:
-            r = self.db.execute(
-                "SELECT id, raw, speaker, create_ts FROM mem WHERE id=?",
-                (int(mid),)).fetchone()
-            if r is not None:
-                import timeline as _tl_mod
-                h = _tl_mod._birth_hash(
-                    r["id"], r["raw"] or "",
-                    r["speaker"] if "speaker" in r.keys() else "",
-                    r["create_ts"])
-        except Exception:
-            h = ""
-        try:
+            if (os.environ.get("WHALE_RECALL_TRACE", "1") or "").strip() == "0":
+                return None
+            c = self.db.cursor()
             c.execute(
-                "INSERT OR REPLACE INTO mem_tomb(mid,hash,ts,reason)"
-                " VALUES(?,?,?,?)", (int(mid), h, time.time(), reason))
+                "INSERT INTO recall_trace(ts,query,flags,stages,top,picked,n_lines,ms)"
+                " VALUES(?,?,?,?,?,?,?,?)",
+                (time.time(), (query or "")[:200],
+                 json.dumps(flags or {}, ensure_ascii=False),
+                 json.dumps(stages or {}, ensure_ascii=False),
+                 json.dumps(top or [], ensure_ascii=False),
+                 json.dumps(picked or [], ensure_ascii=False),
+                 int(n_lines or 0), int(ms or 0)))
+            c.commit()
+            rid = c.lastrowid
+            # 只留最近 keep 条：这是排错用的窗口，不是账本
+            c.execute("DELETE FROM recall_trace WHERE id <= ?",
+                      (int(rid) - int(keep),))
+            c.commit()
+            return rid
         except Exception:
-            pass
+            return None
+
+    def recall_trace_recent(self, n=10):
+        try:
+            c = self.db.cursor()
+            rows = c.execute(
+                "SELECT * FROM recall_trace ORDER BY id DESC LIMIT ?",
+                (max(1, int(n)),)).fetchall()
+            out = []
+            for r in rows:
+                d = dict(r)
+                for k in ("flags", "stages", "top", "picked"):
+                    try:
+                        d[k] = json.loads(d.get(k) or "null")
+                    except Exception:
+                        pass
+                out.append(d)
+            return out
+        except Exception:
+            return []
+
+
+    def archive_search(self, query, k=3, min_score=0.22):
+        """在冷档里按字面翻旧账（不懂语义，只认字）。
+
+        用途只有一个：**这次正常召回一条都没想起来时**，说明问的可能是很久以前的事。
+        这时才去硬盘深处翻，"忘了"的东西还能捞回来一条。
+        """
+        q = (query or "").strip()
+        if len(q) < 3:
+            return []
+        qk = set()
+        for seg in re.findall(r"[\u4e00-\u9fa5]+", q):
+            for i in range(len(seg) - 1):
+                qk.add(seg[i:i + 2])
+        qk = {x for x in qk if not x in _ARCH_STOP}
+        if not qk:
+            return []
+        rows = self.db.execute(
+            "SELECT mid,raw,core,create_ts,details FROM mem_archive").fetchall()
+        scored = []
+        for r in rows:
+            txt = (r["core"] or "") + " " + (r["raw"] or "")
+            try:
+                det = json.loads(r["details"] or "[]")
+                txt += " " + " ".join((d.get("t") or "") for d in det)
+            except Exception:
+                pass
+            tk = set()
+            for seg in re.findall(r"[\u4e00-\u9fa5]+", txt):
+                for i in range(len(seg) - 1):
+                    tk.add(seg[i:i + 2])
+            if not tk:
+                continue
+            _hit = qk & tk
+            sc = len(_hit) / float(len(qk))
+            # 只认「至少两个实词真的撞上」——单字撞上太容易（"今天""自己"），
+            # 那条旧账跟她现在问的事根本没关系。
+            if len(_hit) >= 2 and sc >= min_score:
+                scored.append((sc, r))
+        scored.sort(key=lambda x: (-x[0], -float(x[1]["create_ts"] or 0)))
+        out = []
+        for sc, r in scored[:k]:
+            out.append({"mid": r["mid"], "raw": r["raw"], "core": r["core"],
+                        "create_ts": r["create_ts"], "score": sc,
+                        "details": r["details"]})
+        return out
+
 
     # ---------- 媒体记忆（画面）：设计见 docs/MEDIA-MEMORY.md ----------
     # 一段画面自己一条寿命，跟文字那条**不互传**：文字掉到多低都不影响画面，
@@ -5748,6 +4914,36 @@ class MemoryCard:
         return {"ok": True, "id": mid, "changed": True}
 
     # ---------- 想起 ----------
+    def _idf_sim(self, qw, q_norm, mid, mv, idf):
+        """带 IDF 权重的余弦，**行向量那半预算好缓存**（2026-11-11）。
+
+        原来每条候选都现算 na、nb 两个循环（实测每请求 1315 次调用、
+        156 ms）—— 可 query 侧固定、行向量也固定，纯浪费。这里把行向量
+        乘完 idf 的形态和模长按 (id, idf 身份, 向量对象身份) 缓存。
+        """
+        if not qw or not mv or q_norm <= 0:
+            return 0.0
+        cache = getattr(self, "_idf_row_cache", None)
+        if cache is None:
+            cache = self._idf_row_cache = {}
+        elif len(cache) > 4000:
+            cache.clear()
+        hit = cache.get(mid)
+        if hit is not None and hit[0] is idf and hit[1] is mv:
+            sc, nb = hit[2], hit[3]
+        else:
+            sc = {k: v * idf.get(k, 1.0) for k, v in mv.items()}
+            nb = math.sqrt(sum(x * x for x in sc.values()))
+            cache[mid] = (idf, mv, sc, nb)
+        if nb <= 0:
+            return 0.0
+        dot = 0.0
+        for k, w in qw.items():
+            b = sc.get(k)
+            if b:
+                dot += w * b
+        return dot / (q_norm * nb) if dot else 0.0
+
     def _ensure_idf(self):
         """惰性算 IDF（全库统计，纯本地），缓存在 self._idf
 
@@ -5892,51 +5088,6 @@ class MemoryCard:
             self._emb_cache[mid] = v
         return v
 
-    def backfill_embeddings(self, limit=None, progress=True, remodel=False):
-        """给还没有语义向量的记忆补编码。
-
-        返回 (编码条数, 跳过条数, 失败条数)。
-        这是**幂等**的：已经有 emb 的直接跳过，所以可以反复跑、随时中断。
-
-        remodel=True：顺便把「维度跟当前模型对不上」的老向量重编码一遍。
-        换过模型的卡里会留着两代向量（512 / 768），老那批在检索里根本
-        用不上 —— 覆盖率报 100%、语义其实只覆盖一半，这种数字最会骗人。
-        """
-        if not self.sem_ready():
-            return (0, 0, 0)
-        if remodel and self.model_dim:
-            rows = self.db.execute(
-                "SELECT id, raw, core FROM mem"
-                " WHERE emb IS NULL"
-                "    OR (length(emb) > 0 AND length(emb) != ?)",
-                (self.model_dim * 4,)).fetchall()
-        else:
-            rows = self.db.execute(
-                "SELECT id, raw, core FROM mem WHERE emb IS NULL").fetchall()
-        if limit:
-            rows = rows[:limit]
-        if not rows:
-            return (0, 0, 0)
-        c = self.db.cursor()
-        done = skip = fail = 0
-        for i, r in enumerate(rows):
-            try:
-                blob = self.semantic.encode(r["raw"] or r["core"])
-            except Exception:
-                fail += 1
-                continue
-            if blob is None:
-                fail += 1
-                continue
-            c.execute("UPDATE mem SET emb=? WHERE id=?", (blob, r["id"]))
-            done += 1
-            if progress and (i + 1) % 50 == 0:
-                self.db.commit()
-                print('  补编码 %d/%d' % (i + 1, len(rows)), flush=True)
-        self.db.commit()
-        self._emb_cache.clear()
-        self._sem_cache_n = -1
-        return (done, skip, fail)
 
     def backfill_detail_embeddings(self, limit=None, progress=True, remodel=False):
         """🔧 T4-3b / T4-3c：给每个「片段」单独编码。
@@ -5985,7 +5136,7 @@ class MemoryCard:
                 skip += 1
                 continue
             try:
-                blob = self.semantic.encode(t)
+                blob = self.semantic.encode(embed_text_for(t))
             except Exception:
                 fail += 1
                 continue
@@ -6032,7 +5183,7 @@ class MemoryCard:
                 return v
         # 2) 真编码
         try:
-            blob = self.semantic.encode(core_text)
+            blob = self.semantic.encode(embed_text_for(core_text))
         except Exception:
             return None
         if blob is None:
@@ -6061,6 +5212,16 @@ class MemoryCard:
                 pass
         return v
 
+    def _emb_model_name(self):
+        """当前向量模型的短名（bge-base-zh-v1.5 之类），拿不到就 ''。"""
+        try:
+            dn = semantic_mod.current_model_dir() if self.card_dir else None
+            return os.path.basename(str(dn or "")) or ""
+        except Exception:
+            return ""
+
+
+
     def _count_emb_dims(self):
         """卡里现存向量按维度的分布：{维度: 条数}
 
@@ -6080,6 +5241,7 @@ class MemoryCard:
             if n and n % 4 == 0:
                 out[n // 4] = out.get(n // 4, 0) + int(r["c"])
         return out
+
 
     def _refresh_dim_state(self):
         """重算「卡里向量按维度的分布」和「模型/卡对不上」的告警。
@@ -6208,6 +5370,7 @@ class MemoryCard:
         self._pod_of = assign
         self._pod_n = len(items)
         self._build_sem_pod_centroids()
+        self._pods_save()
 
     def _build_sem_pod_centroids(self):
         """用语义向量重算每个舱的质心（T4-3 调优）
@@ -6245,9 +5408,132 @@ class MemoryCard:
         except Exception:
             self._pod_sem = None
 
+    def _pods_path(self):
+        return os.path.join(self.card_dir, "cache", "pods.json")
+
+    def _pods_save(self):
+        """把舱落到 card/cache/pods.json（纯缓存，删了不影响正确性）。
+
+        为什么要它（2026-11-11）：冷启动时后台建舱要十几秒，那段时间
+        所有查询走全库扫描，第一个请求实测 8.9 秒。把上一次建好的舱
+        读回来，冷启动就能直接用。
+        """
+        if getattr(self, "_pod_centroids", None) is None:
+            return
+        sem = getattr(self, "_pod_sem", None) or {}
+        dim = 0
+        for v in sem.values():
+            dim = len(v)
+            break
+        blob = {"key": [int(getattr(self, "_pod_n", 0)), N_PODS,
+                        POD_KMEANS_ITERS, dim],
+                "cents": self._pod_centroids,
+                "pod_of": self._pod_of,
+                "pod_sem": ({str(k): [float(x) for x in v]
+                             for k, v in sem.items()} if sem else None)}
+        try:
+            p = self._pods_path()
+            d = os.path.dirname(p)
+            if d and not os.path.isdir(d):
+                os.makedirs(d, exist_ok=True)
+            tmp = p + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(blob, f, ensure_ascii=False)
+            os.replace(tmp, p)
+        except Exception:
+            self._pod_build_err = True
+
+    def _pods_load(self):
+        """读回落盘的舱；条数/参数/语义维度对不上就当没有。"""
+        try:
+            p = self._pods_path()
+            if not os.path.exists(p):
+                return False
+            try:
+                with open(p, encoding="utf-8") as f:
+                    blob = json.load(f)
+            except Exception as _pe0:
+                # 🔧 2026-11-11（稳定性）：缓存坏了不该变成「每次启动都白建一遍」。
+                # 坏文件改名留证（不删），这次当没有缓存，后台会重建并写新的。
+                try:
+                    os.replace(p, p + ".bad-" + time.strftime("%Y%m%d-%H%M%S"))
+                except Exception:
+                    _rename_err = True
+                sys.stderr.write("[card2] 舱缓存读不动（%s），已改名留证，重建\n" % _pe0)
+                return False
+            key = blob.get("key") or []
+            n_now = int(self.db.execute(
+                "SELECT COUNT(*) FROM mem WHERE vec IS NOT NULL AND vec<>''"
+            ).fetchone()[0])
+            if not key or int(key[0]) != n_now:
+                return False
+            if int(key[1]) != N_PODS or int(key[2]) != POD_KMEANS_ITERS:
+                return False
+            self._pod_centroids = blob.get("cents") or None
+            self._pod_of = {int(k): int(v)
+                            for k, v in (blob.get("pod_of") or {}).items()}
+            self._pod_n = n_now
+            sem = blob.get("pod_sem")
+            if sem and self.sem_ready():
+                import numpy as _np
+                self._pod_sem = {int(k): _np.array(v, dtype=_np.float32)
+                                 for k, v in sem.items()}
+                if any(len(v) != int(key[3]) for v in self._pod_sem.values()):
+                    self._pod_sem = None
+            else:
+                self._pod_sem = None
+            return self._pod_centroids is not None
+        except Exception:
+            return False
+
     def _ensure_pods(self):
-        if self._pods_stale():
+        """舱该重建就重建，但**不占读请求的时间**（2026-11-11）。
+
+        实测（3 读×4 + 5 写×3 压测）：p50 1.2s、p95 却是 19s —— 抓栈看到
+        卡点在 `_build_pods()` 的纯 Python `cos_sim` 双重循环：写请求让
+        条目数过了阈值，几个读线程同时发现「该重建」，各建一遍，互相抢 GIL。
+        舱只是粗筛（有全库兜底），旧的照样能用，所以：有旧舱就丢后台建一次，
+        从没建过（冷启动）才同步建。
+        """
+        if not self._pods_stale():
+            return
+        has_old = getattr(self, "_pod_centroids", None) is not None
+        if has_old:
+            # 30 秒内只许重建一次，避免写密集时反复空转
+            _now = time.time()
+            if _now - float(getattr(self, "_pod_try_ts", 0.0)) < 30.0:
+                return
+            self._pod_try_ts = _now
+            if _POD_BUILD_LOCK.acquire(blocking=False):
+                _t = threading.Thread(target=self._bg_build_pods,
+                                      name="pod-build", daemon=True)
+                _t.start()
+            return
+        # 🔧 2026-11-11（冷启动）：以前这里是「冷启动就同步建」，真卡上要
+        # 10 秒以上，全挂在第一个请求头上 —— 重启后的第一句话要等十几秒。
+        # 舱只是加速（`_pod_candidates` 返回 None 时全库查，正确性不变），
+        # 所以干脆也不等：起后台线程建，建好之前所有查询走全库。
+        if self._pods_load():
+            return
+        _now = time.time()
+        if _now - float(getattr(self, "_pod_try_ts", 0.0)) < 5.0:
+            return
+        self._pod_try_ts = _now
+        if _POD_BUILD_LOCK.acquire(blocking=False):
+            threading.Thread(target=self._bg_build_pods,
+                             name="pod-build", daemon=True).start()
+
+    def _bg_build_pods(self):
+        """后台重建舱；成功与否都释放锁，失败就继续用旧舱。"""
+        try:
             self._build_pods()
+        except Exception:
+            self._pod_build_err = True
+        finally:
+            try:
+                _POD_BUILD_LOCK.release()
+            except Exception:
+                self._pod_build_err = True
 
     def _pod_candidates(self, qv, idf, q_sem=None):
         """先挑最像的 POD_TAKE 个舱，返回舱内条目 id 集合；None = 该全库查
@@ -6301,8 +5587,49 @@ class MemoryCard:
                 return out
         return None
 
+    def apply_recall_effects(self, hits, query, touch=True):
+        """把「被想起」这笔记账推迟到锁里补写（读写分离第 2 步）。
+
+        读阶段用 recall(access=False) + assemble(touch=False) 跑，只读不算账；
+        拿到结果后再在短锁里补这几行 INSERT —— 这样读请求不用排队等写。
+        写的还是原来那几件事：召回事件、会话命中集合、突触加固、内脏刺激。
+        """
+        if touch:
+            try:
+                self.viscera_touch(query or "")
+            except Exception:
+                self._effects_err = True
+        try:
+            _settle = int(os.environ.get("WHALE_RECALL_SETTLE_K",
+                                         str(RECALL_SETTLE_K)) or 0)
+            _sl = hits[:_settle] if _settle > 0 else hits
+            self._write_recall_events(
+                [(r["id"], i) for i, (_s, _w, r) in enumerate(_sl)],
+                query, source="recall")
+            self._session_hit_ids.update(r["id"] for _s, _w, r in _sl)
+            try:
+                self.synapse.reinforce([r["id"] for _s, _w, r in _sl])
+            except Exception:
+                self._effects_err = True
+        except Exception:
+            self._effects_err = True
+
+    def flush_deferred_effects(self):
+        """把延后模式攒下的召回记账一次写完（必须在锁里调）。"""
+        _q = getattr(self, "_defer_q", None)
+        if not _q:
+            return 0
+        self._defer_q = []
+        for _ids, _query in _q:
+            try:
+                self._write_recall_events(
+                    [(i, k) for k, i in enumerate(_ids)], _query, source="recall")
+            except Exception:
+                self._flush_err = True
+        return len(_q)
+
     def recall(self, query, top_k=3, access=True, pools=None, regions=None,
-               assoc=True, about_uid=None):
+               assoc=True, about_uid=None, trace=None):
         """三因子：像不像 × 还清不清楚 × 多久没提
 
         🔧 第二期改进：
@@ -6327,6 +5654,11 @@ class MemoryCard:
         _self_ask = bool(_RE_SELF_ASK.search(query or ""))
         _self_name_ask = bool(_RE_SELF_NAME_ASK.search(query or ""))
         _self_boost = (SELF_ASK_BOOST_NAME if _self_name_ask else SELF_ASK_BOOST)
+        if _self_ask:
+            # 剥掉「你之前说」这层壳，只拿内容去比 —— 否则壳子本身会赢。
+            _stripped = _RE_SELF_SHELL.sub("", q_clean)
+            if len(_stripped.strip()) >= 3:
+                q_clean = _stripped
         _group_ask = bool(_RE_GROUP_ASK.search(query or ""))
         _ask_my_name = bool(re.search(r"(叫什么|名字|称呼|怎么叫你)", query or "")) \
             and not re.search(r"(身份|设定|规矩|原则|职责|负责|干什么|做什么)", query or "")
@@ -6362,6 +5694,8 @@ class MemoryCard:
 
         try:
             rows = _query_rows()
+            if trace is not None:
+                trace["stages"] = {"all": len(rows)}
         except sqlite3.OperationalError as _e:
             # 没挂时间线的库：补一张空的出生证表，seq 一律取不到，按 create_ts 兜底
             if "mem_birth" not in str(_e):
@@ -6374,13 +5708,61 @@ class MemoryCard:
         # 问「今天」就别翻三年前的；问「以前」就不限。
         # 注意：只是**收窄候选**，不改打分 —— 收窄错了还有回退兜底。
         win_days = query_time_window(query)
-        if win_days is not None:
-            cut = now - win_days * DAY
-            narrowed = [r for r in rows if r["last_active_ts"] >= cut
-                        or r["create_ts"] >= cut]
+        span = query_time_span(query, now=now)
+        if span is not None:
+            # 🔧 2026-11-09：时间窗只该筛「事件」，不该筛「长期事实」。
+            #    原先是 rows 里所有记忆一起按时间收窄 —— 可「他叫什么」「在苏州做什么」
+            #    「不吃芹菜」这些是 fact/preference/self，它们**没有过期日**，正是
+            #    跨 45 天最该被翻出来的东西；一起被时间窗切掉，等于问「上次」的时候
+            #    把人的姓名职业也一起扔了。实测（probe/_diag2_pool.md）45 天档
+            #    ret20 召不回的 47 道里，有 11 道是被这一步误筛的。
+            #    现在只有 episode/flash/chatter 这类「事」参与收窄，其余整层保留。
+            _timed = {"episode", "flash", "chatter", "", None}
+            _start, _end, _precise = span
+            if _precise:
+                # 问的是「哪一天」：只留那天发生的事。门槛降到 1 ——
+                # 精确问日期时，宁可只有三条候选，也别因为"太少"退回全库。
+                narrowed = [r for r in rows
+                            if (r["region"] not in _timed)
+                            or (_start <= event_ts_of(r) <= _end)]
+                _min_keep = 1
+                # 「那天**我说**过什么」和「那天**你说**过什么」不是一件事：
+                # 11-06 那天光群聊就有 389 条，不按说话人再筛一刀，
+                # 她自己说过的那句就被群消息淹掉了（实测未命中的三条全是这个原因）。
+                if re.search(r"我(?:说|讲|提|问)", query or ""):
+                    _sp = [r for r in narrowed if (r["speaker"] or "") == "user"]
+                    if _sp:
+                        narrowed = _sp
+                elif re.search(r"你(?:说|讲|提|答)", query or ""):
+                    _sp = [r for r in narrowed if (r["speaker"] or "") == "self"]
+                    if _sp:
+                        narrowed = _sp
+                # 那天**两类**话混在一起：跟我说的，和在群里说的。
+                # 11-06 那天 389 条里 279 条是群聊（qq-group），问「那天我说过什么」
+                # 想要的显然是我们的对话；但也别把群聊删干净 —— 问「群里」就反过来。
+                _q2 = query or ""
+                _grp = lambda r: (r["source"] or "") == "qq-group"   # noqa: E731
+                if "群" in _q2:
+                    _sg = [r for r in narrowed if _grp(r)]
+                    if len(_sg) >= 3:
+                        narrowed = _sg
+                else:
+                    _pv = [r for r in narrowed if not _grp(r)]
+                    if len(_pv) >= 3:
+                        narrowed = _pv
+            else:
+                narrowed = [r for r in rows
+                            if (r["region"] not in _timed)
+                            or r["last_active_ts"] >= _start
+                            or event_ts_of(r) >= _start]
+                _min_keep = 5
             # 收窄后太少（比如刚开学没聊过）就放宽，别把库筛空
-            if len(narrowed) >= 5:
+            if len(narrowed) >= _min_keep:
                 rows = narrowed
+            if trace is not None:
+                _st = trace.setdefault("stages", {})
+                _st["after_span"] = len(rows)
+                _st["span_precise"] = bool(_precise)
 
         # ---- T4-1 分舱预筛 ----
         self._ensure_pods()
@@ -6389,6 +5771,8 @@ class MemoryCard:
             narrowed = [r for r in rows if r["id"] in pod_ids]
             if len(narrowed) >= 5:
                 rows = narrowed
+        if trace is not None:
+            trace.setdefault("stages", {})["after_pod"] = len(rows)
 
         # ---- 2026-11-09「我自己说过的话」先在自己话里找 ----
         #    和分区路由同一个套路：先在自己说过的话里找，找出来的不够 2 条
@@ -6397,14 +5781,23 @@ class MemoryCard:
             _self_rows = [r for r in rows if (r["speaker"] or "") == "self"]
             if len(_self_rows) >= 5:
                 rows = _self_rows
+        if trace is not None:
+            _st = trace.setdefault("stages", {})
+            _st["after_self"] = len(rows)
+            trace["flags"] = {"self_ask": bool(_self_ask),
+                              "group_ask": bool(_group_ask)}
 
         vecs = self._vecs(rows)     # 🔧 批量取向量（带缓存），不再逐条 json.loads
 
         # ---- 分区路由 ----
         want = set(regions) if regions else guess_query_regions(query)
+        if trace is not None:
+            trace.setdefault("flags", {})["regions"] = sorted(want) if want else []
         # 🔧 V5.0 §4.4(1)：内分泌对召回的联动加权
         #    催产素高 → 羁绊记忆更容易翻出来；皮质醇高 → 回忆闭塞
         f_end = hormone.f_endo(getattr(self, "h", hormone.H_BASE))
+
+        _comp = {}
 
         def _score_rows(cands, region_boost):
             # 🔧 T4-3：语义向量一次算完（矩阵乘法），不在 Python 里逐条循环
@@ -6418,6 +5811,10 @@ class MemoryCard:
             #    平均掉；分段取 max 才能把它救出来。见 backfill_detail_embeddings。
             det_scores = ([0.0] * len(cands) if q_sem is None
                           else self._detail_sims(q_sem, [r["id"] for r in cands]))
+            # 查询侧乘 idf、算模长：一次就够，别每条候选重算
+            qw = ({k: v * idf.get(k, 1.0) for k, v in (qv or {}).items()}
+                  if idf else dict(qv or {}))
+            q_norm = math.sqrt(sum(x * x for x in qw.values()))
             out = []
             for i, r in enumerate(cands):
                 if pools and r["pool"] not in pools:
@@ -6425,7 +5822,8 @@ class MemoryCard:
                 mv = vecs.get(r["id"]) or {}
                 if not mv and not sem_scores[i]:
                     continue
-                sim = cos_sim_idf(qv, mv, idf) if mv else 0.0
+                sim = (self._idf_sim(qw, q_norm, r["id"], mv, idf)
+                       if mv else 0.0)
                 # 🔧 T4-3 / T4-3b：语义分三档取最强的那个：
                 #    整条语义 sem、片段语义 max det、两者均值。
                 #    片段分只在**明显强于整条**时才顶上来（-0.02 容差），
@@ -6543,6 +5941,8 @@ class MemoryCard:
                     # 问「身份/设定」时不掺这一脚，否则会把设定句压掉。
                     if _ask_my_name:
                         s *= 2.20 if _RE_NAME_DEF.search(_raw) else 0.60
+                _comp[r["id"]] = (float(blended), float(cover),
+                                  float(wn), float(recency))
                 out.append((s, wn, r, sim, cover))
                 # 🔧 2026-10-30 临时排错钩子（查完就删）：把每条的实际分数留痕，
                 #    外面 _DBG_SCORES 一开就能看，不影响正常路径。
@@ -6570,6 +5970,26 @@ class MemoryCard:
             scored = _score_rows(rows, region_boost=False)
 
         scored.sort(key=lambda x: -x[0])
+        if trace is not None:
+            trace.setdefault("stages", {})["scored"] = len(scored)
+            # V7 第 8 件：只进内存 trace，不进 recall_trace 表。
+            # 失败四分类靠它回答「这条记忆有没有活着走到打分」——
+            # 不在 scored_ids 里 = 被前面的漏斗筛掉；在却不端 = 排名/预算。
+            trace["scored_ids"] = [int(h[2]["id"]) for h in scored if h[2]["id"] is not None]
+            trace["top"] = [[int(h[2]["id"]), round(float(h[0]), 4),
+                             round(float(h[4]), 3), round(float(h[1]), 3)]
+                            for h in scored[:8]]
+        if _RERANK_ON and len(scored) > top_k:
+            _pool = scored[:min(len(scored), RERANK_POOL)]
+            def _rk(h):
+                c = _comp.get(h[2]["id"])
+                if not c:
+                    return h[0]
+                return 0.55 * c[0] + 0.35 * c[1] + 0.10 * c[2]
+            _pool = sorted(_pool, key=lambda h: -_rk(h))
+            scored = _pool + scored[len(_pool):]
+            if trace is not None:
+                trace["rerank"] = {"pool": len(_pool), "kept": top_k}
         hits = scored[:top_k]
 
         # ---- T4-4 突触联想：直接命中之后，顺着连线往外扩 ----
@@ -6595,14 +6015,22 @@ class MemoryCard:
             # V5.0 公理 6：只写事件，不改 mem。
             # 真正的加固由 _settle_recall_events() 在 tick() 里统一做，
             # 这样「想一下」这个动作本身不会偷偷改遗忘状态。
+            # 🔧 V5.9-A：召回宽度变大之后，结算也要跟「真正回想的条数」对齐 ——
+            #    否则端 12 条就加固 12 条，卡的状态会跟基线分叉（实测 P12 掉 5 点）。
+            #    RECALL_SETTLE_K=5 表示「只有前 5 条算真正想过」，和加宽前的行为一致。
+            _settle = int(os.environ.get("WHALE_RECALL_SETTLE_K",
+                                         str(RECALL_SETTLE_K)) or 0)
+            # 加宽只是「多看几条」，不该顺手多加固几条：只结算前 N 条。
+            # 实测「端 12 条就加固 12 条」会让卡状态与加宽前分叉（P12 ret5 -5）。
+            _sl = hits[:_settle] if _settle > 0 else hits
             self._write_recall_events(
-                [(r["id"], i) for i, (_s, _wn, r, _sim, _cov) in enumerate(hits)],
+                [(r["id"], i) for i, (_s, _wn, r, _sim, _cov) in enumerate(_sl)],
                 query, source="recall")
             # 记下这些 id，SessionCache 回流时不再重复计
-            self._session_hit_ids.update(r["id"] for _s, _wn, r, _sim, _cov in hits)
+            self._session_hit_ids.update(r["id"] for _s, _wn, r, _sim, _cov in _sl)
             # 一起被想起的记忆，它们之间的突触变粗
             try:
-                self.synapse.reinforce([r["id"] for _s, _wn, r, _sim, _cov in hits])
+                self.synapse.reinforce([r["id"] for _s, _wn, r, _sim, _cov in _sl])
             except Exception:
                 pass
         return [(s, wn, r) for s, wn, r, _sim, _cov in hits]
@@ -6856,7 +6284,7 @@ class MemoryCard:
         return len(grouped)
 
     # ---------- 说 ----------
-    def render(self, mem_row, weight=None):
+    def render(self, mem_row, weight=None, query=""):
         now = self.clock.now()
         if weight is None:
             weight = wn_row(mem_row, now)
@@ -6865,15 +6293,17 @@ class MemoryCard:
                   " ORDER BY weight DESC", (mem_row["id"],))
         parts = {"TIME": [], "PLACE": [], "EMOTION": [], "MODIFIER": [],
                  "ACTION": []}
-        for d in c.fetchall():
+        _all_details = c.fetchall()
+        for d in _all_details:
             w = d["weight"]
             kind = d["kind"]
             if kind == "MODIFIER":
-                # 长句后续子句：无论多清楚都硬截到 18 字，绝不整段倒出
-                if w >= SHOW_FULL:
-                    parts["MODIFIER"].append(d["text"][:18])
-                elif w >= SHOW_SCENE:
-                    parts["MODIFIER"].append(d["text"][:10] + "…")
+                # 长句后续子句：先原样攒着，等主干出来再挑一条**不重复**的补进去
+                # （2026-11-09：以前无条件取权重最高的那条，而导入的长记忆里
+                #   权重最高的子句常常就是主干的前半句 —— 于是渲染成
+                #   「夜学两支概率短片…，还说「夜学两支概率短片(BV1dgu9」」这种
+                #   自己抄自己的句子，白占预算还把真正的新信息挤掉。）
+                parts["MODIFIER"].append({"t": d["text"], "w": w})
                 continue
             if kind == "ACTION":
                 # 🔴 2026-10-31：并列动作（「还拍了视频」）是事件的一部分，
@@ -6910,8 +6340,16 @@ class MemoryCard:
             if not (_subj or _verb or _obj):
                 _subj, _verb, _obj = split_predicate(core)
             core = render_predicate(_subj, _verb, _obj, _stage) or core
-        if len(core) > 40:
+        if len(core) > 40 and RENDER_LEGACY:
             core = core[:40] + "……"
+        elif len(core) > 40:
+            # 2026-11-09：以前硬切 40 字，常常切在半个词上（「打在我身上的三处：第一，」），
+            # 读起来是断句、也害得 rubric 里的片段对不上。现在优先切在标点后，
+            # 但至少留 24 字，避免逗号太靠前把主干切没了。
+            _cut = core[:40]
+            _p = max(_cut.rfind("，"), _cut.rfind("。"), _cut.rfind("、"),
+                     _cut.rfind("；"))
+            core = (_cut[:_p + 1] if _p >= 24 else _cut) + "……"
         bits.append(core)
         # 🔴 2026-10-31：并列动作跟着主干走（「吃烧烤，还拍了视频」）——
         #    它和主干是同一层的事件内容，不该被摞到「还说「…」」那个位置上去。
@@ -6919,10 +6357,62 @@ class MemoryCard:
             bits.append("，" + parts["ACTION"][0])
         if parts["EMOTION"]:
             bits.append("，" + parts["EMOTION"][0])
-        # 长句的后续子句：只保留一条最清楚的，别把整段倒出来
-        if parts["MODIFIER"]:
-            bits.append("，还说「" + parts["MODIFIER"][0] + "」")
+        # 长句的后续子句：只保留一条最清楚的，别把整段倒出来。
+        # 挑法（2026-11-09）：①先剔掉和主干重复的（jaccard≥0.5 或整句是主干前缀），
+        # ②剩下的里优先「问句里出现过的词也在这一句里」的那条 —— 问「第一步怎么做」时
+        #   要的是「先把日期分堆」，不是这条记忆里随便哪个子句。
+        if parts["MODIFIER"] and RENDER_LEGACY:
+            _it0 = max(parts["MODIFIER"], key=lambda x: float(x["w"]))
+            _mt0 = _it0["t"][:18] if _it0["w"] >= SHOW_FULL else _it0["t"][:10] + "…"
+            bits.append("，还说「" + _mt0 + "」")
+        elif parts["MODIFIER"]:
+            _core_txt = mem_row["core"] or ""
+            _qw = [w for w in re.findall(r"[\u4e00-\u9fa5]{2}", query or "")]
+            _best = None
+            for _it in parts["MODIFIER"]:
+                if _it["w"] < SHOW_SCENE:
+                    continue
+                _t = _it["t"]
+                if jaccard(_t, _core_txt) >= 0.5 or _t[:8] and _t[:8] in _core_txt:
+                    continue
+                _hit = sum(1 for w in _qw if w in _t)
+                _sc = _hit * 10.0 + float(_it["w"])
+                if _best is None or _sc > _best[0]:
+                    _best = (_sc, _it)
+            if _best:
+                _it = _best[1]
+                _mt = _it["t"][:18] if _it["w"] >= SHOW_FULL else _it["t"][:10] + "…"
+                bits.append("，还说「" + _mt + "」")
         s = "".join(bits)
+        # 🔧 2026-11-09：问句相关细节补一句。
+        #    实测（714 题）失败题里 72~79% 的答案记忆本来就在前 5 条，
+        #    但渲染只按「这条细节还清不清楚」挑，不按「问句问的是不是它」挑，
+        #    于是问「第一步怎么做」时端上来的是同一条记忆里别的子句。
+        #    这里在主干之后补一条**问句实词命中最多**的细节（最多 24 字），
+        #    只在它确实带新词、且没被上面的子句用过时才加。
+        if RENDER_DETAIL_ADD:
+            try:
+                _qt = re.findall(r"[\u4e00-\u9fa5]+", query or "")
+                _qk = set()
+                for _seg in _qt:
+                    for _i in range(len(_seg) - 1):
+                        _qk.add(_seg[_i:_i + 2])
+                _cand_d = []
+                for d in _all_details:
+                    _t = (d["text"] or "").strip()
+                    if len(_t) < 4 or (_t[:6] and _t[:6] in s):
+                        continue
+                    _hit = sum(1 for k in _qk if k in _t)
+                    if _hit >= 2:
+                        _cand_d.append((_hit, len(_t), _t))
+                if _cand_d:
+                    _cand_d.sort(key=lambda x: (-x[0], x[1]))
+                    _dt = _cand_d[0][2][:24]
+                    _pp = max(_dt.rfind("，"), _dt.rfind("。"), _dt.rfind("、"))
+                    _dt = _dt[:_pp + 1] if _pp >= 10 else _dt + "…"
+                    s = s + "（还记着：" + _dt + "）"
+            except Exception:
+                pass
         # 🔧 2026-11-07：渲染时把「昨天/明天」按这条记忆自己的 create_ts
         #    换成绝对日期。raw 一个字不动，只是「想起来的时候」算准。
         _ts = mem_row["create_ts"] if "create_ts" in mem_row.keys() else None
@@ -7050,61 +6540,6 @@ class MemoryCard:
         return "\n".join(lines)
 
     # ---------- 习惯层 v2：只读地捞几条给上下文用 ----------
-    def habit_hints(self, limit=5, max_chars=220):
-        """从 habits 表捞几条稳定习惯，拼成短句给【我是谁】用。
-
-        为什么要有它：卡里 565 条记忆全是「发生了什么」，没有一条是
-        「我这人平时怎么说话」。挖出来的习惯如果只躺在报告里，
-        那她还是那个每轮靠提示词临时扮演的自己。
-
-        三条自我约束（都是为了别变成背台词）：
-          1. 只取 stable / pinned，候选和衰减中的不进来 —— 凭印象说不如不说；
-          2. 最多 5 条、总字数 ≤220（密度刹车）；
-          3. 默认开，`WHALE_HABITS=0` 可一键关掉。
-        表不存在（还没挖过）时返回空列表，不报错、不建表。
-        """
-        if os.environ.get("WHALE_HABITS", "1") == "0":
-            return []
-        try:
-            rows = self.db.execute(
-                "SELECT key, category, trigger, behavior, weight, confidence,"
-                " status, pinned, hits FROM habits"
-                " WHERE status IN (?, ?, ?) AND key != ''"
-                " ORDER BY pinned DESC, weight DESC, confidence DESC, hits DESC"
-                " LIMIT ?",
-                (habits_mod.ST_STABLE, habits_mod.ST_PINNED, habits_mod.ST_WEAK,
-                 max(1, int(limit) * 3))).fetchall()
-        except Exception:
-            return []
-        out = []
-        used = 0
-        weak_n = 0
-        for r in rows:
-            st = str(r["status"] or "")
-            if st == habits_mod.ST_WEAK:
-                if weak_n >= habits_mod.HAB_WEAK_MAX:
-                    continue
-            trig = (r["trigger"] or "").strip()
-            beh = (r["behavior"] or "").strip()
-            key = (r["key"] or "").strip()
-            if trig and beh:
-                line = "当%s的时候，我一般会%s" % (trig, beh)
-            elif key:
-                line = "我会用「%s」这种说法" % key
-            else:
-                continue
-            if st == habits_mod.ST_WEAK:
-                line += "（这条还弱，别当口头禅硬套）"
-                weak_n += 1
-            if line in out:
-                continue
-            if used + len(line) > max_chars:
-                break
-            out.append(line)
-            used += len(line)
-            if len(out) >= int(limit):
-                break
-        return out
 
     def _l0_lines(self, now=None, hours=72.0, limit=8, max_chars=720):
         """L0 时间线：最近真的发生过什么，按时间顺读，日期一律写绝对值。
@@ -7153,9 +6588,26 @@ class MemoryCard:
         out.reverse()
         return out
 
+    def _tevent(self):
+        """时间线/待办账本（懒开，一次）。表在 card.db 里，和 mem/timeline 各管一段。
+
+        为什么偷懒不开在 __init__：它只有装配上下文和写入时才用得上，
+        而 __init__ 已经在忙唤醒结算，多插一个 DDL 只会让启动更慢。
+        """
+        _st = getattr(self, "_tevent_store", None)
+        if _st is not None:
+            return _st
+        try:
+            _st = tempora.EventStore(self.db)
+        except Exception as _e:
+            soft_fail("tempora_init", _e)
+            return None
+        self._tevent_store = _st
+        return _st
+
     def assemble_context(self, query, identity="", recent_lines=None,
                          touch=False,
-                         budget=None, scene=None, about_uid=None):
+                         budget=None, scene=None, about_uid=None, access=True):
         """每次说话前，拼出四格上下文。装满就停，永远不会爆。
 
         🔧 V5.0 T3-3：配额不再是写死的 600/1800/2000/1200，
@@ -7266,7 +6718,7 @@ class MemoryCard:
             #    同一件事说三遍的，全塞进去等于浪费配额。
             if any(jaccard(r["raw"] or "", t) >= 0.55 for t in shown_txt):
                 continue
-            line = "- " + self.render(r)
+            line = "- " + self.render(r, query=query)
             if used + len(line) > cap2:
                 dropped += 1
                 continue
@@ -7322,21 +6774,44 @@ class MemoryCard:
         _fact_pos = len(out)
         used = 0
         # 🔧 V5.6.2-G：时间型 / 多事实型问题，一条事实拼不出来，得多端几条。
-        #    其余问题保持 5 条 —— 无差别加宽会把噪音也端上来，实测掉分。
+        #    V5.9-A 改成配额驱动后，窄问句 = min(cap, RECALL_NARROW_MAX=6)：
+        #    只比基线多一条 —— 无差别加宽实测买不到分，还会稀释上下文。
         _q = query or ""
         _wide = any(w in _q for w in _WIDE_WORDS)
         if os.environ.get("WHALE_WIDE_WORDS") == "1":
             _wide = _wide or any(w in _q for w in _WIDE_EXTRA)
-        _topk = WIDE_K_EXTRA if _wide else 5
-        # 🔧 2026-11-08（V5.7-B 实验）：这一格到底端几条。默认还是 5（宽问句按 WIDE_TOP_K），
-        #    留一个环境变量给 A/B 用 —— 预算没花完却只端 5 条，等于把已经召回到的东西又扔掉。
-        #    WHALE_RECALL_FILL=1 时改成「端到预算用完为止」（cap4 那一层仍然管着，不会越界）。
+        # 🔧 V5.9-A（2026-11-09）：宽度改成「配额驱动 + 多事实感知」。
+        #    历史：WIDE_TOP_K=5 让 _wide 和普通分支完全等价，等于空转；而这一格
+        #    的预算（真卡 4249 / bench 中位 ~1500 token）根本没花完 —— 排到
+        #    6-12 名的答案是被渲染层扔掉的。所以先算「这一格最多能端几条」。
+        _cap = max(RECALL_CAP_MIN,
+                   min(RECALL_CAP_MAX, int(float(q["recall"]) // MEM_LINE_TOKENS)))
+        _multi = _wide or _is_multi_fact(_q)
+        # 覆盖入口保留：WHALE_WIDE_K 非 0 时钉死条数（旧 A/B 臂还能复现）。
+        _env_k = int(os.environ.get("WHALE_WIDE_K", "0") or 0)
+        if _env_k > 0:
+            _topk = _env_k
+        else:
+            _topk = _cap if _multi else min(_cap, RECALL_NARROW_MAX)
         _fill = os.environ.get("WHALE_RECALL_FILL") == "1"
+        if _fill:
+            # 「端到预算用完为止」：条数也不能少于配额算出来的 cap，否则 fill 白开。
+            _topk = max(_topk, _cap)
+        # _max_lines 必须 >= 实际端出来的条数 —— 否则就是「召回 12 条只渲染 5 行」。
+        # WHALE_RECALL_LINES 仍然优先（旧 lines10/14/20 臂靠它），但 fill 时放开。
         _max_lines = 60 if _fill else (
-            int(os.environ.get("WHALE_RECALL_LINES", "0") or 0) or (
-                _topk if _wide else 5))
-        hits = self.recall(query, top_k=_topk, access=True,
-                            about_uid=(about_uid or None))
+            int(os.environ.get("WHALE_RECALL_LINES", "0") or 0) or _topk)
+        # V7 第 8 件：召回 trace。只在这里（真装配上下文时）记，不打扰 bench 的裸 recall。
+        _trace = {}
+        _trace_t0 = time.time()
+        hits = self.recall(query, top_k=_topk, access=access,
+                            about_uid=(about_uid or None), trace=_trace)
+        if not access:
+            # 延后模式：这次召回的「被想起」记账先存着，等锁里再写（见 flush_deferred_effects）
+            _dq = getattr(self, "_defer_q", None)
+            if _dq is None:
+                _dq = self._defer_q = []
+            _dq.append(([h[2]["id"] for h in hits], query))
 
         # 🔧 V5.6.2-H：多跳。原句召一遍保语义，实词再召一遍保字面，
         #    两组按 id 合并 —— 分散在几条聊天里的线索，一条向量是拼不回的。
@@ -7377,6 +6852,7 @@ class MemoryCard:
                     _ids3.add(_mid)
                     hits.append(_h)
         lines = []
+        _picked_ids = []   # 这次真端进召回格的 id（和 ② 里已显示的分开算）
         cap4 = used + (int(q["recall"] * WIDE_BUDGET_K) if _wide else q["recall"])
         n_direct = 0
         n_assoc = 0
@@ -7494,12 +6970,12 @@ class MemoryCard:
                 if n_assoc >= 2:
                     break
                 n_assoc += 1
-                body = "（顺带想起）" + self.render(r, wn)
+                body = "（顺带想起）" + self.render(r, wn, query=query)
             else:
                 n_direct += 1
                 if n_direct > _max_lines:
                     break
-                body = self.render(r, wn)
+                body = self.render(r, wn, query=query)
             line = ("- %s｜%s" % (_tag, body)) if _tag else ("- " + body)
             # 🔧 V5.6.2：除了加工过的句子，再端一份原话。
             #    render() 为了让句子读起来顺，会做时间锚定、去壳、去引号，
@@ -7523,6 +6999,7 @@ class MemoryCard:
                 break
             lines.append(line)
             shown_ids.add(r["id"])
+            _picked_ids.append(int(r["id"]))
             used += len(line)
         if lines:
             # 低置信：top1 分数太低就别硬装记得 —— 把「可能」写在脸上，
@@ -7534,6 +7011,55 @@ class MemoryCard:
             blk += "\n" + "\n".join(lines)
             out.append(blk)
             sections["recall"] = used
+        # V7 第 8 件：把这次召回的漏斗落一行（只有真装配上下文时才记）。
+        try:
+            if _trace is not None:
+                self.recall_trace_add(
+                    query=query, flags=_trace.get("flags"),
+                    stages=_trace.get("stages"), top=_trace.get("top"),
+                    picked=_picked_ids,
+                    n_lines=len(lines), ms=int((time.time() - _trace_t0) * 1000))
+        except Exception as _te:
+            print("[card2] 召回 trace 落盘失败: %s" % _te)
+
+
+        # 🗄 冷档兜底（2026-11-09）：眼前的事一条都没想起来（或只有一两条），
+        #    说明问的可能是很久以前、早被"忘掉"的事。这时去硬盘深处翻一遍旧账 ——
+        #    mem 里没有它 = 平时想不起来；mem_archive 里有它 = 从来没销毁。
+        #    只在想不起来时才翻，平时不让几年前的碎片挤掉眼前的事。
+        #    触发条件不是「眼前一条都没有」—— 正常召回总能捞回几条不相干的，
+        #    那样这道兜底永远不触发（试过，等于死代码）。改看内容：
+        #    问句里若有实词只在冷档里出现过，那条旧账就该被翻出来。
+        if True:
+            try:
+                _arch = self.archive_search(query or "", k=3)
+            except Exception as _ae:
+                _arch = []
+                print("[card2] 冷档检索失败: %s" % _ae)
+            if _arch:
+                _al = []
+                _aused = 0
+                for _a in _arch:
+                    _at = ""
+                    try:
+                        _at = time.strftime("%Y-%m-%d",
+                                            time.localtime(float(_a["create_ts"])))
+                    except Exception:
+                        pass
+                    _body = (_a["core"] or _a["raw"] or "").strip()[:72]
+                    if not _body:
+                        continue
+                    _line = ("- %s｜%s" % (_at, _body)) if _at else ("- " + _body)
+                    if used + _aused + len(_line) > cap4:
+                        break
+                    _al.append(_line)
+                    _aused += len(_line)
+                if _al:
+                    _shown = " ".join(lines)
+                    _al = [x for x in _al if x.split("｜")[-1][:12] not in _shown]
+                if _al:
+                    out.append("【很久以前的事（翻旧账翻到的）】\n" + "\n".join(_al))
+                    sections["archive"] = _aused
 
         # ④b 事实格（V5.7）：谁说的 / 说的是谁 / 什么事
         #
@@ -7626,6 +7152,88 @@ class MemoryCard:
             out.append("【印象】\n" + _itxt)
             sections["impression"] = len(_itxt)
 
+        # ⑤.7 动机：此刻最想做的一两件事（欲望层）
+        #     mot_state 里有七条驱力，candidates 会把超出基线的浮成「想做的事」。
+        #     这里只取紧急度最高的那一条，用 motiv.describe 翻成人话。
+        #     没有（全在基线附近）就不输出 —— 不编「我想干什么」。
+        try:
+            _mo = getattr(self, "mo", None)
+            if _mo:
+                # 口径跟 motiv_tick 保持一致：用「他最后一次说话」算空闲，
+                # 不要用 last_talk_ts（那个每轮 /context 都会被刷新，
+                # 于是「0.0 小时没开口」永远成立，括号里的解释成了噪音）。
+                _lu = self._last_user_ts()
+                _cands = motiv.candidates(_mo.get("d", motiv.base()), {
+                    "now": now,
+                    "last_spoke_ts": _lu,
+                    "last_sent_ts": float(_mo.get("last_sent_ts") or 0),
+                    "last_event_ts": _lu,
+                    "quiet": False, "at_school": False,
+                    "sent_today": 0, "learned_today": 0,
+                })
+                if _cands:
+                    _top = _cands[0]
+                    _mtxt = motiv.describe(_top)
+                    if _mtxt:
+                        out.append("【动机】\n" + _mtxt)
+                        sections["motiv"] = len(_mtxt)
+        except Exception:
+            pass
+
+        # ⑤.8 工作日志：我上一轮干到哪儿了（2026-11-10 加）。
+        #     排在【此刻】之前：先知道手上这件活做到哪，再谈现在什么心情。
+        #     这不是记忆，是我的笔记本 —— 换窗口/换电脑后第一眼看的就是这几行。
+        try:
+            _wl = self.worklog_text(n=5)
+        except Exception:
+            _wl = ""
+        if _wl:
+            out.append("【最近在做的事】\n" + _wl)
+            sections["worklog"] = len(_wl)
+
+        # ⑤.9 梦：攒够原文了就在上下文里提醒一句（2026-11-10 加）。
+        #     压缩由**宿主模型**做（卡不调模型），所以「该压了」必须由卡主动说；
+        #     否则原文越攒越多 —— 788 轮欠账就是这么来的：工具在那儿，没人喊。
+        try:
+            _dd = self.dream_due()
+        except Exception:
+            _dd = {}
+        if _dd.get("due"):
+            _dm = ("原文攒了 %d 轮没压（最近一轮 %.1f 小时前）。"
+                   "该做梦了：mind_dream_pending 取原文 → 压成摘要 → mind_dream_commit。"
+                   % (int(_dd.get("pending") or 0), float(_dd.get("idle_hours") or 0)))
+            out.append("【该做梦了】\n" + _dm)
+            sections["dream"] = len(_dm)
+
+        # ⑤.95 时间与待办（2026-11-11）：先把「现在几点」摆出来，再摆没到点的事。
+        # 为什么必须有：今早用户说「我到学校了」，我在同一轮里把它当成「今晚」——
+        # 不是记错，是手上没有一行「现在是几点」。这行最短，但少了它，
+        # 「今晚/明早/待会儿」全都没有参照物。
+        try:
+            _tp = self._tevent()
+            _tb = _tp.block_text() if _tp is not None else ""
+        except Exception as _te:
+            soft_fail("tempora_block", _te)
+            _tb = ""
+        if _tb:
+            out.append(_tb)
+            sections["time"] = len(_tb)
+
+        # ⑤.97 【没结清的事】承诺账本（2026-11-11 接进读侧）。
+        #     为什么放这里：和 worklog / 做梦 / 时间同属「每轮可能变、只影响语气」的
+        #     尾巴块，不打乱前面事实格的缓存前缀；承诺不是事实，不进【事实】。
+        #     没有账时零开销；WHALE_PROMISE=0 整块消失（回滚）。
+        if getattr(self, "_promises_ok", False):
+            try:
+                import promises as _pm
+                _pb = _pm.promise_block(now=time.time(), limit=3, db=self.db_path)
+            except Exception as _pe:
+                soft_fail("promise_block", _pe)
+                _pb = ""
+            if _pb:
+                out.append(_pb)
+                sections["promise"] = len(_pb)
+
         state = self._state_line()
         if state:
             out.append("【此刻】\n" + state)
@@ -7647,26 +7255,7 @@ class MemoryCard:
         }
 
     # ---------- 统计 ----------
-    def add_dialogue(self, mem_id, user_text, reply_text, ts=None, source=None):
-        """给一条记忆补上「当时的原话 + 我当时的回答」
 
-        T5-2 用：记忆是提炼过的（主干+细节+权重），原文另存。
-        原文不进向量库 —— 它不参与召回，只用于「翻回原话」。
-        """
-        if not user_text:
-            return None
-        now = self.clock.now()
-        t = float(ts) if ts else now
-        cur = self.db.cursor()
-        cur.execute(
-            "INSERT INTO dialogue(mem_id,ts,role,text,source) VALUES(?,?,?,?,?)",
-            (int(mem_id), t, "user", str(user_text), source))
-        if reply_text:
-            cur.execute(
-                "INSERT INTO dialogue(mem_id,ts,role,text,source) VALUES(?,?,?,?,?)",
-                (int(mem_id), t + 1, "assistant", str(reply_text), source))
-        self.db.commit()
-        return cur.lastrowid
 
     def get_dialogue(self, mem_id):
         """翻回某条记忆当时的原话（user + assistant）"""
@@ -7715,3 +7304,82 @@ class MemoryCard:
                 "mood": round(getattr(self, "mood", MOOD_NEUTRAL), 3),
                 "mood_label": mood_text(getattr(self, "mood", MOOD_NEUTRAL)),
                 "hormones": hormone.describe(getattr(self, "h", {}))}
+
+# ---------------------------------------------------------------- 搬出去的写路径
+# 6-1 步把 remember / add_dialogue / worklog / emb_* 搬到了 cardmix_store.py，
+# 但方法体里还在用这里的模块级常量和工具函数（POOL_SHORT、to_vec、DAY…）。
+# 函数体里的名字是 LOAD_GLOBAL，查的是 **cardmix_store 自己的 globals**，
+# 不会走它的模块 __getattr__ —— 所以在这里把本模块的名字补进去一次。
+# setdefault：不覆盖 cardmix_store 自己的 json/sqlite3/MixHabit 之类。
+def _free_globals(path):
+    """模块里以「全局名」方式被读到的名字 —— 也就是运行期必须能解析的那些。
+
+    为什么要在绑定之后核对一遍：搬出去的方法体是 LOAD_GLOBAL，查的是 cardmix_store
+    自己的 globals。少补一个名字，import 阶段一声不响，等第一次写记忆才炸 NameError ——
+    那时候磁盘上已经落了一半，很难查。所以宁可**在启动/导入时就失败**，把「什么时候炸」
+    从「某次写入」提前到「启动」。这是 fail-fast，不是额外保险。
+    """
+    import ast as _ast
+    import builtins as _bi
+    src = open(path, encoding="utf-8").read()
+    tree = _ast.parse(src)
+    have = set(dir(_bi)) | {"__name__", "__file__", "__doc__"}
+    for n in _ast.walk(tree):
+        if isinstance(n, _ast.Name) and isinstance(n.ctx, _ast.Store):
+            have.add(n.id)
+        elif isinstance(n, (_ast.FunctionDef, _ast.AsyncFunctionDef, _ast.ClassDef)):
+            have.add(n.name)
+            if isinstance(n, (_ast.FunctionDef, _ast.AsyncFunctionDef)):
+                a = n.args
+                have |= {x.arg for x in list(a.args) + list(a.posonlyargs) + list(a.kwonlyargs)}
+                if a.vararg:
+                    have.add(a.vararg.arg)
+                if a.kwarg:
+                    have.add(a.kwarg.arg)
+        elif isinstance(n, (_ast.Import, _ast.ImportFrom)):
+            for al in n.names:
+                have.add(al.asname or al.name.split(".")[0])
+        elif isinstance(n, _ast.Global):
+            have |= set(n.names)
+        elif isinstance(n, _ast.ExceptHandler) and n.name:
+            have.add(n.name)
+        elif isinstance(n, (_ast.Lambda, _ast.comprehension)):
+            for t in _ast.walk(n):
+                if isinstance(t, _ast.arg):
+                    have.add(t.arg)
+                elif isinstance(t, _ast.Name) and isinstance(t.ctx, _ast.Store):
+                    have.add(t.id)
+    out = set()
+    for n in _ast.walk(tree):
+        if isinstance(n, _ast.Name) and isinstance(n.ctx, _ast.Load) and n.id not in have:
+            out.add(n.id)
+    return out
+
+
+def _check_mixin_globals():
+    """核对拆出去的 mixin 自己能把依赖都拿到 —— **只核对，不再注入**。
+
+    历史：最早靠 `_bind_store_globals()` 把本模块的名字塞给 cardmix_store，
+    那是「父模块往子模块里填名字」的反向依赖，子模块离了 card2 就跑不起来。
+    2026-11-11 共享常量收进 cardcfg.py、改子模块自己 import 之后，注入不需要了 ——
+    这里退化成一道闸：自己拿不到就启动失败，不靠父模块悄悄补。
+    """
+    import os as _os
+    _here = _os.path.dirname(_os.path.abspath(__file__))
+    missing = {}
+    for _name in ("cardmix_store", "cardmix_habit"):
+        try:
+            _m = __import__(_name)
+        except Exception as _e:  # noqa: BLE001
+            raise ImportError("%s 导入失败：%s" % (_name, _e))
+        _miss = sorted(n for n in _free_globals(_os.path.join(_here, _name + ".py"))
+                       if not hasattr(_m, n))
+        if _miss:
+            missing[_name] = _miss
+    if missing:
+        raise ImportError(
+            "拆出去的方法有名字没自己 import，启动即失败（别再靠父模块注入）：%s"
+            % "; ".join("%s → %s" % (k, ", ".join(v)) for k, v in missing.items()))
+
+
+_check_mixin_globals()

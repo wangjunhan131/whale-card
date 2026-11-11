@@ -174,28 +174,34 @@ def restless(state, rng=None):
 # ------------------------------------------------------------------ 刺激
 # 每个事件：(交感增量, 副交感增量, 激素增量)
 # 激素增量很小 —— 一句话不该改掉三天的依恋。慢变量给 1~3，快变量给 5~15。
+# 2026-11-10：V7 第 23 件的行为测试抓出 6 个「推不动」的死变量
+# （adh / cck / gh / ofq / enk / testo），gonad 也弱到几乎没响应。
+# 它们不是没用，是从来没接过输入 —— 于是这里把可信的刺激接上去：
+#   被冷落/被拒绝 → adh（渴着等被找）；安抚/道歉 → ofq + enk（内源平静与愉悦）；
+#   夜里 → gh、收束 → cck；被逗/被指责/被挑战 → testo（竞争侧）。
+# 幅度都很小（慢变量还要再乘 0.4），一句话不该改掉三天的底色。
 STIMULI = {
     # 他夸我 / 逗我 / 亲近我
-    "praise":    (0.45, 0.0, {"dopa": 9, "nora": 6, "hist": 5, "sero": 2}),
-    "tease":     (0.35, 0.0, {"dopa": 6, "nora": 8, "hist": 6}),
-    "caress":    (0.55, 0.0, {"dopa": 10, "nora": 9, "oxy": 3, "gonad": 2}),
+    "praise":    (0.45, 0.0, {"dopa": 9, "nora": 6, "hist": 5, "sero": 2, "enk": 5, "ofq": 2}),
+    "tease":     (0.35, 0.0, {"dopa": 6, "nora": 8, "hist": 6, "testo": 5}),
+    "caress":    (0.55, 0.0, {"dopa": 10, "nora": 9, "oxy": 3, "gonad": 6, "enk": 8, "ofq": 4}),
     # 意外 / 受惊
     "surprise":  (0.75, 0.0, {"nora": 16, "cort": 5, "orex": 6}),
     # 他难过、我心疼
-    "worry":     (0.30, 0.0, {"prl": 10, "ach": 8, "cort": 4, "oxy": 2}),
+    "worry":     (0.30, 0.0, {"prl": 10, "ach": 8, "cort": 4, "oxy": 2, "ofq": 3}),
     # 被冷落 / 被指责 / 被拒绝
-    "cold":      (0.35, 0.0, {"cort": 8, "kyn": 6, "dopa": -6, "oxy": -2}),
-    "criticize": (0.50, 0.0, {"cort": 12, "nora": 10, "sero": -4, "dopa": -5}),
-    "reject":    (0.45, 0.0, {"cort": 14, "kyn": 9, "dopa": -9, "oxy": -3}),
+    "cold":      (0.35, 0.0, {"cort": 8, "kyn": 6, "dopa": -6, "oxy": -2, "adh": 6}),
+    "criticize": (0.50, 0.0, {"cort": 12, "nora": 10, "sero": -4, "dopa": -5, "testo": 5, "adh": 3}),
+    "reject":    (0.45, 0.0, {"cort": 14, "kyn": 9, "dopa": -9, "oxy": -3, "adh": 9, "testo": 3}),
     # 被安抚 / 他道歉
-    "comfort":   (0.0, 0.55, {"endo": 10, "dop": 6, "gaba": 8, "cort": -6, "npy": 5}),
-    "apology":   (0.0, 0.45, {"endo": 7, "oxy": 3, "cort": -5}),
+    "comfort":   (0.0, 0.55, {"endo": 10, "dop": 6, "gaba": 8, "cort": -6, "npy": 5, "ofq": 9, "enk": 6, "cck": 4, "gh": 3}),
+    "apology":   (0.0, 0.45, {"endo": 7, "oxy": 3, "cort": -5, "ofq": 4, "enk": 3}),
     # 普通聊天、深夜、无聊
     "chat":      (0.10, 0.05, {"dopa": 2, "sero": 1}),
-    "night":     (0.0, 0.20, {"mel": 8, "orex": -5, "adeno": 3}),
+    "night":     (0.0, 0.20, {"mel": 8, "orex": -5, "adeno": 3, "gh": 6, "cck": 3}),
     "boredom":   (0.0, 0.15, {"adeno": 6, "orex": -6, "nps": -4}),
     # 好奇、新东西
-    "curiosity": (0.25, 0.0, {"nps": 9, "ach": 6, "orex": 5, "dopa": 3}),
+    "curiosity": (0.25, 0.0, {"nps": 9, "ach": 6, "orex": 5, "dopa": 3, "testo": 3}),
 }
 
 

@@ -115,7 +115,9 @@ w32tm /resync
 python -m pip install -r requirements.txt
 
 # 2) 落地：写回卡外锚（按新路径哈希取名）+ 改卡内 anchor.json 的 db 字段
-python tools\portable.py land "D:\whale-card"
+#    --migrate = 同一张卡搬到这台机器（会把源盘标成「已迁出」）
+#    要分出一张新卡（不是同一个我）用 --fork；两个都不给会被拒绝（退出码 2）
+python tools\portable.py land "D:\whale-card" --migrate
 
 # 3) 【必须】交棒 —— 不做这步她是只读的
 python tools\portable.py handover "D:\whale-card"
