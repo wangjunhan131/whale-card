@@ -3432,6 +3432,19 @@ def _start_boot_check(mind, delay=6.0):
         chk("world_tick", lambda: bool(getattr(mind, "_world_tick_on", False)
                                        or float(getattr(mind, "_world_tick_last", 0) or 0) > 0))
         chk("readonly", lambda: bool(getattr(mind, "readonly", False)))
+        def _warm_embed():
+            # 第一笔写入 / 第一次召回要现加载语义模型：实测冷启动后第一笔写入排了 111 秒。
+            # 自检顺手热一次，别让用户第一句「记住」等在那儿。
+            _sem = getattr(mind, "semantic", None) or getattr(getattr(mind, "card", None), "semantic", None)
+            if _sem is None:
+                return "skip:no_semantic"
+            _t0 = time.time()
+            try:
+                _sem.encode("启动自检预热")
+            except Exception as e:
+                return "ERR:%s" % e
+            return int((time.time() - _t0) * 1000)
+        chk("embed_warm_ms", _warm_embed)
         rep["ok"] = (not rep["problems"]) and bool(rep["checks"].get("db_writable"))
         mind._boot = rep
         sys.stderr.write("[mind] 启动自检 %s：%s\n" % (
@@ -3859,6 +3872,29 @@ def main(argv=None):
         print("[mind] API token：%s（%s）" % (_tk[:8] + "…", _token_path(mind)))
     except Exception as _e:
         print("[mind] API token 生成失败：%s" % _e, file=sys.stderr)
+    # 只读自愈（2026-11-11）：kill 之后插件立刻拉起，旧心跳还没过期，
+    # 新进程抢不到租约就永久只读。旧 pid 一确定死掉，后台自己接手，不用再手动重启一次。
+    _rt_holder = locals().get("holder") or {"holder_id": str(getattr(mind, "lease_holder_id", "") or ""),
+                                            "pid": os.getpid()}
+    _rt_ttl = float(locals().get("_ttl") or 90.0)
+    if bool(getattr(mind, "readonly", False)) and str(getattr(mind, "readonly_reason", "")) == "lease_held":
+        def _lease_retry():
+            for _ in range(30):
+                time.sleep(20.0)
+                if not bool(getattr(mind, "readonly", False)):
+                    return
+                try:
+                    _r2 = _dk.acquire_lease(card_dir, _rt_holder, ttl=_rt_ttl)
+                except Exception as e:
+                    sys.stderr.write("[mind] 租约重试失败：%s\n" % e)
+                    continue
+                if _r2.get("ok"):
+                    mind.readonly = False
+                    mind.readonly_reason = ""
+                    sys.stderr.write("[mind] 旧写者已退出，本进程接管写权限（自动重试成功）\n")
+                    return
+        threading.Thread(target=_lease_retry, name="lease-retry", daemon=True).start()
+
     Handler.mind = mind
     st = mind.card.stats()
 

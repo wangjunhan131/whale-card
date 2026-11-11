@@ -393,9 +393,15 @@ class MixStore:
             if os.environ.get("WHALE_TEMPORA", "1") != "0":
                 # 两边都记：他说「明天要去学校」是约定，我说「明天帮你查」也是约定。
                 # subject 区分是谁许的，失约时才知道该谁难受。
-                self._tevent().add_plan(_plan_src, ts=at,
-                                        subject=(speaker or "user"),
-                                        source=(source or ""), importance=0.6)
+                _cancel = any(w in _plan_src for w in
+                              ("不去了", "取消了", "不开了", "不办了", "改天再说", "不来了", "算了不"))
+                if _cancel:
+                    # 「明天那事不去了」：把那条 pending 标 cancelled，而不是又记一条约定
+                    self._tevent().cancel(_plan_src, ts=at)
+                else:
+                    self._tevent().add_plan(_plan_src, ts=at,
+                                            subject=(speaker or "user"),
+                                            source=(source or ""), importance=0.6)
         except Exception as _te:
             soft_fail("tempora_plan", _te)
 

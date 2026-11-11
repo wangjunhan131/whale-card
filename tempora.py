@@ -330,8 +330,12 @@ def _topic_tokens(s):
         g = s[i:i + 2]
         if _TIME_TOK.search(g):
             continue
+        # 带标点/空白的二字片没有话题意义（「了，」「，我」这种），
+        # 早先就是它让「集合取消了」和一段不相关的话打平，取消了错的那条。
+        if re.search(r"[^\w\u4e00-\u9fff]", g):
+            continue
         out.add(g)
-    return out - {"的", "了", "我", "你", "，", "。", "是", "在"}
+    return out - {"的", "了", "我", "你", "是", "在", "就", "不"}
 
 
 def all_clock_windows(s, ts):
@@ -454,6 +458,30 @@ CREATE TABLE IF NOT EXISTS tstate (
 # 什么算「答应过的事」：有将来时间窗，并且句子里带承诺/约定/提醒的口气。
 _PLAN_HINTS = ("说好", "答应", "约好", "约了", "记得", "提醒", "别忘", "要", "得",
                "打算", "计划", "明天", "后天", "待会", "晚点", "下周", "月底")
+# 强口气（真在交代要做的事）vs 只是带着将来时间词（可能只是随口一问）
+_PLAN_STRONG = ("说好", "答应", "约好", "约了", "记得", "提醒", "别忘", "要", "得", "打算", "计划")
+
+
+def plan_intent(s):
+    """这句像不像「一件约定」，而不是一句闲问。
+
+    以前 `_PLAN_HINTS` 定义了却没人用，于是「今晚吃什么」也会写成一条 pending
+    约定，第二天到点还会来催你。这里补上判断：
+      - 带承诺/提醒口气（_PLAN_HINTS 任一）→ 算约定；
+      - 没这口气、又是个问句/选择题（问号、吗/什么/怎么/几/哪）→ 不记；
+      - 其它（「三点开会」「七点二十到校」）→ 照记，宁可多记也不漏。
+    """
+    s = (s or "").strip()
+    if not s:
+        return False
+    # 强承诺口气：有这几个词，基本就是在交代一件将来要做的事
+    if any(h in s for h in _PLAN_STRONG):
+        return True
+    # 只有时间词、又是个问句（「明天几点开会」）——那是打听，不是约定
+    if "?" in s or "？" in s or any(
+            w in s for w in ("什么", "怎么", "为啥", "吗", "几号", "几点", "哪", "是不是", "要不要")):
+        return False
+    return True
 
 
 def ensure(conn):
@@ -497,6 +525,8 @@ class EventStore(object):
         s = (text or "").strip()
         if not s or len(s) > 400:
             return None
+        if not plan_intent(s):
+            return None
         # 「要求 7:20 到，我 7:15 就到了」这种一句话两个钟点：
         # 第一个是约定、第二个是实际 —— 分开存，早晚差才有依据。
         actual_ts = 0.0
@@ -517,6 +547,42 @@ class EventStore(object):
              actual_ts))
         self.db.commit()
         return cur.lastrowid
+
+    def cancel(self, text=None, ts=None, note="取消"):
+        """把一条已经不作数的约定标成 cancelled（不是删掉，留痕才查得到）。
+
+        「明天那事不去了」这类话：按话题二字重合找最像的那条 pending，找不到
+        重合就只认「最近那一条」—— 宁可不动，也不要把别的约定取消掉。
+        """
+        ts = time.time() if ts is None else float(ts)
+        rows = self.db.execute(
+            "SELECT id, content, expect_time FROM tevent WHERE status='pending'"
+            " ORDER BY ABS(expect_time-?) LIMIT 8", (ts,)).fetchall()
+        if not rows:
+            return None
+        toks = _topic_tokens(text or "")
+        picked, best, second = None, 0, 0
+        if toks:
+            for rid, content, _e in rows:
+                ct = {content[i:i + 2] for i in range(len(content) - 1)}
+                ov = len(toks & ct)
+                if ov > best:
+                    best, second, picked = ov, best, rid
+                elif ov > second:
+                    second = ov
+            # 「画展不去了」只有「画展」一个重合，也得认；但不能跟别的约定打平
+            if best < 1 or (best == second and best < 2):
+                picked = None
+        if picked is None:
+            if toks:
+                return None          # 说了取消、但对不上是哪件事 —— 不动
+            picked = rows[0][0]      # 没给线索，就取消最近那条
+        self.db.execute(
+            "UPDATE tevent SET status='cancelled', closed_ts=?,"
+            " reason=COALESCE(NULLIF(reason,''),'') || ? WHERE id=?",
+            (ts, "  %s@%s" % (note, time.strftime("%m-%d %H:%M", time.localtime(ts))), picked))
+        self.db.commit()
+        return picked
 
     def note_actual(self, text, ts=None):
         """事后补一句「我几点到的」：结掉那条 pending 约定，记实际时刻与早晚差。
