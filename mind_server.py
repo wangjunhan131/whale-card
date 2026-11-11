@@ -44,6 +44,8 @@ for _k in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS",
            "NUMEXPR_NUM_THREADS", "VECLIB_MAXIMUM_THREADS"):
     _os_env.environ.setdefault(_k, "2")
 
+import time as _time_mod
+_T0PROC = _time_mod.time()          # 进程内第一行（用来量「从解释器起来到我能跑」）
 import argparse
 import atexit
 import json
@@ -3384,7 +3386,7 @@ def _node_info(mind):
     return info
 
 
-def _start_boot_check(mind, delay=6.0):
+def _start_boot_check(mind, delay=1.0):
     """启动自检（2026-11-11 稳定性）：起来几秒后自己走一遍「到底能不能用」。
 
     为什么放线程里、还等几秒：真卡启动要读舱、热模型，这阵子硬查只会把它拖慢。
@@ -3792,6 +3794,12 @@ def main(argv=None):
               file=sys.stderr)
         return 3
     srv.daemon_threads = True
+    _BTC0 = time.time()
+    def _bt(tag):
+        sys.stderr.write("[boot] %-12s %5.1fs (进程内 %5.1fs)\n"
+                         % (tag, time.time() - _BTC0, time.time() - _T0PROC))
+        sys.stderr.flush()
+    _bt("listen")
 
     # ===== V7 P0-4 写者租约：必须在开卡之前抢 =====
     # 为什么不能等 Mind(a.db) 之后：构造函数里就已经在写了
@@ -3835,7 +3843,9 @@ def main(argv=None):
         print("!" * 72)
         sys.stdout.flush()
 
+    _bt("lease")
     mind = Mind(a.db, lease=lease)
+    _bt("mind")
     _start_boot_check(mind)
     if perf is not None:
         try:
@@ -3879,8 +3889,10 @@ def main(argv=None):
     _rt_ttl = float(locals().get("_ttl") or 90.0)
     if bool(getattr(mind, "readonly", False)) and str(getattr(mind, "readonly_reason", "")) == "lease_held":
         def _lease_retry():
-            for _ in range(30):
-                time.sleep(20.0)
+            for _i in range(30):
+                # 2026-11-11：原来固定 20 秒一次，kill 后重启要白等一个心跳才从只读转可写；
+                # 前 2 分钟 5 秒一探（最可能是刚重启），之后回落到 20 秒。
+                time.sleep(5.0 if _i < 24 else 20.0)
                 if not bool(getattr(mind, "readonly", False)):
                     return
                 try:
@@ -3895,6 +3907,7 @@ def main(argv=None):
                     return
         threading.Thread(target=_lease_retry, name="lease-retry", daemon=True).start()
 
+    _bt("threads")
     Handler.mind = mind
     st = mind.card.stats()
 

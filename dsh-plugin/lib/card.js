@@ -17,6 +17,13 @@ export class CardClient {
     this.cardDir = config.cardDir || '';
     this.pythonPath = config.pythonPath || 'python';
     this.autoStart = config.autoStart !== false;
+    // 2026-11-11：以前只有在「真的有人来调工具」时才拉起服务 —— 刚开机那段窗口是死的，
+    // 没人叫就不起，用户看到的就是「卡在加载」。这里改成自愈：每 15 秒看一眼，
+    // 不在就拉起来（ensure() 内部有 _starting 去重，不会拉出第二个）。
+    if (this.autoStart && this.cardDir) {
+      const _t = setInterval(() => { this.ensure().catch(() => {}); }, 15000);
+      if (typeof _t.unref === 'function') _t.unref();
+    }
     this._starting = null;
     this.logger = config.logger || null;
   }
