@@ -302,18 +302,48 @@ def write(db_path=None, extra=None, force=False, throttle=30.0):
     else:
         db_label = db_path or DB_PATH
     db_label = os.path.abspath(db_label)
-    # 🔧 2026-11-11（真事故）：拿测试库跑压测的时候，live 卡的锚被写脏了一次 ——
-    # anchor.json 里的 `db` 变成了临时库路径、签名对不上，/health 直接报
-    # anchor_tampered。原因是「状态读的是哪张卡」和「锚写到哪个文件」
-    # 在极端路径下能对不上。这里加一条硬护栏：状态自己的 db 和要写的
-    # 锚标签不是一个文件的，绝不落盘（宁可这一轮不写锚，也不写错证据）。
-    if str(state.get("db") or "") and os.path.abspath(str(state["db"])) != db_label:
-        sys.stderr.write("[anchor] 拒绝写锚：状态来自 %s，锚标签是 %s\n"
-                         % (state.get("db"), db_label))
-        return None
 
     local, ext = _paths(db_path)
+    # 🔧 2026-11-11（真事故 + 事后复核）：拿测试库压测时 live 卡的锚被写脏过一次 ——
+    # anchor.json 的 `db` 变成临时库路径、签名对不上，/health 报 anchor_tampered。
+    # 当时加的护栏比的是 state["db"]，可是 _state_of() 根本不返回 db 键 ——
+    # 那条护栏一直在空转（文档 §11.2 记的就是这个）。现在改成比**现有锚绑的那张卡**
+    # 和这次要写的卡：不是同一张就绝不落盘（宁可这轮不写锚，也不写错证据）。
+    # 真的换卡/搬路径要重新绑锚：force=True，或环境变量 WHALE_ANCHOR_REBIND=1。
     best, _ = _best_anchor(local, ext)
+    _rebind = bool(force) or str(os.environ.get("WHALE_ANCHOR_REBIND") or "") == "1"
+    if isinstance(best, dict) and best.get("db") and not _rebind:
+        _prev_db = os.path.abspath(str(best["db"]))
+        if _prev_db != db_label:
+            # 换了路径 ≠ 换了卡：搬家后锚标签必然对不上，不能一律拒绝（拒绝就等于
+            # 新机器上永远不更新锚，回滚检测形同虚设）。只有**链本身对得上**才认作
+            # 「同一张卡搬了家」，自动重绑；链对不上才真的拒绝 —— 那才是换卡/被替换。
+            _same_chain = False
+            try:
+                _bseq = int(best.get("head_seq") or 0)
+                _bhash = str(best.get("head_hash") or "")
+                _c = (db_path if isinstance(db_path, sqlite3.Connection) else None)
+                _own = _c is None
+                if _c is None:
+                    _c = sqlite3.connect(db_label)
+                _r = _c.execute("SELECT self_hash FROM timeline WHERE seq=?",
+                                (_bseq,)).fetchone()
+                _same_chain = bool(_bhash) and _r is not None and str(_r[0]) == _bhash
+                if _own:
+                    _c.close()
+            except Exception as _e:
+                _same_chain = False
+            if _same_chain:
+                sys.stderr.write(
+                    "[anchor] 锚随卡搬家：%s → %s（链头 %s@%d 对得上，自动重绑）\n"
+                    % (_prev_db, db_label, str(best.get("head_hash") or "")[:10],
+                       int(best.get("head_seq") or 0)))
+            else:
+                sys.stderr.write(
+                    "[anchor] 拒绝写锚：现有锚绑的是 %s，这次要写的是 %s，"
+                    "且链头对不上（换卡/搬路径要重新绑锚：WHALE_ANCHOR_REBIND=1 或 force=True）\n"
+                    % (_prev_db, db_label))
+                return None
     if best is not None and not force:
         if state["count"] < int(best.get("count") or 0):
             raise RuntimeError(
