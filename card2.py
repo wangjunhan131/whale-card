@@ -142,7 +142,8 @@ WARM_LONG_DAYS = 2            # 中期小池 → 长期：2 天、7 次（2026-1
 #    ③ 桌子做大 + 腾位置时不销毁内容（见 _consolidate 里那条改动）= 两头都保住。
 #    32 是「一次对话能同时想到几件事」的量级，但加上值守自动记群消息之后，
 #    一天轻松几十上百条，32 几乎天天溢——溢出就删，等于把池子当坟场用。
-N_SHORT_MAX = 120
+# N_SHORT_MAX 曾是短期池条数上限，V5.4 起不生效（`_evict_short_overflow` 已停用），
+# 全仓库无引用；短期池现在只有时间窗（cardcfg.SHORT_MAX_TTL）。2026-11-11 删掉以免误读。
 
 # --- SessionCache 双回流（V3.7 §9 / V5.0 T1-4）---
 # 每攒够这么多轮，就把本轮聊到过、但没被 recall 命中的旧记忆记一条弱事件。
@@ -5495,6 +5496,11 @@ class MemoryCard(MixHabit, MixStore):
         舱只是粗筛（有全库兜底），旧的照样能用，所以：有旧舱就丢后台建一次，
         从没建过（冷启动）才同步建。
         """
+        if not POD_ENABLED:
+            # 2026-11-11：舱从 V7 起默认关（POD_ENABLED=False），但这里以前不看开关，
+            # 于是每次写稿/说话都在后台重建一遍、还写 cache/pods.json —— 白烧 CPU 和 IO。
+            # 想重开就把 POD_ENABLED 改 True，这条会自动恢复。
+            return
         if not self._pods_stale():
             return
         has_old = getattr(self, "_pod_centroids", None) is not None

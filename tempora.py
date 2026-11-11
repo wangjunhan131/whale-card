@@ -241,11 +241,20 @@ def _clock_window(s, ts):
 
     period = ""
     day_carry = 0
+    # 「明早8点」「今早七点」这种：时段字不是「早上/上午」，而是粘在「明/今」后面，
+    # 以前认不出来就按「最近的将来」猜成晚上 20:00（用户 11-11 实测踩到）。
+    _hint_am = any(w in s for w in ("明早", "今早", "明晨", "清早", "一早"))
+    _hint_pm = any(w in s for w in ("明晚", "今晚", "今夜"))
     day_is_evening = any(w in s for w in ("晚上", "夜里", "夜间", "今晚", "明晚"))
     for word, kind in _PERIOD_HOUR:
         if word in s:
             period = kind
             break
+    if not period:
+        if _hint_am:
+            period = "am"
+        elif _hint_pm:
+            period = "pm"
 
     # 上下午：有明确时段词就听它的；没有就按「现在」猜最近的那个，并标出来
     flags = []
@@ -336,6 +345,20 @@ def _topic_tokens(s):
             continue
         out.add(g)
     return out - {"的", "了", "我", "你", "是", "在", "就", "不"}
+
+def _snap_clock_to_day(hh, mi, base):
+    """把「说出的钟点」贴到 base 那一天：±1 天 × {hh, hh±12} 里取离 base 最近的。
+
+    「7点28到的」看不出上午还是晚上，硬猜会算出早到 11 小时；贴到约定那天、
+    再在上下午两个候选里挑最贴的那个，才符合人说话的默认前提。
+    """
+    ed = _day_start(float(base))
+    cands = []
+    for h in (hh, hh + 12 if hh < 12 else hh - 12):
+        for dd in (-1, 0, 1):
+            cands.append(ed + dd * DAY + h * 3600 + mi * 60)
+    return min(cands, key=lambda x: abs(x - float(base)))
+
 
 
 def all_clock_windows(s, ts):
@@ -474,13 +497,20 @@ def plan_intent(s):
     s = (s or "").strip()
     if not s:
         return False
+    # ⚠️ 顺序要紧（2026-11-11 修）：以前先看强口气，而 _PLAN_STRONG 里有「要」，
+    # 于是「明天要不要一起去」命中「要」直接算约定，问句判断根本没轮到 ——
+    # 结果第二天到点真去催人家。问句和含糊话必须先排掉。
+    if "?" in s or "？" in s or any(
+            w in s for w in ("什么", "怎么", "为啥", "吗", "几号", "几点",
+                             "哪", "是不是", "要不要", "多久")):
+        return False
+    # 没定下来的口气（「待会儿再说」「看看吧」）也不是约定
+    if any(w in s for w in ("再说", "看看吧", "看看再说", "看情况", "不确定",
+                            "到时候", "随便", "不知道")):
+        return False
     # 强承诺口气：有这几个词，基本就是在交代一件将来要做的事
     if any(h in s for h in _PLAN_STRONG):
         return True
-    # 只有时间词、又是个问句（「明天几点开会」）——那是打听，不是约定
-    if "?" in s or "？" in s or any(
-            w in s for w in ("什么", "怎么", "为啥", "吗", "几号", "几点", "哪", "是不是", "要不要")):
-        return False
     return True
 
 
@@ -533,7 +563,8 @@ class EventStore(object):
         note = ""
         wins = all_clock_windows(s, ts)
         if len(wins) >= 2:
-            actual_ts = float(wins[1]["base"])
+            _w1 = time.localtime(float(wins[1]["base"]))
+            actual_ts = _snap_clock_to_day(_w1.tm_hour, _w1.tm_min, float(w["base"]))
             delta = int(round((actual_ts - float(w["base"])) / 60.0))
             note = "  实际比约定%s %d 分" % ("晚" if delta > 0 else "早", abs(delta))
         cur = self.db.execute(
@@ -560,18 +591,27 @@ class EventStore(object):
             " ORDER BY ABS(expect_time-?) LIMIT 8", (ts,)).fetchall()
         if not rows:
             return None
-        toks = _topic_tokens(text or "")
+        # ⚠️ 2026-11-11 修：以前这里用原文切二字片比，而约定那边用的是
+        # _topic_tokens()（剔过时间片）。同一天两条约定必然都含「明天」→ 打平 → 一律不动，
+        # 于是「一天两件事」时取消基本失效。现在两边都用话题词，取消口气自己那几个词
+        # （不去/去了/取消…）也剔掉；真打平了不判死，取「离现在最近」的那条。
+        toks = _topic_tokens(text or "") - {"不去", "去了", "取消", "不了", "算了", "改成", "改了"}
         picked, best, second = None, 0, 0
+        best_near = None
         if toks:
-            for rid, content, _e in rows:
-                ct = {content[i:i + 2] for i in range(len(content) - 1)}
+            for rid, content, e0 in rows:
+                ct = _topic_tokens(content)
                 ov = len(toks & ct)
+                near = abs(float(e0) - float(ts))
                 if ov > best:
-                    best, second, picked = ov, best, rid
+                    best, second, picked, best_near = ov, best, rid, near
+                elif ov == best and best > 0:
+                    # 打平：谁离现在更近就是谁（「明天不去了」指的是最近那件）
+                    if best_near is None or near < best_near:
+                        second, picked, best_near = best, rid, near
                 elif ov > second:
                     second = ov
-            # 「画展不去了」只有「画展」一个重合，也得认；但不能跟别的约定打平
-            if best < 1 or (best == second and best < 2):
+            if best < 1:
                 picked = None
         if picked is None:
             if toks:
@@ -618,12 +658,7 @@ class EventStore(object):
                 base = float(json.loads(meta or "{}").get("base") or e0)
             except Exception:
                 base = e
-            ed = _day_start(e)
-            cands = []
-            for h in (hh, hh + 12 if hh < 12 else hh - 12):
-                for dd in (-1, 0, 1):
-                    cands.append(ed + dd * DAY + h * 3600 + mi * 60)
-            act = min(cands, key=lambda x: abs(x - base))
+            act = _snap_clock_to_day(hh, mi, base)
             near = abs(act - base)
             if near > 18 * 3600:
                 continue

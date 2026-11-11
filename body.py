@@ -224,6 +224,30 @@ MOOD_NEUTRAL = 0.50     # 心境零点：0.5 是不悲不喜
 
 K_MOOD_HOME = 0.10      # 每「一天」往 0.5 回 10%（.05 时追不上白天的推动）
 
+_NEG_CUES = ("不", "没", "别", "哪有", "没有", "并不", "毫无", "不太")
+
+
+def _signed_hits(text, words):
+    """数命中，并返回「被否定词翻掉」的个数。
+
+    只在命中词**前面 6 个字**内找否定词：「今天不开心」翻，
+    「不开心的事都过去了，现在很开心」只翻前面那个。
+    """
+    hits, flipped = 0, 0
+    for w in words:
+        start = 0
+        while True:
+            i = text.find(w, start)
+            if i < 0:
+                break
+            start = i + 1
+            hits += 1
+            ctx = text[max(0, i - 6):i]
+            if any(c in ctx for c in _NEG_CUES):
+                flipped += 1
+    return hits, flipped
+
+
 def mood_of_event(text, emotion=0.25):
     """把一次事件折算成效价 E_event ∈ [0,1]
 
@@ -256,8 +280,16 @@ def mood_of_event(text, emotion=0.25):
                  "爽", "好耶", "考好", "赢了", "喜欢", "真好", "厉害", "不错",
                  "哈哈", "嘿嘿", "太好了", "棒", "可爱", "温柔", "谢谢", "辛苦",
                  "爱你", "想你", "抱抱", "好玩", "有趣")
-    neg_hits = sum(1 for w in NEG_WORDS if w in text)
-    pos_hits = sum(1 for w in POS_WORDS if w in text)
+    # ⚠️ 2026-11-11 修：以前纯子串命中，没有极性判断 ——
+    # 「今天很开心」和「今天不开心」拿到完全相同的 0.71945，「不难过」还被当成负面。
+    # 现在命中词前面 6 个字里有否定词就翻方向。
+    pos_hits, pos_flip = _signed_hits(text, POS_WORDS)
+    neg_hits, neg_flip = _signed_hits(text, NEG_WORDS)
+    # 翻过去要两头动：命中的那个不算了，对面 +1
+    pos_hits -= pos_flip
+    neg_hits -= neg_flip
+    neg_hits += pos_flip     # 被否定的正面词（不开心）→ 算负面
+    pos_hits += neg_flip     # 被否定的负面词（不难过）→ 算正面
     pos = up + pos_hits
     neg = dn + neg_hits
     if pos == 0 and neg == 0:
