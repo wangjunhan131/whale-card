@@ -88,7 +88,7 @@ def snapshot_db(card_root, target, log=print):
 
 # 服务在跑的时候这几样**必然会变**：检查点由后台线程刷新，card.db 由 WAL 追加。
 # 它们的 sha 不可能在「镜像 → 校验」这个窗口里稳定，所以校验时按易变文件对待。
-VOLATILE = {"checkpoints/LATEST.json", "card.db"}
+VOLATILE = {"checkpoints/LATEST.json", "card.db", "anchor.json", "anchor.carried.json"}
 
 
 def refresh_and_sign(card_root, target, log=print):
