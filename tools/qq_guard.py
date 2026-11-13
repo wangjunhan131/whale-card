@@ -83,7 +83,7 @@ PIDF = os.path.join(STATE, "guard.pid")
 SEEN_F = os.path.join(STATE, "seen.json")
 STATUS_F = os.path.join(STATE, "status.json")
 
-SELF_ID = 100000001
+SELF_ID = 3856573937   # 2026-11-12 换号：颛虚（旧号 100000001 已弃）
 
 # 消息状态：unreplied（还没回）/ replied（回过了）
 # 老系统用 replied.txt 记 message_id，这里换成 status.json，

@@ -275,6 +275,25 @@ def main(argv=None):
         print("    本机旧卡还在：%s" % os.path.basename(bak))
         return 1
 
+    section("4.5", "把清单与锚对齐（不然 verify 会说包不一致）")
+    _man = os.path.join(ROOT, "PORTABLE-MANIFEST.json")
+    if not os.path.exists(_man):
+        print("  本机没有随身清单（清单只在带走的盘上），这步不需要做")
+    else:
+        try:
+            import carry as _carry
+            info = _carry.refresh_and_sign(ROOT, ROOT, log=lambda m: print("  " + m))
+            print("  清单：新增 %d / 刷新 %d"
+                  % (len(info.get("added", [])), len(info.get("changed", []))))
+        except Exception as e:
+            print("  ⚠ 清单对齐失败（不影响数据，但下次 verify 会报）：%s" % e)
+    try:
+        import anchor as _anchor
+        _anchor.write(os.path.join(ROOT, "card.db"), force=True, throttle=0.0)
+        print("  锚：按接回来的这份重写（head_seq/count 跟着走）")
+    except Exception as e:
+        print("  ⚠ 锚没写成功：%s" % e)
+
     section(5, "换人上岗：本机可写，U 盘只读")
     try:
         import disks as _dk

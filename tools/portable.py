@@ -39,10 +39,14 @@ MANIFEST = "PORTABLE-MANIFEST.json"
 WHEREAMI = "WHEREAMI.json"
 
 # 跟着卡走的东西：目录 / 文件 / 通配
-INCLUDE_DIRS = ["models", "media", "snapshots", "dsh-plugin"]   # dsh-plugin：新机器装 DSH 后靠它接上
-INCLUDE_FILES = ["card.db", "anchor.json", "cardslot.state.json",
+INCLUDE_DIRS = ["models", "media", "snapshots", "dsh-plugin", "checkpoints", "runtime"]   # dsh-plugin：新机器装 DSH 后靠它接上
+INCLUDE_FILES = ["card.db", "anchor.json", "anchor.key", "cardslot.state.json",
                  "dsh_channel_rule.txt", "requirements.txt", "README.md",
                  "启动控制台.bat", "一键落地.bat", "接入DSH.bat",
+                 # 2026-11-13 补：随身卡的三件套 ——
+                 #   带卡出门（镜像到盘 + 本机退役）、一键部署（新机器上叫醒）、
+                 #   接回来（旧机器重新上岗）。少一个，流程就断在半路。
+                 "带卡出门.bat", "一键部署.bat", "接回来.bat",
                  # 2026-11-06 补：这两样以前不在包里 ——
                  #   chat_cfg.json 是她那 30 项说话参数（接话频率、上学时段、拆句开关…），
                  #   丢了等于搬到新家变成一个陌生人，设回默认值；
@@ -51,7 +55,7 @@ INCLUDE_FILES = ["card.db", "anchor.json", "cardslot.state.json",
 INCLUDE_GLOBS = ["*.py", "docs/*.md", "tools/*.py", "tests/test_*.py",
                  "diary/*.md", "qq_state/chat_cfg.json"]
 # 明确不带走的：运行期垃圾、临时、以及"搬过去也没意义"的
-EXCLUDE_DIRS = ["__pycache__", "_trash", "_diag_archive", ".git", "runtime",
+EXCLUDE_DIRS = ["__pycache__", "_trash", "_diag_archive", ".git",
                 "_portable", "backups"]
 EXCLUDE_SUFFIX = [".pyc", ".log", ".tmp"]
 

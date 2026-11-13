@@ -4,12 +4,6 @@
 想调性格，只改这个文件即可，不用碰 engine.py。
 """
 
-import os
-
-# 2026-11-10 情绪起伏改造的开关（默认全开；设 0 回到改造前的旧值）
-_EXPECT_ON = os.environ.get("WHALE_EXPECT_RESET", "1") != "0"   # 预期学习率 + 预期夹取
-_GATE_ON = os.environ.get("WHALE_GATE", "1") != "0"             # 安全感 gate 区间
-
 DEFAULTS = {
     # ========== 1. 五个调质的静态基线（长期性格底色） ==========
     "baseline": {
@@ -65,9 +59,8 @@ DEFAULTS = {
     # RPE 到"情绪体感"的放大倍数：学习用原始 RPE，情绪反应用放大后的 RPE
     # 真人被一句意外温柔击中的强度，远大于 0.1 的数值差，这个系数负责补足
     "rpe_gain": 1.75,
-    # env WHALE_EXPECT_RESET=0 → 回到 0.16 / 0.035（RPE 很快被 TD 学没）
-    "td_alpha": 0.05 if _EXPECT_ON else 0.16,          # 单个场景预期的学习率
-    "td_alpha_global": 0.012 if _EXPECT_ON else 0.035, # 全局预期的学习率
+    "td_alpha": 0.16,          # 单个场景预期的学习率
+    "td_alpha_global": 0.035,  # 全局预期的学习率
     "adapt_strength": 0.55,    # 同一场景重复刺激的脉冲衰减强度
     "adapt_floor": 0.22,       # 脉冲最低保留比例（不会完全不再心动）
 
@@ -98,12 +91,11 @@ DEFAULTS = {
     },
 
     # ========== 10. 安全评估 ==========
-    # env WHALE_GATE=0 → 回到 0.35/0.75（target 下限 ~.74 会把它长期顶在 .95+）
     "safety": {
         "up_rate": 0.30,     # 回暖速度
         "down_rate": 0.70,   # 崩塌速度（不安全来得快）
-        "gate_lo": 0.55 if _GATE_ON else 0.35,     # 低于此值亲密通路完全关闭
-        "gate_hi": 0.90 if _GATE_ON else 0.75,     # 高于此值亲密通路全开
+        "gate_lo": 0.35,     # 低于此值亲密通路完全关闭
+        "gate_hi": 0.75,     # 高于此值亲密通路全开
     },
 
     # ========== 11. 情绪分类的阈值 ==========
@@ -111,13 +103,6 @@ DEFAULTS = {
         "min_score": 0.30,      # 主导情绪最低分
         "secondary_ratio": 0.72 # 次情绪需达到主导的多少比例
     },
-
-    # ========== 12. 预期（expect）的夹取范围与初值 ==========
-    # 夹窄一点，RPE 才不会因为预期被学到极端而永久消失
-    # env WHALE_EXPECT_RESET=0 → 旧范围 [.05,.95] / [.10,.90]，初值 .52
-    "expect_init": 0.50 if _EXPECT_ON else 0.52,
-    "expect_bounds": (0.35, 0.68) if _EXPECT_ON else (0.05, 0.95),
-    "expect_global_bounds": (0.35, 0.68) if _EXPECT_ON else (0.10, 0.90),
 }
 
 # 情绪中文标签（对外只输出这些词，绝不输出激素名）

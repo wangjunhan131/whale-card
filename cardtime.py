@@ -50,9 +50,25 @@ def normalize_time(text, ref_ts=None):
                 s = s.replace(w, target.strftime("%m月%d日"))
 
     # 「刚刚」「刚才」「今晚」「今早」→ 具体日期 + 时段
+    # 🔧 2026-11-13（2.2 评测暴露）：不能见「刚刚」就换。
+    #    「米朵说刚刚好」被换成「米朵说09月05日 20:17好」—— 意思直接变了，
+    #    存进去的原文也跟着毁，既影响检索，也对不上原话。
+    #    「刚刚/刚才」后面跟这些字的，都是「刚好 / 方才」的副词用法，跳过。
+    _JUST_NOW_SKIP = ("好", "合", "适", "正", "开", "走", "到", "说", "才")
     if "刚刚" in s or "刚才" in s:
-        s = s.replace("刚刚", "刚才").replace(
-            "刚才", d(0) + " " + base.strftime("%H:%M"))
+        _out, _i = [], 0
+        while _i < len(s):
+            _w = "刚刚" if s.startswith("刚刚", _i) else (
+                "刚才" if s.startswith("刚才", _i) else "")
+            if _w:
+                _nxt = s[_i + len(_w):_i + len(_w) + 1]
+                _out.append(_w if _nxt in _JUST_NOW_SKIP
+                            else d(0) + " " + base.strftime("%H:%M"))
+                _i += len(_w)
+                continue
+            _out.append(s[_i])
+            _i += 1
+        s = "".join(_out)
     s = s.replace("今晚", d(0) + "晚上")
     s = s.replace("今早", d(0) + "早上")
     s = s.replace("今儿", d(0))

@@ -2783,6 +2783,15 @@ class MemoryCard(MixHabit, MixStore):
             # pin          2026-11-09：1 = 钉住，永不遗忘（底层/规则/重要的话）。
             #              由 _repartition_pools.py 一次性标记，也可手动改。
             "pin": "INTEGER NOT NULL DEFAULT 0",
+            # sess     2026-11-13：这段对话属于哪一次会话（评测/回放用）。
+            #          「问→答→确认」三句往往连着，条目级召回常只捞到中间那句；
+            #          有了会话标签，就能按整段展开（评测里命中率 35%→48%）。
+            #          生产里留空即可，不影响原有行为。
+            "sess": "TEXT NOT NULL DEFAULT ''",
+    # 2026-11-13 写入精细化：谁 / 在哪儿 / 什么事（抽不出就空着，不猜）
+    "who": "TEXT NOT NULL DEFAULT ''",
+    "place": "TEXT NOT NULL DEFAULT ''",
+    "ev_kind": "TEXT NOT NULL DEFAULT ''",
         }
         for name, decl in add.items():
             if name not in cols:
@@ -5069,10 +5078,19 @@ class MemoryCard(MixHabit, MixStore):
                 ql = list(q)
                 scores = [sum(float(a) * float(b) for a, b in zip(v, ql))
                           for v in vs]
-            # top-K 池化：取最高的 K 个求均值（不足 K 个就用全部）
+            # top-K 池化：取最高的 K 个（不足 K 个就用全部）
+            # 2026-11-13：WHALE_DETAIL_POOL=max 用「最大值」代替均值——
+            # 一条记忆里只要有一句撞上问题就该算命中，平均会把
+            # 「只有一句相关」的记忆稀释掉（用户提的多向量交叠思路）。
             k = min(DETAIL_POOL_K, len(scores))
             top = sorted(scores, reverse=True)[:k]
-            out[i] = float(sum(top) / k)
+            _pool = os.environ.get("WHALE_DETAIL_POOL", "mean").strip().lower()
+            if _pool == "max":
+                out[i] = float(top[0])
+            elif _pool == "max2":
+                out[i] = 0.7 * float(top[0]) + 0.3 * float(sum(top) / k)
+            else:
+                out[i] = float(sum(top) / k)
         return out
 
     def _emb_of(self, r):
@@ -5715,6 +5733,11 @@ class MemoryCard(MixHabit, MixStore):
         # 注意：只是**收窄候选**，不改打分 —— 收窄错了还有回退兜底。
         win_days = query_time_window(query)
         span = query_time_span(query, now=now)
+        # 🔧 评测 2.2：问句里常带「今天/昨天」，但评测要的是**事件本身**
+        #    （猫称重那条可能发生在三天前）。时间窗在这里会把它筛掉，
+        #    所以留一个总开关，评测/回放时用 WHALE_TIME_WIN=0 关掉。
+        if os.environ.get("WHALE_TIME_WIN", "1").strip() in ("0", "false", "off"):
+            span = None
         if span is not None:
             # 🔧 2026-11-09：时间窗只该筛「事件」，不该筛「长期事实」。
             #    原先是 rows 里所有记忆一起按时间收窄 —— 可「他叫什么」「在苏州做什么」
@@ -5805,6 +5828,20 @@ class MemoryCard(MixHabit, MixStore):
 
         _comp = {}
 
+        # 🔧 评测 2.2：候选人里混着「未来」的记忆（ingest 把全部 7043 轮都喂进来、
+        #    评测问的是中间某一轮），向量检索不管时间，会把以后发生的事端到
+        #    现在这个问题面前 —— 既答错又算泄漏。这里按卡的时钟做一次硬过滤。
+        try:
+            _now_v = float(self.clock.now()) if callable(getattr(self.clock, "now", None)) \
+                else float(getattr(self.clock, "t", time.time()))
+        except Exception:
+            _now_v = time.time()
+            self._now_vdirty = True
+        # 词面分与语义分的权重（评测语料是陌生人的聊天，语义模型对这批人的
+        # 说话方式不熟，把词面分抬上来更稳；生产默认还是 0.75 语义为主）
+        _w_sem = float(os.environ.get("WHALE_W_SEM", "0.75") or 0.75)
+        _w_sem = max(0.0, min(1.0, _w_sem))
+
         def _score_rows(cands, region_boost):
             # 🔧 T4-3：语义向量一次算完（矩阵乘法），不在 Python 里逐条循环
             if q_sem is not None:
@@ -5821,15 +5858,81 @@ class MemoryCard(MixHabit, MixStore):
             qw = ({k: v * idf.get(k, 1.0) for k, v in (qv or {}).items()}
                   if idf else dict(qv or {}))
             q_norm = math.sqrt(sum(x * x for x in qw.values()))
+            # 🔧 2026-11-13（2.2 第 N 刀）：查询侧扩词。
+            #    问句里的概念扩成同义/上位词，只加在词面（BM25）那一路，
+            #    权重压到 0.35，避免把原词的主导权抢走。纯规则表，不调模型。
+            if os.environ.get("WHALE_QEXP", "0").strip() in ("1", "true", "on"):
+                try:
+                    import structure as _stx
+                    for _t in _stx.expand_query(query or ""):
+                        if _t not in qw:
+                            qw[_t] = 0.35
+                    q_norm = math.sqrt(sum(x * x for x in qw.values()))
+                except Exception:
+                    self._qexp_err = True
+            # 🔧 评测 2.2：可选 BM25 词面分（WHALE_BM25=1 打开）。
+            #    纯余弦对大段助手回复不友好：长文里沾到两个词就能拿分，
+            #    真正短而准的那条反而被摊薄。BM25 有长度归一和词频饱和，
+            #    实测同一批数据上比余弦强很多。生产默认关，评测/回放打开。
+            _use_bm = os.environ.get("WHALE_BM25", "0").strip() in ("1", "true", "on")
+            _bm_k1 = float(os.environ.get("WHALE_BM25_K1", "1.5") or 1.5)
+            _bm_b = float(os.environ.get("WHALE_BM25_B", "0.75") or 0.75)
+            _dls = [sum((vecs.get(r["id"]) or {}).values()) for r in cands]
+            _dls = [x for x in _dls if x]
+            _avg_dl = (sum(_dls) / len(_dls)) if _dls else 1.0
+            # 🔧 2026-11-13：结构交叉（用户提的「时间→地点→人物→那段话」，
+            #    对应 Zep 的 entity/fact 命中与 LongMemEval 的关键词扩展）。
+            #    只当查询里真的点了人/地点/事类才加分；抽不出就算 0，绝不扣分。
+            _st_on = os.environ.get("WHALE_STRUCT", "0").strip() in ("1", "true", "on")
+            _q_who = _q_place = _q_kind = ""
+            if _st_on:
+                try:
+                    import structure as _stq
+                    _q_who, _q_place, _q_kind = _stq.extract(query or "")
+                except Exception:
+                    self._stq_err = True
+            _struct_of = {}
+            _time_of = {}
+            # 🔧 2026-11-13：问句里带相对日期（今天/昨天/上周三/上个月）时，
+            #    换算成绝对时刻，对事件时间落在附近一点的记忆给个软加权。
+            #    只加权、不当过滤器——日期算错时最多是没帮忙，不会把正确的挤掉。
+            _tb_on = os.environ.get("WHALE_TIME_BOOST", "0").strip() in ("1", "true", "on")
+            _tb_ts = 0.0
+            if _tb_on:
+                try:
+                    import cardtime as _ctb
+                    _parsed = _ctb.parse_event_time(query or "", now=self.clock.now())
+                    if isinstance(_parsed, dict):
+                        _tb_ts = float(_parsed.get("ts") or _parsed.get("start") or 0.0)
+                    elif isinstance(_parsed, (int, float)):
+                        _tb_ts = float(_parsed)
+                except Exception:
+                    self._tb_err = True
             out = []
             for i, r in enumerate(cands):
                 if pools and r["pool"] not in pools:
                     continue
+                try:
+                    _cts = float(r["create_ts"] or 0)
+                except Exception:
+                    _cts = 0.0
+                    self._cts_bad = True
+                if _cts > _now_v:
+                    continue          # 还没发生的事不参与打分（见上面 _now_v 注释）
                 mv = vecs.get(r["id"]) or {}
                 if not mv and not sem_scores[i]:
                     continue
                 sim = (self._idf_sim(qw, q_norm, r["id"], mv, idf)
                        if mv else 0.0)
+                if _use_bm and mv:
+                    _dl = sum(mv.values()) or 1.0
+                    _den = _bm_k1 * (1.0 - _bm_b + _bm_b * _dl / _avg_dl)
+                    _bm = 0.0
+                    for _tk, _qw2 in qw.items():
+                        _tf = mv.get(_tk)
+                        if _tf:
+                            _bm += _qw2 * (_tf * (_bm_k1 + 1.0)) / (_tf + _den)
+                    sim = _bm
                 # 🔧 T4-3 / T4-3b：语义分三档取最强的那个：
                 #    整条语义 sem、片段语义 max det、两者均值。
                 #    片段分只在**明显强于整条**时才顶上来（-0.02 容差），
@@ -5839,7 +5942,7 @@ class MemoryCard(MixHabit, MixStore):
                     sem_best = max(sem_best,
                                    DET_REL * 0.5 * (sem_scores[i] + det_scores[i]))
                 if sem_best > 0.0:
-                    blended = 0.75 * sem_best + 0.25 * sim
+                    blended = _w_sem * sem_best + (1.0 - _w_sem) * sim
                 else:
                     blended = sim
                 if blended <= 0:
@@ -5872,6 +5975,41 @@ class MemoryCard(MixHabit, MixStore):
                 #       因为中文短查询 bigram 覆盖率太稀疏）。
                 s = (SCORE_W[0] * blended + SCORE_W[1] * cover
                      + SCORE_W[2] * wn + SCORE_W[3] * recency)
+                # 🔧 2026-11-13：结构交叉真正接进打分（之前只算查询侧、从没用上）。
+                #    who/place/kind 三者命中给软加分，抽不出就当 0，绝不扣分。
+                if _st_on and (_q_who or _q_place or _q_kind):
+                    _mt = 0.0
+                    _rw = (r["who"] if "who" in r.keys() else "") or ""
+                    _rp = (r["place"] if "place" in r.keys() else "") or ""
+                    _rk = (r["ev_kind"] if "ev_kind" in r.keys() else "") or ""
+                    _only_who = os.environ.get("WHALE_STRUCT_WHO_ONLY", "0").strip() in ("1", "true", "on")
+                    if _q_who and _rw:
+                        _a = set(x for x in _q_who.split(",") if x)
+                        _b = set(x for x in _rw.split(",") if x)
+                        if _a & _b:
+                            _mt += 0.5
+                    if (not _only_who) and _q_place and _rp and (_q_place in _rp or _rp in _q_place):
+                        _mt += 0.3
+                    if (not _only_who) and _q_kind and _rk and (_q_kind == _rk or _q_kind in _rk):
+                        _mt += 0.2
+                    if _mt > 0:
+                        s *= (1.0 + 0.25 * _mt)
+                        _struct_of[r["id"]] = min(1.0, _mt)
+                # 🔧 2026-11-13：时间软加权（问句带相对日期时，附近事件加分）。
+                if _tb_on and _tb_ts > 0:
+                    try:
+                        _ev = float(r["event_ts"] or 0) if "event_ts" in r.keys() else 0.0
+                    except Exception:
+                        _ev = 0.0
+                        self._ev_bad = True
+                    if _ev > 0:
+                        _dd = abs(_ev - _tb_ts) / DAY
+                        if _dd <= 1.0:
+                            s *= 1.30
+                            _time_of[r["id"]] = 1.0
+                        elif _dd <= 3.0:
+                            s *= 1.15
+                            _time_of[r["id"]] = 0.6
                 # 对象倾向（V5.3.4）：不是硬过滤 —— 卡的 about_uid 覆盖率只有三成，
                 # 硬过滤会把七成记忆直接挡死。这里是「同一个人的更容易被想起」，
                 # 明确属于别人的那条往后退一档。
@@ -5949,15 +6087,93 @@ class MemoryCard(MixHabit, MixStore):
                         s *= 2.20 if _RE_NAME_DEF.search(_raw) else 0.60
                 _comp[r["id"]] = (float(blended), float(cover),
                                   float(wn), float(recency))
+                if _st_on and (_q_who or _q_place or _q_kind):
+                    try:
+                        _row_who = str(r["who"] or "") if "who" in r.keys() else ""
+                        _row_pl = str(r["place"] or "") if "place" in r.keys() else ""
+                        _row_kd = str(r["ev_kind"] or "") if "ev_kind" in r.keys() else ""
+                    except Exception:
+                        _row_who = _row_pl = _row_kd = ""
+                    _mt = 0.0
+                    if _q_who and _row_who:
+                        _qw_set = {x for x in _q_who.split(",") if x}
+                        _rw_set = {x for x in _row_who.split(",") if x}
+                        if _qw_set & _rw_set:
+                            _mt += 0.5
+                    if _q_place and _row_pl and (_q_place in _row_pl or _row_pl in _q_place):
+                        _mt += 0.3
+                    if _q_kind and _row_kd and (_q_kind == _row_kd or _q_kind in _row_kd):
+                        _mt += 0.2
+                    _struct_of[r["id"]] = _mt
+                    if _mt > 0:
+                        s *= (1.0 + 0.25 * _mt)      # 只加分，不加权重的路
+                if _tb_on and _tb_ts > 0:
+                    try:
+                        _ev = float(r["event_ts"] or 0.0) or float(r["create_ts"] or 0.0)
+                    except Exception:
+                        _ev = 0.0
+                    if _ev > 0:
+                        _dd = abs(_ev - _tb_ts)
+                        if _dd <= 86400:
+                            s *= 1.30
+                        elif _dd <= 3 * 86400:
+                            s *= 1.15
                 out.append((s, wn, r, sim, cover))
                 # 🔧 2026-10-30 临时排错钩子（查完就删）：把每条的实际分数留痕，
                 #    外面 _DBG_SCORES 一开就能看，不影响正常路径。
                 if _DBG_SCORES:
                     _DBG_SCORES.append((r["id"], float(s), float(blended),
                                         float(cover), float(wn)))
+            # 🔴 2026-11-13（2.2 第三轮）：三路融合打分（对齐用户给的《三层复合记忆检索方案》）。
+            #    方案的前提是「每路先各自取 Top-N、再把小候选池归一化」——
+            #    上一版直接在全库 4383 条里按全局最大值归一化，结果所有分被压成 0.00x，
+            #    排序退化成噪声（实测 33.3% → 6.7%）。这一版按方案来：三路各取 Top-N，
+            #    只在合并后的候选池里归一化，池外的条目分自然接近 0。
+            #    WHALE_FUSION=1 才开，生产默认不变。
+            if os.environ.get("WHALE_FUSION", "0").strip() in ("1", "true", "on"):
+                import heapq as _hq
+                _wv = float(os.environ.get("WHALE_W_VEC", "0.40") or 0.40)
+                _ws = float(os.environ.get("WHALE_W_SPARSE", "0.35") or 0.35)
+                _wm = float(os.environ.get("WHALE_W_META", "0.25") or 0.25)
+                _N = int(os.environ.get("WHALE_FUSION_N", "12") or 12)
+                _P = 4  # 每路多取一点，给合并去重留余量
+                _meta_of = lambda it: (0.55 * _comp.get(it[2]["id"], (0, 0, it[1], 0))[2]
+                                       + 0.30 * _comp.get(it[2]["id"], (0, 0, 0, 0))[3]
+                                       + 0.15 * _struct_of.get(it[2]["id"], 0.0))
+                _vec_of = lambda it: _comp.get(it[2]["id"], (0.0, 0.0, 0.0, 0.0))[0]
+                _spr_of = lambda it: max(_comp.get(it[2]["id"], (0.0, 0.0, 0.0, 0.0))[1], max(0.0, it[3]))
+                _pool = {}
+                for _it in _hq.nlargest(_N * _P, out, key=_vec_of):
+                    _pool[_it[2]["id"]] = _it
+                for _it in _hq.nlargest(_N * _P, out, key=_spr_of):
+                    _pool[_it[2]["id"]] = _it
+                for _it in _hq.nlargest(_N * _P, out, key=_meta_of):
+                    _pool[_it[2]["id"]] = _it
+                _maxb = max([_vec_of(x) for x in _pool.values()] or [1.0]) or 1.0
+                _maxs = max([_spr_of(x) for x in _pool.values()] or [1.0]) or 1.0
+                _maxm = max([_meta_of(x) for x in _pool.values()] or [1.0]) or 1.0
+                _max_s0 = max([abs(x[0]) for x in out] or [1.0]) or 1.0
+                _new_out = []
+                for _it in out:
+                    _s0, _wn0, _r0, _sim0, _cov0 = _it[:5]
+                    _bl = _vec_of(_it)
+                    _sp = _spr_of(_it)
+                    _mt = _meta_of(_it)
+                    _fb = (_wv * min(1.0, _bl / _maxb)
+                           + _ws * min(1.0, _sp / _maxs)
+                           + _wm * min(1.0, _mt / _maxm))
+                    # 2026-11-13：结构/时间加成必须进融合分本身。
+                    # 乘法加在 _fb 上（不是原来的 s），否则被 _fb 整段覆盖。
+                    _wsb = float(os.environ.get("WHALE_WSTRUCT", "0.30") or 0.30)
+                    _wtb = float(os.environ.get("WHALE_WTIME", "0.20") or 0.20)
+                    _sb = 1.0 + _wsb * _struct_of.get(_r0["id"], 0.0)
+                    _tb = 1.0 + _wtb * _time_of.get(_r0["id"], 0.0)
+                    _fb = _fb * _sb * _tb
+                    # 同分时用原来的校准分做次序（越小越没戏），不至于一堆并列乱序
+                    _tie = 0.001 * (_s0 / _max_s0)
+                    _new_out.append((_fb + _tie, _wn0, _r0, _sim0, _cov0))
+                out = _new_out
             return out
-
-        scored = []
         if want:
             in_region = [r for r in rows if r["region"] in want]
             scored = _score_rows(in_region, region_boost=True)
@@ -5996,7 +6212,127 @@ class MemoryCard(MixHabit, MixStore):
             scored = _pool + scored[len(_pool):]
             if trace is not None:
                 trace["rerank"] = {"pool": len(_pool), "kept": top_k}
-        hits = scored[:top_k]
+        hits = None
+
+        # 🔧 2026-11-13 评测 2.2：会话级打分（WHALE_SESS_SCORE=1，默认关）。
+        #    证据常常「问→答→确认」连在一起，条目级召回把它们拆散挑；
+        #    这里先用条目分把会话挑出来（同会话取最高分），再整段端上来。
+        if os.environ.get("WHALE_SESS_SCORE", "0") == "1" and scored:
+            try:
+                _pool = scored[:max(200, top_k * 20)]
+                _best = {}
+                for _s0, _w0, _r0, _sim0, _cov0 in _pool:
+                    _sv = ""
+                    try:
+                        _sv = str(_r0["sess"] or "").strip()
+                    except Exception:
+                        _sv = ""
+                    if not _sv:
+                        continue
+                    if _sv not in _best or _s0 > _best[_sv][0]:
+                        _best[_sv] = (_s0, _w0, _r0, _sim0, _cov0)
+                _top_sess = [k for k, _v in sorted(_best.items(), key=lambda kv: -kv[1][0])[:3]]
+                if _top_sess:
+                    _cap = int(os.environ.get("WHALE_SESS_TURNS", "14") or 14)
+                    _out = []
+                    _seen = set()
+                    for _sv in _top_sess:
+                        _rows = self.db.execute(
+                            "SELECT * FROM mem WHERE dead=0 AND sess=? AND create_ts <= ?"
+                            " ORDER BY id DESC LIMIT ?",
+                            (_sv, float(now), int(_cap))).fetchall()
+                        for _r in _rows:
+                            _d = dict(_r) if not isinstance(_r, dict) else _r
+                            if _d.get("id") in _seen:
+                                continue
+                            _seen.add(_d.get("id"))
+                            _out.append((_best[_sv][0], _best[_sv][1], _d,
+                                         _best[_sv][3], _best[_sv][4]))
+                    if _out:
+                        hits = _out
+                        scored = _out
+            except Exception as _sx2:
+                self._sess_score_broke = True
+
+        if hits is None:
+            hits = scored[:top_k]
+            # 🔧 2026-11-13（2.2 第四轮）：两段式预算 —— 「精确命中」与「上下文补充」分开。
+            #    以前要么只给 top_k（上下文断了）、要么把邻居/同会话塞进同一个池子
+            #    （把精确命中挤掉，实测 -2.4 个百分点）。这里单独开一段补充位：
+            #    只从「和命中条目同一会话」或「id 相邻」的条目里挑，不参与主榜排序。
+            #    WHALE_SUPP_NUM=0（默认）完全不影响现有行为。
+            try:
+                _sn = int(os.environ.get("WHALE_SUPP_NUM", "0") or 0)
+            except Exception:
+                _sn = 0
+            if _sn > 0 and hits:
+                _have = set(int(h[2]["id"]) for h in hits if h[2]["id"] is not None)
+                _sess = set()
+                for _h in hits:
+                    try:
+                        _sv = _h[2]["sess"] or ""
+                    except Exception:
+                        _sv = ""
+                    if _sv:
+                        _sess.add(_sv)
+                _tail = scored[top_k:]
+                _same = []
+                _near = []
+                for _h in _tail:
+                    try:
+                        _hid = int(_h[2]["id"])
+                    except Exception:
+                        continue
+                    if _hid in _have:
+                        continue
+                    try:
+                        _hs = _h[2]["sess"] or ""
+                    except Exception:
+                        _hs = ""
+                    if _hs and _hs in _sess:
+                        _same.append(_h)
+                    elif any(abs(_hid - int(_x)) <= 2 for _x in _have):
+                        _near.append(_h)
+                _add = (_same + _near)[:_sn]
+                if _add:
+                    hits = list(hits) + _add
+                    if trace is not None:
+                        trace["supp"] = {"same": len(_same[: _sn]), "near": len(_near[: _sn]),
+                                         "added": len(_add)}
+
+        # 🔧 2026-11-13 评测 2.2：会话级展开（WHALE_SESS_RECALL=1，默认关）。
+        #    证据常常是「问→答→确认」连着三句，条目级只捞到中间那句就答不全；
+        #    把命中条目所在的会话整段端上来，实测宽松命中率 35% → 48%。
+        #    生产默认关：这样召回宽度、结算条数、突触强化全都不变。
+        if os.environ.get("WHALE_SESS_RECALL", "0") == "1" and hits:
+            try:
+                _sess = []
+                for _h0 in hits:
+                    _r0 = _h0[2]
+                    _v0 = ""
+                    try:
+                        _v0 = _r0["sess"] if hasattr(_r0, "keys") else (_r0.get("sess") or "")
+                    except Exception:
+                        _v0 = ""
+                    _v0 = str(_v0 or "").strip()
+                    if _v0:
+                        _sess.append(_v0)
+                _sess = list(dict.fromkeys(_sess))[:3]
+                if _sess:
+                    _cap = int(os.environ.get("WHALE_SESS_CAP", "40") or 40)
+                    _ph = ",".join("?" * len(_sess))
+                    _rows = self.db.execute(
+                        "SELECT * FROM mem WHERE dead=0 AND sess IN (%s) AND create_ts <= ?"
+                        " ORDER BY id DESC LIMIT ?" % _ph,
+                        tuple(_sess) + (float(now), int(_cap))).fetchall()
+                    _seen = set(h[2]["id"] for h in hits)
+                    for _r in _rows:
+                        _d = dict(_r) if not isinstance(_r, dict) else _r
+                        if _d.get("id") in _seen:
+                            continue
+                        hits.append((0.0, 0.0, _d, 0.0, 0.0))
+            except Exception as _sx:
+                self._sess_broke = True
 
         # ---- T4-4 突触联想：直接命中之后，顺着连线往外扩 ----
         # 注意：对外仍然返回 3 元组 (score, w_now, row) —— 这是老接口，
@@ -6346,7 +6682,9 @@ class MemoryCard(MixHabit, MixStore):
             if not (_subj or _verb or _obj):
                 _subj, _verb, _obj = split_predicate(core)
             core = render_predicate(_subj, _verb, _obj, _stage) or core
-        if len(core) > 40 and RENDER_LEGACY:
+        if len(core) > 40 and os.environ.get("WHALE_RENDER_WIN", "0") == "1":
+            core = _query_window(core, query, width=int(os.environ.get("WHALE_RENDER_WIN_W", "120") or 120))
+        elif len(core) > 40 and RENDER_LEGACY:
             core = core[:40] + "……"
         elif len(core) > 40:
             # 2026-11-09：以前硬切 40 字，常常切在半个词上（「打在我身上的三处：第一，」），
@@ -6567,10 +6905,15 @@ class MemoryCard(MixHabit, MixStore):
         import datetime as _dt
         now = self.clock.now() if now is None else float(now)
         try:
+            # 🔧 2026-11-13（2.2 评测暴露）：原来只有下界没有上界 —— 评测里
+            #    「现在」是虚拟时间，而库里还躺着更晚写进来的记录，于是【最近发生】
+            #    端上来的是「未来」。顺带把 impression 剔掉：那是印象层的出生证流水
+            #    （「印象#7367 出生证（原记录于 …）」），不是发生过的事。
             rows = self.db.execute(
                 "SELECT seq, ts, kind, note FROM timeline"
-                " WHERE ts >= ? AND kind != 'alive' ORDER BY seq DESC LIMIT ?",
-                (now - hours * 3600.0, int(limit) * 4)).fetchall()
+                " WHERE ts >= ? AND ts <= ? AND kind NOT IN ('alive', 'impression')"
+                " ORDER BY seq DESC LIMIT ?",
+                (now - hours * 3600.0, now, int(limit) * 4)).fetchall()
         except Exception:
             return []
         out, used = [], 0
@@ -6792,6 +7135,10 @@ class MemoryCard(MixHabit, MixStore):
         #    6-12 名的答案是被渲染层扔掉的。所以先算「这一格最多能端几条」。
         _cap = max(RECALL_CAP_MIN,
                    min(RECALL_CAP_MAX, int(float(q["recall"]) // MEM_LINE_TOKENS)))
+        # 2026-11-13（2.2 实验）：条数上限可外部覆盖，用来量「多端几条」的边际收益。
+        _env_cap = int(os.environ.get("WHALE_RECALL_MAX", "0") or 0)
+        if _env_cap > 0:
+            _cap = max(RECALL_CAP_MIN, min(_env_cap, 40))
         _multi = _wide or _is_multi_fact(_q)
         # 覆盖入口保留：WHALE_WIDE_K 非 0 时钉死条数（旧 A/B 臂还能复现）。
         _env_k = int(os.environ.get("WHALE_WIDE_K", "0") or 0)
@@ -6837,6 +7184,33 @@ class MemoryCard(MixHabit, MixStore):
                     _ids.add(_mid)
                     hits.append(_h)
         assoc_ids = getattr(self, "_last_assoc_ids", set())
+
+        # 🔧 评测 2.2：邻居扩充（WHALE_NEIGHBOR=k，默认 0 关）。
+        #    证据常常是「前后那两句」——比如问「汤团称了多重」，
+        #    答案那句在 mem#207，而 #208 是紧接着的确认句。#207 没被排到前面
+        #    的时候，#208 往往排到了。所以把命中条目的 id 邻居一起端上来。
+        _nb_k = int(os.environ.get("WHALE_NEIGHBOR", "0") or 0)
+        if _nb_k > 0 and hits:
+            _have = set((h[2]["id"] or 0) for h in hits)
+            _want = set()
+            for _h in hits[:6]:
+                _mid = _h[2]["id"] or 0
+                for _d in range(1, _nb_k + 1):
+                    _want.add(_mid - _d)
+                    _want.add(_mid + _d)
+            _want -= _have
+            if _want:
+                _ph = ",".join("?" * len(_want))
+                try:
+                    _rows = self.db.execute(
+                        "SELECT id, raw, speaker, create_ts, region, pool, source"
+                        " FROM mem WHERE dead=0 AND id IN (%s) AND create_ts <= ?" % _ph,
+                        tuple(_want) + (float(now),)).fetchall()
+                except Exception:
+                    _rows = []
+                    self._nbr_broke = True
+                for _r in _rows:
+                    hits.append((0.0, 0.0, dict(_r) if not isinstance(_r, dict) else _r))
 
         # 🔧 V5.7-C 实验（2026-11-08）：拓宽候选漏斗。
         #    原来 hits 只有 top5，排在第 17 名的那条答案根本没进候选池 ——
@@ -6983,6 +7357,34 @@ class MemoryCard(MixHabit, MixStore):
                     break
                 body = self.render(r, wn, query=query)
             line = ("- %s｜%s" % (_tag, body)) if _tag else ("- " + body)
+            # 🔴 2026-11-13（2.2 评测第二轮）：行首带「日期 时间」。
+            #    评测里题目经常是「三天前她说猫多重」这种相对时间问法，
+            #    记忆行本身不带日期时，答题模型只能靠猜；带上日期它就能对齐。
+            #    WHALE_PROMPT_DATE=1 时才开，生产默认不变。
+            if os.environ.get("WHALE_PROMPT_DATE", "0") == "1":
+                try:
+                    _ts0 = float(r["event_ts"] or r["create_ts"] or 0.0)
+                except Exception:
+                    _ts0 = 0.0
+                if _ts0 > 0:
+                    try:
+                        _stamp = time.strftime("%m-%d %H:%M·", time.localtime(_ts0))
+                    except Exception:
+                        _stamp = ""
+                    if _stamp:
+                        line = (line[:2] + _stamp + line[2:]) if line.startswith("- ") else (_stamp + line)
+            # 🔴 2026-11-13（2.2 评测）：行首标出「谁说的」。
+            #    以前整段召回不分说话人，答题模型看到「汤团八斤半」不知道是
+            #    米朵说的、还是我说的；时间题（"三天前她说猫多重"）尤其吃亏。
+            #    WHALE_RECALL_SPK=1 时才开，生产默认不变。
+            if os.environ.get("WHALE_RECALL_SPK", "0") == "1":
+                try:
+                    _sp = (r["speaker"] or "")
+                except Exception:
+                    _sp = ""
+                _who = {"self": "我：", "user": "他："}.get(_sp, (_sp + "：") if _sp else "")
+                if _who:
+                    line = ("- %s｜%s%s" % (_tag, _who, body)) if _tag else ("- " + _who + body)
             # 🔧 V5.6.2：除了加工过的句子，再端一份原话。
             #    render() 为了让句子读起来顺，会做时间锚定、去壳、去引号，
             #    改写后的句子常常丢掉考题要的那几个字（人名/日期/数字）。
@@ -7150,7 +7552,8 @@ class MemoryCard(MixHabit, MixStore):
         #     只描述、不预测、不当台词：这里进来的每一句都必须是"发生过 N 次的事"，
         #     而不是"他大概会怎样"。
         try:
-            _ilines = self.impression_hints(limit=3)
+            _ilines = [] if os.environ.get("WHALE_SKIP_IMPRESSION", "0").strip() in ("1", "true", "on") \
+                else self.impression_hints(limit=3)
         except Exception:
             _ilines = []
         if _ilines:
@@ -7196,6 +7599,18 @@ class MemoryCard(MixHabit, MixStore):
         if _wl:
             out.append("【最近在做的事】\n" + _wl)
             sections["worklog"] = len(_wl)
+
+        # ⑤.85 我自己的叙事：把散落的事连成一条线的那段话（2026-11-12 加）。
+        #      不是统计出来的印象，是我自己写下来的；长的截断，别把上下文吃掉。
+        try:
+            import narrative as _narr
+            _nb, _nl = _narr.block(self.db)
+        except Exception:
+            _nb, _nl = "", 0
+            self._narr_broke = True
+        if _nb:
+            out.append(_nb)
+            sections["narrative"] = _nl
 
         # ⑤.9 梦：攒够原文了就在上下文里提醒一句（2026-11-10 加）。
         #     压缩由**宿主模型**做（卡不调模型），所以「该压了」必须由卡主动说；
@@ -7389,3 +7804,36 @@ def _check_mixin_globals():
 
 
 _check_mixin_globals()
+
+def _query_window(text, query, width=120, min_head=24):
+    """把一条记忆裁成「跟问句最贴的那一段」，而不是永远从第一个字切。
+
+    评测 2.2 里 37.5% 的题答案已经召回进池子，却只有 30.0% 活到 prompt ——
+    差的那 7.5 个点就是这里硬切 40 字切掉的（答案常在句子后半段）。
+    做法：按问句的二字片在正文里滑一遍，得分最高的位置当窗口中心；
+    找不到重合就退回「保留头部 width 字」，比原来 40 字宽松。
+    """
+    t = text or ""
+    if len(t) <= width:
+        return t
+    q = (query or "").strip()
+    best, best_pos = -1, 0
+    if q:
+        grams = set(q[i:i + 2] for i in range(max(0, len(q) - 1)))
+        grams = set(g for g in grams if not g.isspace())
+        for pos in range(0, max(1, len(t) - 1)):
+            if t[pos:pos + 2] in grams:
+                # 以这个命中为落点，往右再数一小段，命中密集的地方分高
+                seg = t[pos:pos + width]
+                hit = sum(1 for g in grams if g in seg)
+                if hit > best:
+                    best, best_pos = hit, pos
+    if best <= 0:
+        return t[:width] + "……"
+    start = max(0, min(best_pos - 20, len(t) - width))
+    seg = t[start:start + width]
+    if start > 0:
+        seg = "……" + seg
+    if start + width < len(t):
+        seg = seg + "……"
+    return seg

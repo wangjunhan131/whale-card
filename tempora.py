@@ -468,7 +468,10 @@ CREATE TABLE IF NOT EXISTS tevent (
     meta TEXT NOT NULL DEFAULT '{}',
     closed_ts REAL NOT NULL DEFAULT 0,
     actual_ts REAL NOT NULL DEFAULT 0,
-    reason TEXT NOT NULL DEFAULT ''
+    reason TEXT NOT NULL DEFAULT '',
+    thread_id INTEGER NOT NULL DEFAULT 0,   -- 同一条链（指代关系会继承）
+    ref_id INTEGER NOT NULL DEFAULT 0,      -- 这条指的是哪一条事件
+    ref_kind TEXT NOT NULL DEFAULT ''       -- same（同一件事）/ topic（相关）/ new（新链）
 );
 CREATE INDEX IF NOT EXISTS idx_te_status ON tevent(status, expect_end);
 CREATE TABLE IF NOT EXISTS tstate (
@@ -476,6 +479,20 @@ CREATE TABLE IF NOT EXISTS tstate (
     val TEXT NOT NULL DEFAULT '',
     updated_ts REAL NOT NULL DEFAULT 0
 );
+-- 判定链：一条事件从哪句话来、被什么规则判成什么、谁把它结掉的，全留痕
+CREATE TABLE IF NOT EXISTS tevent_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    tevent_id INTEGER NOT NULL DEFAULT 0,
+    ts REAL NOT NULL DEFAULT 0,
+    action TEXT NOT NULL DEFAULT '',
+    from_status TEXT NOT NULL DEFAULT '',
+    to_status TEXT NOT NULL DEFAULT '',
+    evidence TEXT NOT NULL DEFAULT '',
+    decided_by TEXT NOT NULL DEFAULT '',
+    delta_min INTEGER,
+    meta TEXT NOT NULL DEFAULT '{}'
+);
+CREATE INDEX IF NOT EXISTS idx_tel_ev ON tevent_log(tevent_id, ts);
 """
 
 # 什么算「答应过的事」：有将来时间窗，并且句子里带承诺/约定/提醒的口气。
@@ -526,6 +543,13 @@ def ensure(conn):
     if "actual_ts" not in cols:
         conn.execute("ALTER TABLE tevent ADD COLUMN actual_ts REAL NOT NULL DEFAULT 0")
         conn.commit()
+    # 老库没有指代链的三列就补上（2026-11-12 加）
+    for _col, _ddl in (("thread_id", "thread_id INTEGER NOT NULL DEFAULT 0"),
+                       ("ref_id", "ref_id INTEGER NOT NULL DEFAULT 0"),
+                       ("ref_kind", "ref_kind TEXT NOT NULL DEFAULT ''")):
+        if _col not in cols:
+            conn.execute("ALTER TABLE tevent ADD COLUMN " + _ddl)
+            conn.commit()
 
 
 def _has_table(conn):
@@ -546,11 +570,196 @@ class EventStore(object):
             except Exception as e:
                 print("[tempora] 建表失败（可能正开着事务）：%s" % e)
 
+    # -- 指代链（2026-11-12 用户要的：「你说的那件事就是我之前说的事」要能连起来）
+    _REF_POINTER = ("之前说", "刚才说", "上次说", "之前提", "刚才提", "那件事", "那个事",
+                    "那话", "那句话", "就是那个", "前面说", "上面说", "我说的那件",
+                    "我跟你说的事", "我想跟你说的", "要和你说的", "要跟你说的")
+
+    def note_reference(self, text, ts=None):
+        """一句纯指代（没有新时间窗）：「我说的就是之前跟你说的那件事」。
+
+        做法：找到被指的那条，把它的线程号定下来（原先没有就自成一条链），
+        再在它的判定链上记一格 link —— 下次翻这条链就能看到「这句是在说它」。
+        """
+        ts = time.time() if ts is None else float(ts)
+        th = self.resolve_thread(text, ts)
+        if not th:
+            return None
+        thread_id, ref_id, kind, why = th
+        try:
+            self.db.execute(
+                "UPDATE tevent SET thread_id=? WHERE id=? AND (thread_id IS NULL OR thread_id=0)",
+                (thread_id, ref_id))
+            self.db.commit()
+        except Exception as _e:
+            print("[tempora] 忽略：%s" % _e)
+        self._log(ref_id, "link", "", "", (text or "")[:400],
+                  "note_reference:%s（%s）" % (kind, why), ts=ts)
+        # 这句本身也落一条 note 事件，挂进同一条链 —— 这样「晚上有话要说」和
+        # 「就是我要跟你说的那件事」在一条线上，翻链能看见前因后果。
+        try:
+            cur = self.db.execute(
+                "INSERT INTO tevent(created_ts,event_type,status,content,topic_key,"
+                "expect_time,expect_end,importance,subject,source,raw_text,meta,reason,"
+                "thread_id,ref_id,ref_kind) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (ts, "note", "done", (text or "")[:200], "", 0.0, 0.0, 0.6,
+                 "user", "", text or "", "{}", "link_ref", thread_id, ref_id, kind))
+            self.db.commit()
+            self._log(cur.lastrowid, "note", "", "done", (text or "")[:400],
+                      "note_reference:%s" % kind, ts=ts)
+        except Exception as e:
+            print("[tempora] 指代 note 落库失败：%s" % e)
+        return {"thread_id": thread_id, "ref_id": ref_id, "kind": kind}
+
+    def resolve_thread(self, text, ts=None, hours=168):
+        """这句是不是在指一件已经记下来的事？是就返回 (thread_id, ref_id, kind, 依据)。
+
+        判据（宁可判不出，也别乱连）：
+          1. 句子里有明显指代（之前说的/那件事/我刚才说的…）→ 有资格连；
+          2. 在最近 hours 小时的事件里按话题二字重合找最像的；
+          3. 重合为 0 但只有一条近期事件 → 指它（「就是那件事」这种没给线索的）；
+             多于一条就不猜。
+        """
+        ts = time.time() if ts is None else float(ts)
+        s = (text or "").strip()
+        if not s:
+            return None
+        hit = [w for w in self._REF_POINTER if w in s]
+        if not hit:
+            return None
+        toks = _topic_tokens(s) - _topic_tokens("".join(self._REF_POINTER))
+        rows = self.db.execute(
+            "SELECT id,content,thread_id,status,expect_time FROM tevent"
+            " WHERE created_ts BETWEEN ? AND ? ORDER BY id DESC LIMIT 30",
+            (ts - hours * 3600, ts + 60)).fetchall()
+        if not rows:
+            return None
+        scored = []
+        for rid, content, th, status, e0 in rows:
+            ov = len(toks & _topic_tokens(content))
+            near = 1.0 / (1.0 + abs(ts - float(e0)) / 86400.0)
+            scored.append((ov, near, rid, content, th))
+        scored.sort(key=lambda x: (x[0], x[1]), reverse=True)
+        best = scored[0]
+        if best[0] >= 2:
+            rid, content, th = best[2], best[3], best[4]
+        elif len(rows) == 1:
+            rid, content, th = rows[0][0], rows[0][1], rows[0][2]
+        else:
+            return None
+        thread = int(th or 0) or int(rid)
+        kind = "same" if best[0] >= 2 else "topic"
+        return (thread, int(rid), kind, "%s→#%s「%s」" % ("/".join(hit), rid, (content or "")[:24]))
+
+    # -- 判定链
+    def _log(self, tevent_id, action, from_status, to_status, evidence,
+             decided_by="", delta_min=None, ts=None):
+        """给一条事件记一格判定链：这一步是谁、凭哪句话、把状态从什么改成什么。"""
+        try:
+            self.db.execute(
+                "INSERT INTO tevent_log(tevent_id,ts,action,from_status,to_status,"
+                "evidence,decided_by,delta_min) VALUES(?,?,?,?,?,?,?,?)",
+                (int(tevent_id), float(time.time() if ts is None else ts), action,
+                 from_status or "", to_status or "", (evidence or "")[:400],
+                 decided_by or "", None if delta_min is None else int(delta_min)))
+            self.db.commit()
+        except Exception as e:
+            print("[tempora] 判定链写失败：%s" % e)
+
+    def chain_full(self, tevent_id, limit=200):
+        """把「判定链」和「指代链」合成一条时间线（2026-11-12 用户要的「结合」）。
+
+        输出 steps 的每一步都能回答三件事：
+          1. 是哪句话（sentence）
+          2. 谁判的、把状态从什么改成什么（by / from → to）
+          3. 它属于哪条事件（event_id / event_content），以及这条链是否已经结了（finished）
+        指代句（note）会作为独立一步出现，并带 ref_id —— 一眼能看出「这句是在说那条」。
+        """
+        cur = self.db.execute("SELECT * FROM tevent WHERE id=?", (int(tevent_id),))
+        cols = [d[0] for d in cur.description]
+        row = cur.fetchone()
+        if row is None:
+            return None
+        ev = dict(zip(cols, row))
+        tid = int(ev.get("thread_id") or 0) or int(ev.get("id") or 0)
+        sib = self.db.execute(
+            "SELECT id,status,content,event_type,created_ts,ref_id,ref_kind"
+            " FROM tevent WHERE id=? OR thread_id=? ORDER BY id", (tid, tid)).fetchall()
+        ids = [r[0] for r in sib] or [int(tevent_id)]
+        qmarks = ",".join("?" * len(ids))
+        logs = self.db.execute(
+            "SELECT tevent_id,ts,action,from_status,to_status,evidence,decided_by,delta_min"
+            " FROM tevent_log WHERE tevent_id IN (%s) ORDER BY ts, id LIMIT ?" % qmarks,
+            tuple(ids) + (int(limit),)).fetchall()
+        content_of = {r[0]: r[2] for r in sib}
+        steps = []
+        for lg in logs:
+            eid2 = lg[0]
+            steps.append({
+                "ts": lg[1],
+                "event_id": eid2,
+                "event": (content_of.get(eid2) or "")[:80],
+                "action": lg[2],
+                "from": lg[3],
+                "to": lg[4],
+                "sentence": lg[5],
+                "by": lg[6],
+                "delta_min": lg[7],
+            })
+        ev["thread_id"] = tid
+        ev["thread"] = [{"id": r[0], "status": r[1], "content": r[2],
+                         "event_type": r[3], "ts": r[4],
+                         "ref_id": r[5], "ref_kind": r[6]} for r in sib]
+        ev["steps"] = steps
+        ev["finished"] = bool(sib) and all(r[1] in ("done", "expired", "cancelled") for r in sib)
+        ev["chain"] = [{"ts": st["ts"], "action": st["action"], "from": st["from"],
+                        "to": st["to"], "evidence": st["sentence"], "by": st["by"],
+                        "delta_min": st["delta_min"]} for st in steps]
+        return ev
+
+    def chain(self, tevent_id, limit=20):
+        """一条事件的完整判定链：事件本身 + 每一步（哪句话 → 什么规则 → 状态怎么变）。"""
+        cur = self.db.execute("SELECT * FROM tevent WHERE id=?", (int(tevent_id),))
+        cols = [d[0] for d in cur.description]
+        row = cur.fetchone()
+        if row is None:
+            return None
+        ev = dict(zip(cols, row))
+        logs = self.db.execute(
+            "SELECT ts,action,from_status,to_status,evidence,decided_by,delta_min"
+            " FROM tevent_log WHERE tevent_id=? ORDER BY id LIMIT ?",
+            (int(tevent_id), int(limit))).fetchall()
+        ev["chain"] = [{"ts": r[0], "action": r[1], "from": r[2], "to": r[3],
+                        "evidence": r[4], "by": r[5], "delta_min": r[6]} for r in logs]
+        ev["finished"] = ev.get("status") in ("done", "expired", "cancelled")
+        # 同一条链上的全部事件（指代关系串起来的）
+        tid = int(ev.get("thread_id") or 0) or int(ev.get("id") or 0)
+        try:
+            sib = self.db.execute(
+                "SELECT id,status,content,created_ts FROM tevent WHERE id=? OR thread_id=?"
+                " ORDER BY id", (tid, tid)).fetchall()
+            ev["thread"] = [{"id": r[0], "status": r[1], "content": r[2],
+                             "ts": r[3]} for r in sib]
+        except Exception:
+            ev["thread"] = []
+        return ev
+
+    def recent_events(self, limit=10):
+        """最近发生过的事（带状态），给「这条链怎么来的」当入口。"""
+        cur = self.db.execute(
+            "SELECT id,status,content,expect_time,actual_ts,closed_ts,reason"
+            " FROM tevent ORDER BY id DESC LIMIT ?", (int(limit),))
+        cols = [d[0] for d in cur.description]
+        return [dict(zip(cols, r)) for r in cur.fetchall()]
+
     # -- 写
     def add_plan(self, text, ts=None, subject="user", source="", importance=0.6):
         ts = time.time() if ts is None else float(ts)
         w = resolve(text, ts)
         if w["kind"] in ("none", "no_time", "need_ask"):
+            # 「就是我要跟你说的那件事」这种话没有新的时间窗，但它是一条真信息：
+            # 它把「之前那件事」指认出来了。记成一条指代链，别丢。
+            self.note_reference(text, ts)
             return None
         s = (text or "").strip()
         if not s or len(s) > 400:
@@ -577,7 +786,23 @@ class EventStore(object):
                                   ("  tol=%smin" % w["tol_min"]) if w.get("kind") == "clock" else "") + note,
              actual_ts))
         self.db.commit()
-        return cur.lastrowid
+        eid = cur.lastrowid
+        self._log(eid, "plan", "", "pending", s,
+                  "plan_intent+resolve:%s" % (w.get("kind") or ""), ts=ts)
+        # 这句在指之前那件事？连成一条链。
+        try:
+            th = self.resolve_thread(s, ts)
+            if th:
+                thread_id, ref_id, kind, why = th
+                self.db.execute(
+                    "UPDATE tevent SET thread_id=?, ref_id=?, ref_kind=? WHERE id=?",
+                    (thread_id, ref_id, kind, eid))
+                self.db.commit()
+                self._log(eid, "link", "pending", "pending", s,
+                          "resolve_thread:%s（%s）" % (kind, why), ts=ts)
+        except Exception as e:
+            print("[tempora] 指代链写失败：%s" % e)
+        return eid
 
     def cancel(self, text=None, ts=None, note="取消"):
         """把一条已经不作数的约定标成 cancelled（不是删掉，留痕才查得到）。
@@ -622,6 +847,8 @@ class EventStore(object):
             " reason=COALESCE(NULLIF(reason,''),'') || ? WHERE id=?",
             (ts, "  %s@%s" % (note, time.strftime("%m-%d %H:%M", time.localtime(ts))), picked))
         self.db.commit()
+        self._log(picked, "cancel", "pending", "cancelled", (text or "")[:200],
+                  "cancel:%s" % (note or "取消"), ts=ts)
         return picked
 
     def note_actual(self, text, ts=None):
@@ -677,6 +904,8 @@ class EventStore(object):
             " reason=COALESCE(reason,'')||? WHERE id=?",
             (ts, act, "  |实际 %s，%s %d 分" % (_hhmm(act), tag, abs(delta)), rid))
         self.db.commit()
+        self._log(rid, "actual", "pending", "done", s[:200],
+                  "note_actual", delta_min=delta, ts=ts)
         return {"id": rid, "actual": act, "expect": base,
                 "delta_min": delta, "early_late": tag}
 
@@ -703,6 +932,8 @@ class EventStore(object):
                 "UPDATE tevent SET status='expired', closed_ts=?, reason=?"
                 " WHERE id=? AND status='pending'",
                 (now, "auto: expect_end<now", r["id"]))
+            self._log(r["id"], "expire", "pending", "expired",
+                      "expect_end=%s" % _hhmm(float(r["expect_end"])), "sweep", ts=now)
             out.append({"id": r["id"], "content": r["content"],
                         "kind": r["topic_key"] or "plan",
                         "importance": r["importance"], "late_hours": round(late, 2),

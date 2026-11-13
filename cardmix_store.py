@@ -79,7 +79,7 @@ class MixStore:
     def remember(self, text, salience=0.6, ts=None, pool=None,
                  oxy=0.0, entities=None, emotion=None, normalize=True,
                  region=None, speaker=None, mtype=None, source="",
-                 about_uid=""):
+                 about_uid="", sess=""):
         now = self.clock.now()
         pool = POOL_SHORT if pool is None else pool  # 默认值里不能写 POOL_SHORT：类定义时 card2 还没 import 完
         at = min(now if ts is None else float(ts), now)
@@ -106,7 +106,11 @@ class MixStore:
 
         # 🔧 时间归一化：把「今天/昨天/刚刚」换成绝对日期。
         #    必须用「这句话说出来的时刻」at 做参照，不能用 now。
-        if normalize:
+        #    2026-11-13 评测 2.2：归一化会把「今天带汤团去猫舍称了」改写成
+        #    「09月05日带汤团去猫舍称了」，原话被毁、证据窗对不上、关键词
+        #    也没了。所以给一个开关：要"原话存原样"时用 WHALE_RAW_VERBATIM=1，
+        #    事件时间仍然由 event_ts 单独解析，不依赖这行改写。
+        if normalize and os.environ.get("WHALE_RAW_VERBATIM", "0").strip() not in ("1", "true", "on"):
             text = normalize_time(text, at)
 
         core, details = split_memory(text)
@@ -281,17 +285,26 @@ class MixStore:
         #   解析不到时间词就留 0（= 未知），检索时退回 create_ts，
         #   但至少它被标成「不知道哪天」，而不是被当成今天。
         _evts, _evprec = parse_event_time(text, ref_ts=at)
+        # 2026-11-13 写入精细化：轻量抽「谁 / 在哪儿 / 什么事」，抽不出留空
+        try:
+            import structure as _st
+            _who, _where, _ekind = _st.extract(text)
+        except Exception as _ste:
+            print("[card2] 结构化抽取失败（字段留空）：%s" % _ste)
+            _who, _where, _ekind = "", "", ""
         c.execute(
             "INSERT INTO mem(raw,core,vec,pool,w,t_anchor,salience,oxy,entities,"
             "emotion,create_ts,last_active_ts,region,subj,verb,obj,erase_stage,emb,"
             "speaker,mtype,trust,conflict,conflict_why,value,source,"
-            "about_uid,about_layer,quarantine,event_ts,event_precision) "
-            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "about_uid,about_layer,quarantine,event_ts,event_precision,sess,"
+            "who,place,ev_kind) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (text, core, json.dumps(vec, ensure_ascii=False), pool, w0, at,
              salience, oxy, entities, emotion, at, at, region,
              _subj, _verb, _obj, 0, _emb, speaker, mtype,
              _trust, _conflict, _why, _value, source or "",
-             str(about_uid or ""), _lay, _quar, float(_evts or 0.0), _evprec or ""))
+             str(about_uid or ""), _lay, _quar, float(_evts or 0.0), _evprec or "",
+             str(sess or ""), _who, _where, _ekind))
         mid = c.lastrowid
         # V5.4：正式入库的记忆也在收件层留一份原文（kept=1）。
         # 这样短期池淘汰之后，60 小时内还能从收件层把它原样翻回来 —

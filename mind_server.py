@@ -307,7 +307,8 @@ MAX_TEXT = 20000                       # 单条 message / user_message 超过就
 # 为什么用白名单而不是黑名单：以后新加一个写入口、忘了登记时，
 # 宁可多 409 一次（看得见、能改），也不要悄悄写坏另一份进程正开着的卡。
 GATE_READ_POST = frozenset((
-    "/context", "/recent", "/recall", "/ctx_preview", "/trace",
+    "/context", "/recent", "/recall", "/ctx_preview", "/trace", "/narrative",
+    "/tevent/list", "/tevent/chain",   # 只读：看约定/事件、看一条事件的判定链
 ))
 # 已知的写入口。用来区分「已知会写」和「没登记、被默认拦住」——
 # 后者第一次出现会打日志，方便日后把真正的读接口补进 GATE_READ_POST。
@@ -315,12 +316,14 @@ GATE_WRITE_POST = frozenset((
     "/chat/config", "/motiv/tick", "/motiv/done", "/viscera/profile",
     "/viscera/stim", "/talk/set", "/worklog", "/report", "/remember",
     "/disks/backup", "/disks/sync", "/disks/switch", "/disks/retire",
+    "/disks/carry",
     "/mem/untrust", "/mem/quarantine", "/mem/release", "/mem/delete",
     "/mem/edit", "/intake", "/inbox", "/inbox/pick", "/inbox/mark",
     "/forget", "/dream/commit", "/emb/remodel", "/tick", "/seal",
     "/promise/add", "/promise/close", "/promise/list",
     "/skill_add", "/skill_use", "/config", "/config_all", "/identity",
     "/identity/set", "/injection", "/avatar", "/shutdown",
+    "/narrative/write",   # 写我自己那一段叙事
 ))
 
 # 控制台下拉框里的候选音色（edge-tts 的常用中文音色）。
@@ -997,7 +1000,7 @@ TRUST_SOURCES = {"user", "dsh", "console", "qq", "qq-main", "cli"}
 # 所以强制这一批不会打断任何现有通道，但挡住了「本机随便一个进程伸手」。
 TOKEN_REQUIRED_POST = {
     "/forget", "/seal", "/unseal", "/cardslot", "/shutdown",
-    "/disks/sync", "/disks/retire", "/disks/role", "/disks/register",
+    "/disks/sync", "/disks/retire", "/disks/carry", "/disks/role", "/disks/register",
     "/dream/commit", "/config", "/config_all", "/voice_config",
 }
 
@@ -1677,6 +1680,19 @@ class Handler(BaseHTTPRequestHandler):
                     _rows = m.card.recall_trace_recent(n=max(1, min(50, _n)))
                 self._send(200, {"ok": True, "n": len(_rows), "traces": _rows})
                 return
+            if method == "GET" and path == "/narrative":
+                # 我自己的叙事：最近一版 + 历史（只读）。
+                try:
+                    import narrative as _nrv0
+                    _c0 = sqlite3.connect(m.card.db_path)
+                    _c0.row_factory = sqlite3.Row
+                    _lates0 = _nrv0.latest(_c0)
+                    _hist0 = _nrv0.history(_c0, limit=10)
+                    _c0.close()
+                except Exception as e:
+                    return self._fail(500, "narrative_read", str(e))
+                return self._send(200, {"ok": True, "latest": _lates0,
+                                        "history": _hist0})
             if method == "GET" and path == "/worklog":
                 # 工作日志（那张「桌子」）：只读最近几条，给控制台和 bridge 看。
                 try:
@@ -1938,6 +1954,47 @@ class Handler(BaseHTTPRequestHandler):
                                           {"ok": bool(_ok), "id": _pid3})
                     except Exception as e:
                         return self._fail(500, "promise_close", str(e))
+                if path == "/narrative/write":
+                    # 写一版新的自我叙事。旧的留着，rev 自增。
+                    _txt = (body.get("text") or "").strip()
+                    if not _txt:
+                        return self._fail(400, "empty_text", "text 不能为空")
+                    try:
+                        import narrative as _nrv1
+                        _c1 = sqlite3.connect(m.card.db_path, timeout=10.0)
+                        _c1.row_factory = sqlite3.Row
+                        _id1 = _nrv1.write(_c1, _txt, why=str(body.get("why") or ""))
+                        _c1.close()
+                    except Exception as e:
+                        return self._fail(500, "narrative_write", str(e))
+                    return self._send(200, {"ok": True, "id": _id1,
+                                            "chars": len(_txt)})
+                if path == "/tevent/list":
+                    try:
+                        import tempora as _T0
+                        _c0 = sqlite3.connect(m.card.db_path)
+                        _c0.row_factory = sqlite3.Row
+                        _items = _T0.EventStore(_c0).recent_events(
+                            int(body.get("limit") or 10))
+                        _c0.close()
+                        return self._send(200, {"ok": True, "items": _items})
+                    except Exception as e:
+                        return self._fail(500, "tevent_list", str(e))
+                if path == "/tevent/chain":
+                    try:
+                        _tid = int(body.get("id") or 0)
+                        if not _tid:
+                            return self._fail(400, "empty_id", "id 不能为空")
+                        import tempora as _T1
+                        _c1 = sqlite3.connect(m.card.db_path)
+                        _c1.row_factory = sqlite3.Row
+                        _ev1 = _T1.EventStore(_c1).chain_full(_tid)
+                        _c1.close()
+                        if not _ev1:
+                            return self._fail(404, "not_found", "没有这条事件")
+                        return self._send(200, {"ok": True, "event": _ev1})
+                    except Exception as e:
+                        return self._fail(500, "tevent_chain", str(e))
                 if path == "/report":
                     um = (body.get("user_message") or "").strip()
                     # V7 第 19 件：脏输出不落库。
@@ -2155,6 +2212,44 @@ class Handler(BaseHTTPRequestHandler):
                         "how": ("现在本机这份只读，可以拔盘了。到新机器双击一键落地"
                                 "会自动接手；回来再双击一次就交接回来。")
                         if on else "已解除退役，这张卡重新上岗。"})
+                if path == "/disks/carry":
+                    # 「带卡出门」的完整版（2026-11-13）：
+                    #   /disks/retire 只标退役、不搬数据 —— 那是老行为，
+                    #   现在控制台走这里：合并 WAL → 镜像整张卡 → 快照 db →
+                    #   刷清单重签 → 校验 → 再退役。
+                    # 长活在锁外做（镜像要几十秒，锁内做会把整个服务堵住；
+                    # 卡库用 sqlite 快照，服务跑着也是自洽的）。
+                    import disks as _disks
+                    here = os.path.dirname(os.path.abspath(m.card.db_path))
+                    target = (body.get("path") or "").strip()
+                    if not target:
+                        return self._fail(400, "no_path", "要给出目标目录（随身盘根目录）")
+                    if not body.get("confirm"):
+                        return self._fail(400, "need_confirm",
+                                          "这是写盘动作，body 里要带 confirm=true")
+                    if not os.path.isdir(target):
+                        return self._fail(400, "no_target",
+                                          "目标目录不存在或没插好：%s" % target)
+                    if os.path.abspath(target) == here:
+                        return self._fail(400, "same_dir", "目标就是自己，不用搬")
+                    try:
+                        sys.path.insert(0, os.path.join(here, "tools"))
+                        import carry as _carry
+                        out = _carry.carry(here, target, log=lambda *_a, **_k: None)
+                    except Exception as e:               # noqa: BLE001
+                        return self._fail(500, "carry_failed", "镜像失败：%r" % e)
+                    if out.get("ok") and body.get("retire", True):
+                        with m.lock:
+                            _disks.set_retired(here, True,
+                                               "带卡出门：镜像完成 @ %s"
+                                               % time.strftime("%Y-%m-%d %H:%M"))
+                            m.writer_lock = "retired"
+                        out["retired"] = True
+                        out["how"] = ("镜像 + 校验都过了，本机这份已只读。"
+                                      "现在可以拔盘；到新电脑双击「一键部署」。")
+                    elif out.get("ok"):
+                        out["how"] = "镜像 + 校验过了，本机没退役（retire=false）。"
+                    return self._send(200 if out.get("ok") else 409, out)
 
 
                 if path == "/mem/untrust":
@@ -3386,6 +3481,170 @@ def _node_info(mind):
     return info
 
 
+def _qq_inbox_path():
+    p = os.environ.get("WHALE_QQ_INBOX")
+    if p:
+        return p
+    # 换机器/换盘符后 D:\... 不一定存在；先认老位置，认不到就落回卡自己的 qq_state/
+    legacy = r"workspace\deploy\qq_bridge\inbox.jsonl"
+    if os.path.exists(legacy):
+        return legacy
+    return os.path.join(os.path.dirname(os.path.abspath(__file__)), "qq_state", "inbox.jsonl")
+
+
+def _qq_state_path(mind):
+    root = os.path.dirname(os.path.abspath(mind.db_path))
+    return os.path.join(root, "qq_state", "ingest_cursor.json")
+
+
+def _qq_outbox_path():
+    p = os.environ.get("WHALE_QQ_OUTBOX")
+    if p:
+        return p
+    legacy = r"workspace\deploy\qq_bridge\outbox.jsonl"
+    if os.path.exists(legacy) or os.path.exists(os.path.dirname(legacy)):
+        return legacy
+    return os.path.join(os.path.dirname(os.path.abspath(__file__)), "qq_state", "outbox.jsonl")
+
+
+def _qq_load_state(mind):
+    try:
+        with open(_qq_state_path(mind), "r", encoding="utf-8") as f:
+            d = json.load(f)
+            return {"inbox": int(d.get("inbox") or 0), "outbox": int(d.get("outbox") or 0)}
+    except Exception as e:
+        print("[qq-ingest] 游标读不动，按 0 开始（只认此刻之后的）：%s" % e)
+        return {"inbox": 0, "outbox": 0}
+
+
+def _qq_save_state(mind, st):
+    try:
+        p = _qq_state_path(mind)
+        os.makedirs(os.path.dirname(p), exist_ok=True)
+        tmp = p + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(st, f, ensure_ascii=False)
+        os.replace(tmp, p)
+    except Exception as e:
+        print("[qq-ingest] 游标写不动：%s" % e)
+
+
+def _qq_take_lines(path, off):
+    """从字节偏移 off 读到文件尾，只返回完整的行，并回传新偏移。"""
+    if not os.path.exists(path):
+        return [], off
+    size = os.path.getsize(path)
+    if size < off:      # 文件被截断/重建 → 从头再来
+        off = 0
+    if size == off:
+        return [], off
+    with open(path, "rb") as f:
+        f.seek(off)
+        blob = f.read()
+    cut = blob.rfind(b"\n")
+    if cut < 0:
+        return [], off     # 半行，等下次
+    body, off2 = blob[:cut + 1], off + cut + 1
+    out = []
+    for line in body.decode("utf-8", "replace").splitlines():
+        line = line.strip()
+        if line:
+            out.append(line)
+    return out, off2
+
+
+def _qq_ingest_once(mind):
+    """把 QQ 的来话与我的话都写进卡（2026-11-12 用户要的「聊天自动进卡」）。"""
+    st = _qq_load_state(mind)
+    got = 0
+    plan = [(_qq_inbox_path(), "inbox", "user", "qq"),
+            (_qq_outbox_path(), "outbox", "self", "qq")]
+    for path, key, speaker, src in plan:
+        lines, off2 = _qq_take_lines(path, st.get(key, 0))
+        for line in lines:
+            try:
+                d = json.loads(line)
+            except Exception as e:
+                print("[qq-ingest] 坏行跳过：%s" % e)
+                continue
+            txt = (d.get("text") or "").strip()
+            if not txt or mind.card is None:
+                continue
+            if speaker == "user":
+                # 2026-11-12 用户要的分级：私聊全进；群聊只进「跟我有关的」。
+                if d.get("group"):
+                    _nick = ("小鲸鱼", "大肥鱼", "小鲸鱼", "小鲸鱼")
+                    _hit = any(_n in txt for _n in _nick)                         or bool(d.get("quote_from"))                         or any(_n in str(d.get("quote_text") or "") for _n in _nick)
+                    if not _hit:
+                        continue          # 群里的闲话不进卡，只留在 inbox
+                    txt = "[群聊 %s] %s：%s" % (d.get("peer") or "", d.get("sender") or "对方", txt)
+                else:
+                    txt = "[私聊] %s：%s" % (d.get("sender") or "对方", txt)
+            try:
+                mind.card.remember(txt, speaker=speaker, source=src,
+                                   ts=float(d.get("time") or d.get("ts") or time.time()),
+                                   about_uid=str(d.get("peer") or ""))
+                got += 1
+            except Exception as e:
+                print("[qq-ingest] 写卡失败：%s" % e)
+        st[key] = off2
+    _qq_save_state(mind, st)
+    return got
+
+
+def _start_diary_tick(mind, sec=900.0):
+    """到点写日记（2026-11-12 用户要的「每天写日记」）。
+
+    diary.py 自己会看 chatcfg 的 diary.enabled / diary.at、也会看今天写没写，
+    所以这里只负责「定期去问一声」，不重复实现判定。
+    """
+    import subprocess
+
+    root = os.path.dirname(os.path.abspath(__file__))
+    dpath = os.path.join(root, "tools", "diary.py")
+
+    def loop():
+        time.sleep(60.0)
+        while True:
+            try:
+                if os.path.exists(dpath):
+                    r = subprocess.run([sys.executable, "-X", "utf8", dpath],
+                                       cwd=root, timeout=180, capture_output=True)
+                    out = (r.stdout or b"").decode("utf-8", "replace").strip()
+                    if out and ("日记" in out or "写" in out):
+                        print("[diary] " + out.splitlines()[-1][:160])
+                mind._diary_last = time.time()
+            except Exception as e:
+                mind._diary_err = str(e)
+                print("[diary] 跑失败：%s" % e)
+            time.sleep(float(os.environ.get("WHALE_DIARY_SEC") or sec))
+
+    t = threading.Thread(target=loop, name="diary-tick", daemon=True)
+    mind._diary_thread = t
+    t.start()
+    return t
+
+
+def _start_qq_ingest(mind, sec=20.0):
+    def loop():
+        mind._qq_ingest_on = True
+        while True:
+            try:
+                time.sleep(float(os.environ.get("WHALE_QQ_INGEST_SEC") or sec))
+                n = _qq_ingest_once(mind)
+                if n:
+                    print("[qq-ingest] 进卡 %d 条" % n)
+                mind._qq_ingest_last = time.time()
+            except Exception as e:
+                mind._qq_ingest_err = str(e)
+                print("[qq-ingest] 跳失败：%s" % e)
+                time.sleep(10.0)
+    t = threading.Thread(target=loop, name="qq-ingest", daemon=True)
+    mind._qq_ingest_thread = t
+    t.start()
+    return t
+
+
 def _start_boot_check(mind, delay=1.0):
     """启动自检（2026-11-11 稳定性）：起来几秒后自己走一遍「到底能不能用」。
 
@@ -3846,6 +4105,8 @@ def main(argv=None):
     _bt("lease")
     mind = Mind(a.db, lease=lease)
     _bt("mind")
+    _start_qq_ingest(mind)
+    _start_diary_tick(mind)
     _start_boot_check(mind)
     if perf is not None:
         try:

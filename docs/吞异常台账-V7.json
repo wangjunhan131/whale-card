@@ -1,8 +1,8 @@
 {
  "version": 1,
- "generated_at": "2026-11-11 11:41:12",
- "count": 240,
- "scanned_files": 104,
+ "generated_at": "2026-11-13 22:02:50",
+ "count": 238,
+ "scanned_files": 120,
  "counts": {
   "_clean_oss_all.py": 1,
   "anchor.py": 1,
@@ -25,7 +25,7 @@
   "identity.py": 2,
   "impression.py": 1,
   "migration.py": 4,
-  "mind_server.py": 26,
+  "mind_server.py": 25,
   "seal.py": 1,
   "timeline.py": 4,
   "tools/come_back.py": 2,
@@ -39,7 +39,7 @@
   "tools/media_video.py": 1,
   "tools/mine_habits.py": 1,
   "tools/open_console.py": 1,
-  "tools/portable.py": 6,
+  "tools/portable.py": 5,
   "tools/proactive.py": 3,
   "tools/qq_guard.py": 10,
   "tools/qq_memes.py": 2,
@@ -161,7 +161,7 @@
    "exc": "Exception",
    "body": "pass",
    "nth": 1,
-   "line": 1121
+   "line": 1248
   },
   {
    "fp": "d5c2c41d92fd8736",
@@ -170,7 +170,7 @@
    "exc": "Exception",
    "body": "pass",
    "nth": 2,
-   "line": 1138
+   "line": 1265
   },
   {
    "fp": "14309d8ded38f4d7",
@@ -179,7 +179,7 @@
    "exc": "Exception",
    "body": "pass",
    "nth": 3,
-   "line": 1145
+   "line": 1310
   },
   {
    "fp": "980601bcad88c345",
@@ -188,16 +188,7 @@
    "exc": "Exception",
    "body": "pass",
    "nth": 4,
-   "line": 1178
-  },
-  {
-   "fp": "ea4f3bdf6935a469",
-   "file": "card2.py",
-   "func": "MemoryCard.__init__",
-   "exc": "Exception",
-   "body": "pass",
-   "nth": 5,
-   "line": 1201
+   "line": 1333
   },
   {
    "fp": "b00f806f9d48ed4e",
@@ -206,7 +197,7 @@
    "exc": "Exception",
    "body": "pass",
    "nth": 1,
-   "line": 1292
+   "line": 1424
   },
   {
    "fp": "992223272e03a9d6",
@@ -215,7 +206,7 @@
    "exc": "Exception",
    "body": "pass",
    "nth": 1,
-   "line": 1304
+   "line": 1436
   },
   {
    "fp": "b96a510072b6ad64",
@@ -224,7 +215,7 @@
    "exc": "Exception",
    "body": "pass",
    "nth": 1,
-   "line": 1332
+   "line": 1464
   },
   {
    "fp": "77b8dd1994b93174",
@@ -233,7 +224,7 @@
    "exc": "Exception",
    "body": "pass",
    "nth": 1,
-   "line": 1366
+   "line": 1498
   },
   {
    "fp": "f48e04e6ebe2345b",
@@ -242,7 +233,7 @@
    "exc": "Exception",
    "body": "pass",
    "nth": 1,
-   "line": 1563
+   "line": 1698
   },
   {
    "fp": "be0c1fcc710f1c1f",
@@ -251,7 +242,7 @@
    "exc": "Exception",
    "body": "pass",
    "nth": 2,
-   "line": 1597
+   "line": 1732
   },
   {
    "fp": "974e75ea55fd7f28",
@@ -260,7 +251,7 @@
    "exc": "Exception",
    "body": "pass",
    "nth": 3,
-   "line": 1637
+   "line": 1772
   },
   {
    "fp": "7ef3d91315a09a51",
@@ -269,7 +260,7 @@
    "exc": "Exception",
    "body": "pass",
    "nth": 4,
-   "line": 1647
+   "line": 1782
   },
   {
    "fp": "119383343a989ad7",
@@ -278,7 +269,7 @@
    "exc": "Exception",
    "body": "pass",
    "nth": 1,
-   "line": 1668
+   "line": 1804
   },
   {
    "fp": "7fc0029d727fd6d8",
@@ -287,7 +278,7 @@
    "exc": "Exception",
    "body": "pass",
    "nth": 1,
-   "line": 1868
+   "line": 2009
   },
   {
    "fp": "243c84d44079595b",
@@ -296,7 +287,7 @@
    "exc": "Exception",
    "body": "pass",
    "nth": 1,
-   "line": 1979
+   "line": 2120
   },
   {
    "fp": "88e48f77539df803",
@@ -305,7 +296,7 @@
    "exc": "Exception",
    "body": "pass",
    "nth": 1,
-   "line": 2010
+   "line": 2151
   },
   {
    "fp": "64ddb34681dee675",
@@ -314,7 +305,7 @@
    "exc": "Exception",
    "body": "pass",
    "nth": 1,
-   "line": 2047
+   "line": 2188
   },
   {
    "fp": "8b07b4ee313f1255",
@@ -323,7 +314,7 @@
    "exc": "Exception",
    "body": "pass",
    "nth": 1,
-   "line": 2058
+   "line": 2199
   },
   {
    "fp": "d8874581c6fb7278",
@@ -332,7 +323,7 @@
    "exc": "Exception",
    "body": "pass",
    "nth": 1,
-   "line": 2216
+   "line": 2357
   },
   {
    "fp": "3591c3c44c7696c2",
@@ -341,7 +332,7 @@
    "exc": "Exception",
    "body": "pass",
    "nth": 1,
-   "line": 2564
+   "line": 2711
   },
   {
    "fp": "27539f2de0d3eaad",
@@ -350,7 +341,7 @@
    "exc": "Exception",
    "body": "pass",
    "nth": 1,
-   "line": 2956
+   "line": 3112
   },
   {
    "fp": "b17c83523dcd8047",
@@ -359,7 +350,7 @@
    "exc": "Exception",
    "body": "continue",
    "nth": 1,
-   "line": 3000
+   "line": 3156
   },
   {
    "fp": "64cb5faa7a357ab5",
@@ -368,7 +359,7 @@
    "exc": "Exception",
    "body": "pass",
    "nth": 1,
-   "line": 3014
+   "line": 3170
   },
   {
    "fp": "656000ea479e3565",
@@ -377,7 +368,7 @@
    "exc": "Exception",
    "body": "pass",
    "nth": 1,
-   "line": 3065
+   "line": 3221
   },
   {
    "fp": "6737d681a5a2798c",
@@ -386,7 +377,7 @@
    "exc": "Exception",
    "body": "pass",
    "nth": 1,
-   "line": 3111
+   "line": 3267
   },
   {
    "fp": "9b2c345f6362ccb8",
@@ -395,7 +386,7 @@
    "exc": "Exception",
    "body": "pass",
    "nth": 2,
-   "line": 3117
+   "line": 3273
   },
   {
    "fp": "dddbf14ee5e892a6",
@@ -404,7 +395,7 @@
    "exc": "Exception",
    "body": "pass",
    "nth": 3,
-   "line": 3318
+   "line": 3474
   },
   {
    "fp": "2f3f3260ff45b621",
@@ -413,7 +404,7 @@
    "exc": "Exception",
    "body": "pass",
    "nth": 4,
-   "line": 3335
+   "line": 3491
   },
   {
    "fp": "46105b0cb41898d5",
@@ -422,7 +413,7 @@
    "exc": "Exception",
    "body": "pass",
    "nth": 5,
-   "line": 3343
+   "line": 3499
   },
   {
    "fp": "5706d87ebab6522b",
@@ -431,7 +422,7 @@
    "exc": "Exception",
    "body": "continue",
    "nth": 1,
-   "line": 3418
+   "line": 3574
   },
   {
    "fp": "b073a0db8bfc5fab",
@@ -440,7 +431,7 @@
    "exc": "sqlite3.OperationalError",
    "body": "pass",
    "nth": 1,
-   "line": 3730
+   "line": 3886
   },
   {
    "fp": "78a33a493d5baba6",
@@ -449,7 +440,7 @@
    "exc": "sqlite3.OperationalError",
    "body": "pass",
    "nth": 1,
-   "line": 3811
+   "line": 3967
   },
   {
    "fp": "3bb2ed646c60b726",
@@ -458,7 +449,7 @@
    "exc": "sqlite3.OperationalError",
    "body": "pass",
    "nth": 2,
-   "line": 3815
+   "line": 3971
   },
   {
    "fp": "9d7e91b8cd905cb4",
@@ -467,7 +458,7 @@
    "exc": "Exception",
    "body": "pass",
    "nth": 1,
-   "line": 3825
+   "line": 3981
   },
   {
    "fp": "d640707c7124f18d",
@@ -476,7 +467,7 @@
    "exc": "Exception",
    "body": "pass",
    "nth": 1,
-   "line": 4141
+   "line": 4297
   },
   {
    "fp": "bb5560fa39a97ca7",
@@ -485,7 +476,7 @@
    "exc": "Exception",
    "body": "pass",
    "nth": 1,
-   "line": 4197
+   "line": 4353
   },
   {
    "fp": "cce287759f1008fd",
@@ -494,7 +485,7 @@
    "exc": "Exception",
    "body": "pass",
    "nth": 1,
-   "line": 4229
+   "line": 4385
   },
   {
    "fp": "a398680669b39b81",
@@ -503,7 +494,7 @@
    "exc": "Exception",
    "body": "pass",
    "nth": 1,
-   "line": 4260
+   "line": 4416
   },
   {
    "fp": "a959d4c470b5a9a1",
@@ -512,7 +503,7 @@
    "exc": "Exception",
    "body": "pass",
    "nth": 1,
-   "line": 4290
+   "line": 4446
   },
   {
    "fp": "ba45a9335876cfdb",
@@ -521,7 +512,7 @@
    "exc": "Exception",
    "body": "pass",
    "nth": 1,
-   "line": 4368
+   "line": 4524
   },
   {
    "fp": "e9c69adcf4091c7a",
@@ -530,7 +521,7 @@
    "exc": "Exception",
    "body": "pass",
    "nth": 1,
-   "line": 4388
+   "line": 4544
   },
   {
    "fp": "3bbe7bf4179c829e",
@@ -539,7 +530,7 @@
    "exc": "Exception",
    "body": "pass",
    "nth": 1,
-   "line": 4702
+   "line": 4858
   },
   {
    "fp": "82e36f41837cc73a",
@@ -548,7 +539,7 @@
    "exc": "Exception",
    "body": "pass",
    "nth": 1,
-   "line": 5035
+   "line": 5230
   },
   {
    "fp": "25e65eec5384f11f",
@@ -557,7 +548,7 @@
    "exc": "Exception",
    "body": "continue",
    "nth": 1,
-   "line": 5149
+   "line": 5344
   },
   {
    "fp": "e36f88b57eab1d27",
@@ -566,7 +557,7 @@
    "exc": "Exception",
    "body": "pass",
    "nth": 1,
-   "line": 5568
+   "line": 6058
   },
   {
    "fp": "661da8b5a76e534f",
@@ -575,7 +566,16 @@
    "exc": "Exception",
    "body": "pass",
    "nth": 2,
-   "line": 5577
+   "line": 6067
+  },
+  {
+   "fp": "09b116cb0cd3a865",
+   "file": "card2.py",
+   "func": "MemoryCard.recall",
+   "exc": "Exception",
+   "body": "continue",
+   "nth": 1,
+   "line": 6284
   },
   {
    "fp": "4b6c92e521a981be",
@@ -584,7 +584,7 @@
    "exc": "Exception",
    "body": "pass",
    "nth": 1,
-   "line": 5688
+   "line": 6376
   },
   {
    "fp": "92d9468210d4de43",
@@ -593,7 +593,7 @@
    "exc": "Exception",
    "body": "pass",
    "nth": 1,
-   "line": 5742
+   "line": 6430
   },
   {
    "fp": "f71a8a07322af1ab",
@@ -602,7 +602,7 @@
    "exc": "Exception",
    "body": "pass",
    "nth": 1,
-   "line": 6068
+   "line": 6758
   },
   {
    "fp": "cd5995b394f0541d",
@@ -611,7 +611,7 @@
    "exc": "Exception",
    "body": "pass",
    "nth": 1,
-   "line": 6271
+   "line": 6983
   },
   {
    "fp": "28149796d499cc94",
@@ -620,7 +620,7 @@
    "exc": "Exception",
    "body": "pass",
    "nth": 2,
-   "line": 6551
+   "line": 7300
   },
   {
    "fp": "7937cacda4aefd87",
@@ -629,7 +629,7 @@
    "exc": "Exception",
    "body": "pass",
    "nth": 3,
-   "line": 6678
+   "line": 7455
   },
   {
    "fp": "270a31113475243d",
@@ -638,7 +638,7 @@
    "exc": "Exception",
    "body": "pass",
    "nth": 4,
-   "line": 6811
+   "line": 7589
   },
   {
    "fp": "7f7fc5692b6e5b73",
@@ -647,7 +647,7 @@
    "exc": "Exception",
    "body": "pass",
    "nth": 1,
-   "line": 6873
+   "line": 7692
   },
   {
    "fp": "232ebe6f62acebf2",
@@ -656,7 +656,7 @@
    "exc": "Exception",
    "body": "pass",
    "nth": 2,
-   "line": 6877
+   "line": 7696
   },
   {
    "fp": "70d7dbcce9aa106d",
@@ -665,7 +665,7 @@
    "exc": "Exception",
    "body": "pass",
    "nth": 1,
-   "line": 163
+   "line": 169
   },
   {
    "fp": "496bfa008f43306a",
@@ -674,7 +674,7 @@
    "exc": "Exception",
    "body": "pass",
    "nth": 2,
-   "line": 336
+   "line": 351
   },
   {
    "fp": "e14ddffeb05d8183",
@@ -683,7 +683,7 @@
    "exc": "Exception",
    "body": "pass",
    "nth": 3,
-   "line": 351
+   "line": 366
   },
   {
    "fp": "05a0967cb11f3a46",
@@ -692,7 +692,7 @@
    "exc": "Exception",
    "body": "pass",
    "nth": 1,
-   "line": 495
+   "line": 529
   },
   {
    "fp": "4137c68deb3a96d0",
@@ -701,7 +701,7 @@
    "exc": "Exception",
    "body": "pass",
    "nth": 1,
-   "line": 698
+   "line": 732
   },
   {
    "fp": "ea9ed3ed0baeb312",
@@ -737,7 +737,7 @@
    "exc": "(ValueError, OverflowError)",
    "body": "pass",
    "nth": 1,
-   "line": 165
+   "line": 181
   },
   {
    "fp": "002c4ed9d0888295",
@@ -746,7 +746,7 @@
    "exc": "(ValueError, OverflowError)",
    "body": "pass",
    "nth": 1,
-   "line": 318
+   "line": 334
   },
   {
    "fp": "ab70d6483bc01f77",
@@ -1214,7 +1214,7 @@
    "exc": "FileNotFoundError",
    "body": "pass",
    "nth": 1,
-   "line": 915
+   "line": 921
   },
   {
    "fp": "1fefcf06e60697bd",
@@ -1223,7 +1223,7 @@
    "exc": "Exception",
    "body": "pass",
    "nth": 1,
-   "line": 956
+   "line": 962
   },
   {
    "fp": "f9ce50356ebb2c8a",
@@ -1232,7 +1232,7 @@
    "exc": "OSError",
    "body": "continue",
    "nth": 1,
-   "line": 988
+   "line": 994
   },
   {
    "fp": "6b10742fd9f9d7a3",
@@ -1241,7 +1241,7 @@
    "exc": "Exception",
    "body": "continue",
    "nth": 1,
-   "line": 1173
+   "line": 1179
   },
   {
    "fp": "b475ced7ff67f33b",
@@ -1250,7 +1250,7 @@
    "exc": "Exception",
    "body": "pass",
    "nth": 1,
-   "line": 1576
+   "line": 1591
   },
   {
    "fp": "86145fc7ee156e23",
@@ -1322,7 +1322,7 @@
    "exc": "Exception",
    "body": "pass",
    "nth": 1,
-   "line": 242
+   "line": 243
   },
   {
    "fp": "14e4044cbc7d090e",
@@ -1367,7 +1367,7 @@
    "exc": "Exception",
    "body": "pass",
    "nth": 1,
-   "line": 331
+   "line": 487
   },
   {
    "fp": "9fe41e932da40ac0",
@@ -1376,7 +1376,7 @@
    "exc": "Exception",
    "body": "pass",
    "nth": 2,
-   "line": 361
+   "line": 517
   },
   {
    "fp": "bfdc4fbb59f19678",
@@ -1385,7 +1385,7 @@
    "exc": "Exception",
    "body": "pass",
    "nth": 1,
-   "line": 446
+   "line": 603
   },
   {
    "fp": "2b816734fb1fe441",
@@ -1394,7 +1394,7 @@
    "exc": "Exception",
    "body": "pass",
    "nth": 2,
-   "line": 458
+   "line": 624
   },
   {
    "fp": "2895dbd9907142d0",
@@ -1403,16 +1403,7 @@
    "exc": "Exception",
    "body": "pass",
    "nth": 3,
-   "line": 465
-  },
-  {
-   "fp": "c1389afab5aa88c2",
-   "file": "mind_server.py",
-   "func": "Mind.context",
-   "exc": "Exception",
-   "body": "pass",
-   "nth": 1,
-   "line": 521
+   "line": 632
   },
   {
    "fp": "ec210671bd490522",
@@ -1421,7 +1412,7 @@
    "exc": "Exception",
    "body": "pass",
    "nth": 1,
-   "line": 745
+   "line": 946
   },
   {
    "fp": "2d26b53faac380cd",
@@ -1430,7 +1421,7 @@
    "exc": "OSError",
    "body": "pass",
    "nth": 1,
-   "line": 845
+   "line": 1046
   },
   {
    "fp": "a705b87ee38eb998",
@@ -1439,7 +1430,7 @@
    "exc": "Exception",
    "body": "pass",
    "nth": 1,
-   "line": 893
+   "line": 1094
   },
   {
    "fp": "904e3bc4564ef721",
@@ -1448,7 +1439,7 @@
    "exc": "Exception",
    "body": "pass",
    "nth": 1,
-   "line": 1134
+   "line": 1363
   },
   {
    "fp": "5bfd1145628929e5",
@@ -1457,7 +1448,7 @@
    "exc": "Exception",
    "body": "pass",
    "nth": 2,
-   "line": 1315
+   "line": 1544
   },
   {
    "fp": "e4df11001aa2021a",
@@ -1466,7 +1457,7 @@
    "exc": "Exception",
    "body": "pass",
    "nth": 3,
-   "line": 1548
+   "line": 1790
   },
   {
    "fp": "7fe5aa5bd683b6db",
@@ -1475,7 +1466,7 @@
    "exc": "Exception",
    "body": "pass",
    "nth": 4,
-   "line": 1884
+   "line": 2290
   },
   {
    "fp": "d2f7b3bc90a11c9f",
@@ -1484,7 +1475,7 @@
    "exc": "Exception",
    "body": "pass",
    "nth": 5,
-   "line": 1962
+   "line": 2368
   },
   {
    "fp": "6713b62b0a2c8ed8",
@@ -1493,7 +1484,7 @@
    "exc": "Exception",
    "body": "pass",
    "nth": 6,
-   "line": 2000
+   "line": 2406
   },
   {
    "fp": "a77aa69e25b0b274",
@@ -1502,7 +1493,7 @@
    "exc": "Exception",
    "body": "pass",
    "nth": 1,
-   "line": 2402
+   "line": 2831
   },
   {
    "fp": "d3000dd50bb9a946",
@@ -1511,7 +1502,7 @@
    "exc": "Exception",
    "body": "pass",
    "nth": 1,
-   "line": 2456
+   "line": 2885
   },
   {
    "fp": "17e0508987cffab4",
@@ -1520,7 +1511,7 @@
    "exc": "Exception",
    "body": "pass",
    "nth": 1,
-   "line": 2484
+   "line": 2913
   },
   {
    "fp": "1107ee47dcda9ca8",
@@ -1529,7 +1520,7 @@
    "exc": "Exception",
    "body": "pass",
    "nth": 1,
-   "line": 2539
+   "line": 2968
   },
   {
    "fp": "8a90220da586d3c7",
@@ -1538,7 +1529,7 @@
    "exc": "Exception",
    "body": "continue",
    "nth": 1,
-   "line": 2551
+   "line": 2980
   },
   {
    "fp": "fdce066faa137127",
@@ -1547,7 +1538,7 @@
    "exc": "Exception",
    "body": "pass",
    "nth": 1,
-   "line": 2571
+   "line": 3000
   },
   {
    "fp": "1c6a70175df83424",
@@ -1556,7 +1547,7 @@
    "exc": "Exception",
    "body": "pass",
    "nth": 2,
-   "line": 2576
+   "line": 3005
   },
   {
    "fp": "a64d783552f30027",
@@ -1565,7 +1556,7 @@
    "exc": "Exception",
    "body": "pass",
    "nth": 1,
-   "line": 2886
+   "line": 3316
   },
   {
    "fp": "f88b87cf832134fc",
@@ -1574,7 +1565,7 @@
    "exc": "Exception",
    "body": "pass",
    "nth": 1,
-   "line": 2908
+   "line": 3351
   },
   {
    "fp": "cb245615eb8b819c",
@@ -1583,7 +1574,7 @@
    "exc": "Exception",
    "body": "pass",
    "nth": 1,
-   "line": 2948
+   "line": 3391
   },
   {
    "fp": "cb5f25371a6579b0",
@@ -1592,7 +1583,7 @@
    "exc": "Exception",
    "body": "pass",
    "nth": 1,
-   "line": 3290
+   "line": 4190
   },
   {
    "fp": "be67baf102e3334d",
@@ -1655,7 +1646,7 @@
    "exc": "Exception",
    "body": "pass",
    "nth": 1,
-   "line": 269
+   "line": 332
   },
   {
    "fp": "c54f4157ac76d22f",
@@ -1847,22 +1838,13 @@
    "line": 30
   },
   {
-   "fp": "5b24a3d6c5422be3",
-   "file": "tools/portable.py",
-   "func": "_service_running",
-   "exc": "Exception",
-   "body": "pass",
-   "nth": 1,
-   "line": 119
-  },
-  {
    "fp": "2c721ddffa98801b",
    "file": "tools/portable.py",
    "func": "cmd_plan",
    "exc": "ValueError",
    "body": "pass",
    "nth": 1,
-   "line": 314
+   "line": 330
   },
   {
    "fp": "07d0c99bdf667c13",
@@ -1871,7 +1853,7 @@
    "exc": "Exception",
    "body": "pass",
    "nth": 1,
-   "line": 331
+   "line": 347
   },
   {
    "fp": "59c2d4ae8f7c1586",
@@ -1880,7 +1862,7 @@
    "exc": "Exception",
    "body": "pass",
    "nth": 1,
-   "line": 744
+   "line": 760
   },
   {
    "fp": "5aadf738748dd7fc",
@@ -1889,7 +1871,7 @@
    "exc": "OSError",
    "body": "pass",
    "nth": 1,
-   "line": 1316
+   "line": 1346
   },
   {
    "fp": "4b1df337dfddd69d",
@@ -1898,7 +1880,7 @@
    "exc": "Exception",
    "body": "pass",
    "nth": 1,
-   "line": 1374
+   "line": 1404
   },
   {
    "fp": "c01687ed18ef0797",
@@ -2123,7 +2105,7 @@
    "exc": "Exception",
    "body": "pass",
    "nth": 1,
-   "line": 208
+   "line": 249
   },
   {
    "fp": "c6d683a383eba7c4",
@@ -2132,7 +2114,7 @@
    "exc": "Exception",
    "body": "pass",
    "nth": 2,
-   "line": 212
+   "line": 253
   },
   {
    "fp": "689bd28385a35598",
@@ -2141,7 +2123,7 @@
    "exc": "Exception",
    "body": "pass",
    "nth": 3,
-   "line": 254
+   "line": 295
   },
   {
    "fp": "0618c6cd3bb0d558",

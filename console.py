@@ -2787,15 +2787,37 @@ function diskPost2(path){
     })
     .catch(function(e){ msg.textContent = "请求失败：" + e; });
 }
-function retirePost(on){
+function retirePost(on, path){
   var msg = $("#diskMsg");
-  if(msg) msg.textContent = on ? "正在把这张卡标记成退役…" : "正在解除退役…";
-  fetch("/disks/retire", {method:"POST", headers:{"Content-Type":"application/json","X-Whale-Token":WHALE_TOKEN},
-        body: JSON.stringify({on:!!on})})
-    .then(function(r){ return r.json(); })
-    .then(function(j){
-      if(msg) msg.textContent = (j && (j.how || j.why)) || (on ? "已退役" : "已解除");
-      setTimeout(function(){ location.reload(); }, 1200);
+  if(msg) msg.textContent = on ? "正在把这张卡搬到盘上并退役…（几十秒，别关页面）" : "正在解除退役…";
+  var url = "/disks/retire", body = {on:!!on};
+  if(on && path){
+    // 2026-11-13：带卡出门必须「搬 + 退役」一起做完。
+    // 以前只发 /disks/retire，盘上还是旧记忆 —— 人以为带走了，其实没带。
+    url = "/disks/carry";
+    body = {path:path, confirm:true, retire:true};
+  }
+  fetch(url, {method:"POST", headers:{"Content-Type":"application/json","X-Whale-Token":WHALE_TOKEN},
+        body: JSON.stringify(body)})
+    .then(function(r){ return r.json().then(function(j){ return {code:r.status, j:j||{}}; }); })
+    .then(function(o){
+      var j = o.j, code = o.code;
+      if(on && path && (code === 404 || (j && j.code === "unknown_path"))){
+        // 后端还是老版本：退回到「只标退役」，但要明确告诉人数据没搬
+        if(msg) msg.textContent = "这台后端还没有 /disks/carry，只做了退役 —— 数据没搬！";
+        return fetch("/disks/retire", {method:"POST", headers:{"Content-Type":"application/json","X-Whale-Token":WHALE_TOKEN},
+              body: JSON.stringify({on:true})})
+          .then(function(r){ return r.json(); })
+          .then(function(){ setTimeout(function(){ location.reload(); }, 1500); });
+      }
+      if(msg){
+        if(j && j.ok){
+          msg.textContent = j.how || ("已搬到 " + (j.target||"") + "，拷贝 " + (j.files_copied||0) + " 个文件");
+        } else {
+          msg.textContent = "没做成：" + ((j && (j.why || j.code)) || code);
+        }
+      }
+      setTimeout(function(){ location.reload(); }, 1500);
     })
     .catch(function(e){ if(msg) msg.textContent = "失败：" + e; });
 }
@@ -2812,12 +2834,16 @@ function bindDiskButtons(){
     diskPost("switch", pick());
   };
   if(bR) bR.onclick = function(){
-    if(!confirm("带卡出门？\n\n做完之后【本机这份只读】，等于我在这儿暂时不在线。\n"+
-                "然后把 U 盘插到新电脑，双击一次「一键落地」就接手。"+
-                "\n\n回来时再双击一次，就交接回来。")) return;
-    retirePost(true);
+    var tgt = pick();
+    if(!tgt){ alert("先在上面选一块盘：整张卡会镜像到那块盘的根目录。"); return; }
+    if(!confirm("带卡出门？\n\n会把整张卡（含记忆库）镜像到："+tgt+
+                "\n镜像完【本机这份只读】，等于我在这儿暂时不在线。\n"+
+                "然后把盘插到新电脑，双击一次「一键部署」就接手。"+
+                "\n\n回来时双击一次「接回来」。"+
+                "\n\n这个动作要几十秒，期间别关页面。")) return;
+    retirePost(true, tgt);
   };
-  if(bU) bU.onclick = function(){ retirePost(false); };
+  if(bU) bU.onclick = function(){ retirePost(false, ""); };
 }
 function fmtBps(v){
   v=v||0;
